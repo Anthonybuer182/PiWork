@@ -13,6 +13,7 @@
  */
 import type { DayNote, Item, RunRecord } from './types.js';
 import { expandOccurrences } from './recur.js';
+import { completionKey } from './triggers.js';
 import { dayEnd, dayKey, dayStart, toLocalIso } from './time.js';
 
 /** One occurrence of an item, as it appears on a day page. */
@@ -24,6 +25,8 @@ export interface DayEntry {
   /** Absent for an item with no time. */
   at?: string;
   repeat: boolean;
+  /** Absent = a global item. The page shows it; the filter decides. */
+  workspaceId?: string;
 }
 
 export interface DayPage {
@@ -35,7 +38,14 @@ export interface DayPage {
   done: DayEntry[];
   /** Firings this day that never happened, still awaiting a decision. */
   missed: RunRecord[];
-  note?: DayNote;
+  /**
+   * What was written that day, per scope: `''` for global, else a workspace id.
+   *
+   * Kept per scope rather than merged: two projects' notes for the same date
+   * are different sentences about different work, and overwriting one with the
+   * other would be silent data loss.
+   */
+  notes: Record<string, DayNote>;
 }
 
 const MISSED_STATUSES = new Set(['missed', 'undelivered']);
@@ -54,7 +64,7 @@ const MISSED_STATUSES = new Set(['missed', 'undelivered']);
 export function buildDayPage(
   items: Item[],
   runs: RunRecord[],
-  notes: Record<string, DayNote>,
+  notes: Record<string, Record<string, DayNote>>,
   completedAt: Record<string, string>,
   day: string,
 ): DayPage {
@@ -77,6 +87,7 @@ export function buildDayPage(
         key: occ.key,
         at: occ.at ? toLocalIso(occ.at) : undefined,
         repeat: repeats,
+        workspaceId: item.workspaceId,
       };
       seen.add(`${item.id}|${occ.key}`);
       if (item.completions.includes(occ.key)) done.push(entry);
@@ -87,10 +98,16 @@ export function buildDayPage(
     // of one is only visible through its recorded completion timestamp.
     if (!item.start) {
       for (const key of item.completions) {
-        const at = completedAt[key];
+        const at = completedAt[completionKey(item.id, key)];
         if (!at || dayKey(new Date(at)) !== day) continue;
         if (seen.has(`${item.id}|${key}`)) continue;
-        done.push({ itemId: item.id, title: item.title, key, repeat: false });
+        done.push({
+          itemId: item.id,
+          title: item.title,
+          key,
+          repeat: false,
+          workspaceId: item.workspaceId,
+        });
       }
     }
   }
@@ -105,8 +122,7 @@ export function buildDayPage(
   planned.sort(byTime);
   done.sort(byTime);
 
-  const note = notes[day];
-  return { day, planned, done, missed, ...(note ? { note } : {}) };
+  return { day, planned, done, missed, notes: notes[day] ?? {} };
 }
 
 /** Appearance of a day in the month grid: how much happened on it. */
@@ -128,7 +144,9 @@ export function dayMark(page: DayPage): DayMark {
   return {
     planCount: page.planned.length,
     doneCount: page.done.length,
-    hasNote: Boolean(page.note?.text?.trim()),
+    // Any scope: a day counts as "written about" if any project's note for it
+    // has content. The month grid asks "is there something here", not "whose".
+    hasNote: Object.values(page.notes).some((n) => Boolean(n.text?.trim())),
     missedCount: page.missed.length,
   };
 }

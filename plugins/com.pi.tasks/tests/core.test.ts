@@ -19,6 +19,8 @@ import { dueRuns, runKey, nextTriggerAt, nextFireAcrossItems, currentOccurrenceK
 import { parseWhen, normalizeRelative } from '../src/core/parse-when.js';
 import { toLocalIso, dayKey, dayStart, formatOffset } from '../src/core/time.js';
 import { buildDayPage, dayMark } from '../src/core/day.js';
+import { migrateState, migrateCompletions, STATE_VERSION } from '../src/core/migrate.js';
+import { completionKey } from '../src/core/triggers.js';
 import type { Item, RunRecord, Trigger } from '../src/core/types.js';
 
 // ── fixtures ──
@@ -488,7 +490,7 @@ test('an undated to-do finished today shows up on today', () => {
   // without `completedAt` the day page would silently omit every undated item
   // the user ticked off, which is exactly what this view exists to show.
   const items = [item({ id: 'a', title: '读书', completions: ['once'] })];
-  const completedAt = { once: toLocalIso(at(2026, 9, 30, 21, 30)) };
+  const completedAt = { [completionKey('a', 'once')]: toLocalIso(at(2026, 9, 30, 21, 30)) };
 
   assert.deepEqual(
     buildDayPage(items, [], {}, completedAt, '2026-09-30').done.map((e) => e.title),
@@ -514,15 +516,42 @@ test('a day page lists the firings that were missed that day', () => {
 });
 
 test('a day page carries the note and marks the day', () => {
-  const notes = { '2026-09-30': { text: '今天还行', updatedAt: toLocalIso(at(2026, 9, 30, 22, 0)) } };
+  const notes = {
+    '2026-09-30': { '': { text: '今天还行', updatedAt: toLocalIso(at(2026, 9, 30, 22, 0)) } },
+  };
   const page = buildDayPage([], [], notes, {}, '2026-09-30');
-  assert.equal(page.note?.text, '今天还行');
+  assert.equal(page.notes['']?.text, '今天还行');
 
   const mark = dayMark(page);
   assert.equal(mark.hasNote, true, 'a day with writing must be findable again');
   // Whitespace is not writing.
-  const blank = dayMark(buildDayPage([], [], { '2026-09-30': { text: '   ', updatedAt: '' } }, {}, '2026-09-30'));
+  const blank = dayMark(
+    buildDayPage([], [], { '2026-09-30': { '': { text: '   ', updatedAt: '' } } }, {}, '2026-09-30'),
+  );
   assert.equal(blank.hasNote, false);
+});
+
+test('a day page keeps each workspace note apart, and marks the day if any has content', () => {
+  const notes = {
+    '2026-09-30': {
+      '': { text: '交房租', updatedAt: '' },
+      '/w/a': { text: '改了登录页', updatedAt: '' },
+    },
+  };
+  const page = buildDayPage([], [], notes, {}, '2026-09-30');
+  assert.equal(page.notes['']?.text, '交房租');
+  assert.equal(page.notes['/w/a']?.text, '改了登录页');
+  assert.equal(dayMark(page).hasNote, true, 'any scope counts as "written about"');
+
+  // All-blank notes are not "written about" — the marker means something.
+  const blank = buildDayPage(
+    [],
+    [],
+    { '2026-09-30': { '': { text: ' ', updatedAt: '' }, '/w/a': { text: '\n', updatedAt: '' } } },
+    {},
+    '2026-09-30',
+  );
+  assert.equal(dayMark(blank).hasNote, false);
 });
 
 test('the day marker counts plans, completions and misses', () => {
@@ -547,4 +576,59 @@ test('trigger offsets read as a person would say them', () => {
   assert.equal(formatOffset(-60), '提前 1 小时');
   assert.equal(formatOffset(-90), '提前 1 小时 30 分钟');
   assert.equal(formatOffset(30), '之后 30 分钟');
+});
+
+// ── migrating pre-workspace state ──
+
+test('v1 notes become the global scope, and the upgrade is recorded', () => {
+  const saved = {
+    items: [item({ id: 'a', title: '旧待办' })],
+    runs: [],
+    notes: { '2026-09-30': { text: '以前写的', updatedAt: '2026-09-30T22:00:00+08:00' } },
+    completedAt: {},
+  };
+  const { state, changed } = migrateState(saved);
+  assert.equal(changed, true);
+  assert.equal(state.version, STATE_VERSION);
+  // The plugin could not see a workspace before, so guessing one would be
+  // inventing history. Global is the only claim the old data supports.
+  assert.equal(state.notes['2026-09-30']?.['']?.text, '以前写的');
+  assert.equal(state.items[0]?.workspaceId, undefined, 'old items stay global');
+});
+
+test('migrating an already-migrated store changes nothing', () => {
+  const { state } = migrateState({
+    notes: { '2026-09-30': { '': { text: 'x', updatedAt: '' } } },
+    items: [],
+    runs: [],
+    completedAt: {},
+  });
+  const again = migrateState(state);
+  assert.equal(again.changed, false, 'a second load must not rewrite the store');
+  assert.equal(again.state.notes['2026-09-30']?.['']?.text, 'x');
+});
+
+test('completion timestamps move onto their item, unambiguously', () => {
+  const items = [item({ id: 'a', title: '读书', completions: ['once'] })];
+  const next = migrateCompletions(items, { once: '2026-09-30T21:30:00+08:00' });
+  assert.deepEqual(next, { 'a|once': '2026-09-30T21:30:00+08:00' });
+});
+
+test('an old completion key nobody can claim alone is dropped, not guessed', () => {
+  // Two undated to-dos both live on the constant key `'once'` — the old key
+  // cannot say which one that timestamp belonged to.
+  const items = [
+    item({ id: 'a', title: '甲', completions: ['once'] }),
+    item({ id: 'b', title: '乙', completions: ['once'] }),
+  ];
+  assert.deepEqual(migrateCompletions(items, { once: '2026-09-30T21:30:00+08:00' }), {});
+  // The items themselves are untouched — done state lives in `completions`.
+  assert.deepEqual(items[0]?.completions, ['once']);
+});
+
+test('an empty store migrates to a usable empty state', () => {
+  const { state } = migrateState(undefined);
+  assert.deepEqual(state.items, []);
+  assert.deepEqual(state.notes, {});
+  assert.equal(state.version, STATE_VERSION);
 });

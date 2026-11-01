@@ -16,6 +16,17 @@ export interface PiSDK {
   emit(event: string, data?: unknown): void;
   /** Backend → UI events. */
   onMessage(cb: (payload: PluginMessage) => void): void;
+  /**
+   * The workspace this panel is showing — `Workspace.id`, an absolute path —
+   * or null when the shell is not in one.
+   *
+   * Delivered by the host straight to the page (protocol 7), not relayed
+   * through the backend: the backend is one process shared by every window, so
+   * it cannot say which project *this* panel is serving.
+   */
+  workspace?: string | null;
+  /** Subscribe to workspace changes. Replays the current value immediately. */
+  onWorkspace?(cb: (workspaceId: string | null) => void): void;
 }
 
 export interface PluginMessage {

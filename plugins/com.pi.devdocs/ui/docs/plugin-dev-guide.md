@@ -550,6 +550,17 @@ agent **能**调你的工具（清单里注册过）是一回事，**想得到**
 
 **面板 id 不用你管。** 宿主加载页面时把"你是哪块面板"注进去，`piSDK` 自动盖在每条消息上。一个插件有多块面板时，后端天然分得清是谁在说话。
 
+### 面板属于哪个工作区：`piSDK.workspace`
+
+```js
+const ws = piSDK.workspace;           // 绝对路径，或 null
+piSDK.onWorkspace((id) => { ... });   // 用户切换工作区时再触发；订阅时立刻回放当前值
+```
+
+为什么要专门给一条通道：**后端是一个进程，服务所有窗口**。如果把工作区当成后端的模块变量记下来，就成了"最后打开面板的那个窗口说了算"——两个窗口开着不同项目时会互相覆盖。工作区属于**视图**，所以它直接推到页面，不经过后端。协议 7 起可用；老宿主上这两个接口是 `undefined`，按"没有工作区"处理即可。
+
+同理，工具调用里的 `call.workspaceId` 是**调用方会话**所属的工作区，宿主解析不出来时为空——空就是"不知道"，别拿它去猜成"当前窗口的"。
+
 ### 对不上会报错，不会静默
 
 | 情形 | 结果 |
@@ -962,6 +973,50 @@ node scripts/build-market.mjs --out ./dist-market
 
 **`description` 写一句话就够**：它每次对话都进上下文，是触发线（"是什么、什么时候调"），不是说明书。操作细节、顺序、坑，写进你的 `PLUGIN.md`——那里按需加载，不占常驻成本。
 
+#### `contract` — 工具能力契约（可选，协议 6）
+
+工具除了长什么样，还要告诉模型**边界**：它能做什么、明确不能做什么、结果最多多大。这些写不进 JSON Schema，写进 `contract`：
+
+```json
+{
+  "tools": [{
+    "name": "query_orders",
+    "description": "Query orders by status",
+    "readOnly": true,
+    "inputSchema": { "type": "object", "properties": { "status": { "type": "string" } }, "required": ["status"] },
+    "contract": {
+      "domain": "orders",
+      "summary": "Query orders by status; returns a bounded page of rows.",
+      "guidelines": [
+        "Call this instead of reading the orders spreadsheet directly."
+      ],
+      "limits": { "maxOutputChars": 20000, "cursorParam": "offset" },
+      "unsupported": [
+        { "operation": "writing or cancelling orders", "alternativeTool": "order_update" }
+      ]
+    }
+  }]
+}
+```
+
+| 字段 | 作用 |
+|---|---|
+| `domain` | 粗粒度领域，用于分组和日志，如 `office` / `browser` / `orders` |
+| `summary` | 一行摘要，进系统提示的 Available tools；不写就从 `description` 第一行推导 |
+| `guidelines` | 追加到系统提示 Guidelines 的短条目，写"什么时候用/别用" |
+| `limits.maxOutputChars` | 返回给模型的文本上限，默认 **50,000 字符** |
+| `limits.maxOutputLines` | 行数上限，默认 **2,000 行** |
+| `limits.cursorParam` | 分页参数名；截断提示会告诉模型传这个参数继续 |
+| `unsupported` | 明确不做的操作。每条会生成一条「不要用它做 X」的提示；有替代工具就写 `alternativeTool` |
+| `requiresModel.input` | 结果依赖的模型能力；`"image"` 表示结果可能含图片，文本模型看不到 |
+
+约定：
+
+- **契约是提示，不是硬拦截。** `unsupported` 让模型提前知道边界，避免退化成 shell/裸改 XML；真正的校验仍由工具自己负责。
+- **只截断返回给模型的文本**，不动 `details`、卡片或插件状态。超限时宿主会在末尾追加 `[output truncated: ...]`，有 `cursorParam` 就提示模型继续取。
+- **可选、向后兼容。** 不写 `contract` 的插件照常加载：宿主会从 `description` 推一行摘要并套默认上限。协议 6 只是加了字段，最低支持版本仍是 3。
+- 第三方插件声明 `apiVersion: 6` 表示"我知道契约"；声明 5 也能在支持契约的宿主上加载，只是新宿主的契约特性用不上。
+
 ### contributes.commands — 斜杠命令
 
 ```json
@@ -990,7 +1045,7 @@ node scripts/build-market.mjs --out ./dist-market
 
 `type` 填**工具名**。声明后，工具结果里的 `card`（声明式 UI 树：`Column` / `Row` / `Card` / `Text` / `Badge` / `KeyValue` / `List` / `Button` / `Input` / `Image` / `Separator` / `Spinner` / `EmptyState`）由宿主渲染进对话，工具运行中还会把参数实时渲染成「生成中」卡片（`streaming: false` 可关闭）。卡片里的 Button / Input 是**活的**：用户点击/回车，事件带着节点上声明的 `eventId` 回到后端的 `onCardEvent`。旧版客户端或没实现 `onCardEvent` 的后端，按钮退化成展示——不会坏，只是不动。
 
-**领域惯例：你工具的产出物，就用你自己的卡片展示。** 事项插件的条目卡片、文件查看器的「文档已更新」卡片（office_edit 保存成功后返回：文件名 + 格式徽章 + 「在查看器中打开」按钮）都是这么做。把上下文（如文件路径）放进按钮的 `props`——点击时它作为 `payload` 回到 `onCardEvent`，这样对话里堆了多少张卡片，每张打开的都还是它自己那份产出物。
+**领域惯例：你工具的产出物，就用你自己的卡片展示。** 日程本插件的条目卡片、文件查看器的「文档已更新」卡片（office_edit 保存成功后返回：文件名 + 格式徽章 + 「在查看器中打开」按钮）都是这么做。把上下文（如文件路径）放进按钮的 `props`——点击时它作为 `payload` 回到 `onCardEvent`，这样对话里堆了多少张卡片，每张打开的都还是它自己那份产出物。
 
 ### contributes.filePreview — 文件树路由
 
@@ -1016,6 +1071,7 @@ node scripts/build-market.mjs --out ./dist-market
 - [ ] 带 `PLUGIN.md`，`description` 写的是"用户会说什么"
 - [ ] 工具名带稳定前缀，`description` 一句话、写"什么时候调"
 - [ ] `readOnly` 如实声明
+- [ ] 工具边界写进 `contract`（尤其是"不支持什么、别用什么替代"），输出上限按需收紧
 - [ ] 权限最小化：只声明实际需要的；要用户选文件的地方用了 `dialog.*`
 - [ ] 错误处理：能力调用可能失败，catch 并在面板中显示；工具返回值里把"不支持、别重试"说清楚
 - [ ] 有产出物的工具（创建/修改文件、草稿等）返回声明式卡片，让产出物在对话里可见、可操作

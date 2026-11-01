@@ -47,9 +47,16 @@ select { cursor: pointer; }
 .app { display: flex; flex-direction: column; height: 100%; }
 
 /* ── header ── */
+/*
+ * The panel can be maximised to the whole window. A 1900px-wide text field or
+ * to-do row is not "more room", it is unreadable — so the content column keeps
+ * a readable width and centres itself, while the rules and the editor's top
+ * border still span the full pane. At side-panel widths this is a no-op.
+ */
 .hd {
   flex-shrink: 0; border-bottom: 1px solid hsl(var(--border, 218 14% 20%));
-  padding: 10px 12px 8px; display: flex; flex-direction: column; gap: 8px;
+  padding: 10px max(12px, calc((100% - 800px) / 2)) 8px;
+  display: flex; flex-direction: column; gap: 8px;
 }
 .hd-row { display: flex; align-items: center; gap: 6px; }
 .tabs { display: flex; gap: 2px; background: hsl(var(--muted, 222 16% 14%)); border-radius: 7px; padding: 2px; }
@@ -82,7 +89,10 @@ select { cursor: pointer; }
 .caveat b { font-weight: 600; color: hsl(var(--secondary-foreground, 220 21% 92%)); }
 
 /* ── body ── */
-.body { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 12px 20px; }
+.body {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 8px max(12px, calc((100% - 800px) / 2)) 20px;
+}
 
 .group-hd {
   display: flex; align-items: center; gap: 8px;
@@ -122,30 +132,129 @@ select { cursor: pointer; }
 }
 .note { font-size: 12px; color: hsl(var(--muted-foreground, 217 9% 59%)); margin-top: 2px; white-space: pre-wrap; }
 
+/* Whose item this is, when it is not the current project's. Deliberately
+   quieter than the title — it is a label, not content. */
+.ws-badge {
+  margin-left: 6px; padding: 0 5px; border-radius: 4px;
+  border: 1px solid hsl(var(--border, 220 14% 27%));
+  color: hsl(var(--muted-foreground, 217 9% 59%));
+  font-size: 10px; line-height: 15px; font-weight: 400; vertical-align: 1px;
+  white-space: nowrap;
+}
+
+/* ── workspace filter ── */
+.scope-row { display: flex; align-items: center; gap: 6px; padding: 2px 0 8px; }
+.scope-label {
+  font-size: 11.5px; color: hsl(var(--muted-foreground, 217 9% 59%));
+  margin-right: 1px; user-select: none;
+}
+.scope-chip {
+  padding: 1px 10px; border-radius: 999px; cursor: pointer;
+  border: 1px solid hsl(var(--border, 220 14% 27%));
+  background: transparent; color: hsl(var(--muted-foreground, 217 9% 59%));
+  font-size: 12px; line-height: 20px; font-family: inherit;
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.scope-chip[data-on="true"] {
+  background: hsl(var(--secondary, 221 19% 17%));
+  border-color: hsl(var(--secondary, 221 19% 17%));
+  color: hsl(var(--secondary-foreground, 220 21% 92%));
+}
+.scope-chip:disabled { opacity: .4; cursor: default; }
+
 .empty { text-align: center; color: hsl(var(--muted-foreground, 217 9% 59%)); padding: 40px 20px; font-size: 12.5px; }
 
-/* ── month grid ── */
-.month-hd { display: flex; align-items: center; gap: 8px; padding: 4px 2px 10px; }
-.month-hd .label { font-size: 14px; font-weight: 600; }
-.grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; }
+/* ── calendar ── */
+/* The panel can be maximised to the whole window, and a 7-column grid stretched
+   across 1900px reads as empty tiles rather than a calendar. The grid keeps a
+   calendar's proportions and centres itself instead. */
+.month-hd { display: flex; align-items: center; gap: 6px; padding: 4px 2px 10px; max-width: 680px; margin: 0 auto; }
+.month-hd .label { font-size: 14px; font-weight: 600; margin-right: 2px; }
+
+.mode-tabs { display: flex; gap: 2px; background: hsl(var(--muted, 222 16% 14%)); border-radius: 6px; padding: 2px; }
+.mode-tab { padding: 2px 10px; border-radius: 4px; font-size: 11.5px; color: hsl(var(--muted-foreground, 217 9% 59%)); }
+.mode-tab[data-on="true"] { background: hsl(var(--card, 222 15% 11%)); color: hsl(var(--foreground, 220 21% 92%)); }
+
+.grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; max-width: 680px; margin: 0 auto; }
 .dow { text-align: center; font-size: 11px; color: hsl(var(--muted-foreground, 217 9% 59%)); padding: 4px 0; }
+
+/* A row height, not a square aspect ratio: square cells turn a maximised
+   panel's month into 270px-tall boxes and push the day list off screen. */
 .cell {
-  position: relative; aspect-ratio: 1 / 1; border-radius: 6px;
-  display: flex; flex-direction: column; align-items: center; justify-content: center;
-  gap: 2px; font-size: 12px; border: 1px solid transparent;
+  position: relative; border-radius: 6px; padding: 3px 4px 4px; min-height: 76px;
+  display: flex; flex-direction: column; gap: 1px; align-items: stretch;
+  text-align: left; border: 1px solid transparent; overflow: hidden;
 }
 .cell:hover { background: hsl(var(--accent, 221 19% 17%)); }
-.cell[data-out="true"] { color: hsl(var(--muted-foreground, 217 9% 59%)); opacity: .45; }
-.cell[data-today="true"] { border-color: hsl(var(--primary, 218 100% 65%)); font-weight: 600; }
+.cell[data-out="true"] { opacity: .42; }
 .cell[data-sel="true"] { background: hsl(var(--accent, 221 19% 17%)); border-color: hsl(var(--border, 218 14% 20%)); }
-.cell .dots { display: flex; gap: 2px; height: 5px; align-items: center; }
-.cell .dot { width: 4px; height: 4px; border-radius: 50%; background: hsl(var(--primary, 218 100% 65%)); }
-.cell .dot.done { background: hsl(var(--muted-foreground, 217 9% 59%)); }
+/* Listed after the selected-cell rule on purpose: today keeps its ring even
+   while it is the selected day. */
+.cell[data-today="true"] { border-color: hsl(var(--primary, 218 100% 65%)); }
+.cell[data-today="true"] .dnum { color: hsl(var(--primary, 218 100% 65%)); font-weight: 700; }
+.dnum { font-size: 11.5px; line-height: 16px; font-weight: 500; }
 /* A day you wrote about is worth finding again even if nothing was planned. */
-.cell[data-note="true"]::after {
-  content: ''; position: absolute; bottom: 3px;
-  width: 13px; height: 1.5px; border-radius: 1px; background: hsl(var(--muted-foreground, 217 9% 59%));
+.cell[data-note="true"] .dnum::after {
+  content: ''; display: inline-block; width: 4px; height: 4px; border-radius: 50%;
+  margin-left: 4px; vertical-align: 1px; background: hsl(var(--muted-foreground, 217 9% 59%));
 }
+
+/* The selected day's list sits under the grid at the grid's own width. */
+.cal-detail { max-width: 680px; margin: 0 auto; }
+
+.evs { display: flex; flex-direction: column; gap: 1px; overflow: hidden; }
+.ev {
+  display: flex; gap: 3px; align-items: baseline; padding: 0 2px; border-radius: 3px;
+  font-size: 10.5px; line-height: 14px; white-space: nowrap; overflow: hidden;
+  background: hsl(var(--secondary, 221 19% 17%)); color: hsl(var(--secondary-foreground, 220 21% 92%));
+}
+.ev-t { flex-shrink: 0; opacity: .65; font-variant-numeric: tabular-nums; }
+.ev-x { overflow: hidden; text-overflow: ellipsis; }
+.ev[data-done="true"] { opacity: .45; text-decoration: line-through; }
+.ev-more { background: transparent; color: hsl(var(--muted-foreground, 217 9% 59%)); font-size: 10px; }
+
+/* ── week: seven stacks, no hour axis ── */
+.week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; max-width: 680px; margin: 0 auto; align-items: start; }
+.wk-col { display: flex; flex-direction: column; gap: 4px; min-height: 132px; border-radius: 6px; padding: 4px; }
+.wk-col:hover { background: hsl(var(--muted, 220 15% 12%)); }
+.wk-hd {
+  display: flex; flex-direction: column; align-items: center; gap: 1px;
+  padding: 3px 0; border-radius: 5px; border: 1px solid transparent;
+}
+.wk-dow { font-size: 10.5px; color: hsl(var(--muted-foreground, 217 9% 59%)); }
+.wk-dnum { font-size: 13px; }
+.wk-hd[data-today="true"] .wk-dnum { color: hsl(var(--primary, 218 100% 65%)); font-weight: 700; }
+.wk-hd[data-sel="true"] { background: hsl(var(--accent, 221 19% 17%)); border-color: hsl(var(--border, 218 14% 20%)); }
+.wk-evs { display: flex; flex-direction: column; gap: 3px; }
+.wk-ev {
+  display: flex; flex-direction: column; gap: 1px; text-align: left;
+  padding: 3px 5px; border-radius: 4px; font-size: 10.5px; line-height: 14px; overflow: hidden;
+  background: hsl(var(--secondary, 221 19% 17%)); color: hsl(var(--secondary-foreground, 220 21% 92%));
+}
+.wk-ev:hover { filter: brightness(1.15); }
+.wk-ev-t { opacity: .65; font-variant-numeric: tabular-nums; }
+.wk-ev-x { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wk-ev[data-done="true"] { opacity: .45; }
+.wk-ev[data-done="true"] .wk-ev-x { text-decoration: line-through; }
+.wk-add {
+  border: 1px dashed hsl(var(--border, 218 14% 20%)); border-radius: 4px;
+  color: hsl(var(--muted-foreground, 217 9% 59%)); font-size: 12px; line-height: 18px;
+  opacity: 0; transition: opacity .12s;
+}
+.wk-col:hover .wk-add, .wk-add:focus-visible { opacity: 1; }
+
+/* ── undated backlog ── */
+.unsched { max-width: 680px; margin: 14px auto 0; }
+.unsched .group-hd { padding-top: 4px; }
+.unsched-hint { font-size: 10.5px; font-weight: 400; opacity: .7; }
+.unsched-items { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 2px; }
+.unsched-chip {
+  max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  padding: 2px 9px; border-radius: 999px; font-size: 11.5px;
+  border: 1px solid hsl(var(--border, 218 14% 20%)); color: hsl(var(--foreground, 220 21% 92%));
+}
+.unsched-chip:hover { background: hsl(var(--accent, 221 19% 17%)); }
+.empty-lane { font-size: 11.5px; color: hsl(var(--muted-foreground, 217 9% 59%)); padding: 0 2px; max-width: 680px; margin: 12px auto 0; }
 
 /* ── log ── */
 .log-row {
@@ -166,7 +275,8 @@ select { cursor: pointer; }
 /* ── editor ── */
 .editor {
   border-top: 1px solid hsl(var(--border, 218 14% 20%)); background: hsl(var(--card, 222 15% 11%));
-  padding: 12px; flex-shrink: 0; max-height: 62%; overflow-y: auto;
+  padding: 12px max(12px, calc((100% - 800px) / 2));
+  flex-shrink: 0; max-height: 62%; overflow-y: auto;
 }
 .field { margin-bottom: 9px; }
 .field > label {
@@ -213,6 +323,9 @@ select { cursor: pointer; }
 .day-sec-hd.miss { color: #d9a441; }
 .row .mark { width: 16px; text-align: center; color: #3fa663; flex-shrink: 0; margin-top: 2px; }
 .day-note { min-height: 150px; line-height: 1.7; }
+.note-other { padding: 6px 8px; margin-bottom: 6px; border-radius: 6px; background: hsl(var(--muted, 220 15% 12%)); }
+.note-other-hd { font-size: 11px; font-weight: 600; color: hsl(var(--muted-foreground, 217 9% 59%)); margin-bottom: 3px; }
+.note-other-body { font-size: 12.5px; line-height: 1.6; white-space: pre-wrap; }
 .save-tag { font-size: 11px; font-weight: 400; color: hsl(var(--muted-foreground, 217 9% 59%)); }
 
 /* ── confirm ── */

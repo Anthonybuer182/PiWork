@@ -53,6 +53,8 @@ interface IncomingMessage {
   event?: string;
   data?: unknown;
   sessionId?: string;
+  /** The calling conversation's workspace id (protocol 7). */
+  workspaceId?: string;
   actionId?: string;
   text?: string;
   providerId?: string;
@@ -162,6 +164,14 @@ export interface PluginHandlers {
    * when the user switches conversations, so re-resolve per-conversation state
    * from it rather than caching one global "current" value.
    *
+   * `meta.workspaceId` is the workspace the window showing this panel is in.
+   *
+   * It is per-request context, NOT panel state: the backend is one process
+   * shared by every window, so stashing this on a module variable makes "the
+   * last window to mount" win for all of them. Readers that need the panel's
+   * own scope should let the page filter what `ui.render` carries (the page
+   * gets the same value directly through `piSDK.workspace`).
+   *
    * Handled before `onEvent`: `panel.mounted` is a lifecycle step, not a
    * plugin-defined event, so the author never sees it in `onEvent`.
    */
@@ -169,7 +179,7 @@ export interface PluginHandlers {
     panelId: string,
     params: unknown,
     ctx: PluginContext,
-    meta?: { sessionId?: string },
+    meta?: { sessionId?: string; workspaceId?: string },
   ): void | Promise<void>;
 
   /**
@@ -179,12 +189,16 @@ export interface PluginHandlers {
    * came through an agent session. Session-scoped handlers (current document,
    * current page) resolve their target per conversation with it — concurrent
    * sessions must not share one. Direct invocations (tests) omit it.
+   *
+   * `call.workspaceId` is that conversation's workspace. It is absent when the
+   * host could not resolve one — treat that as "no workspace", not as "use
+   * whatever window is focused", or a write lands in the wrong project.
    */
   onTool?(
     name: string,
     args: Record<string, unknown>,
     ctx: PluginContext,
-    call: { sessionId?: string },
+    call: { sessionId?: string; workspaceId?: string },
   ): ToolResult | string | void | Promise<ToolResult | string | void>;
 
   /** A contributed slash command ran. */
@@ -387,6 +401,7 @@ export function plugin(handlers: PluginHandlers): void {
     try {
       const result = await handlers.onTool(name, msg.params ?? {}, ctx, {
         sessionId: msg.sessionId,
+        workspaceId: msg.workspaceId,
       });
       // A handler that returns nothing is almost always a forgotten `return`,
       // and the agent would see an empty tool result with no explanation.
@@ -497,8 +512,15 @@ export function plugin(handlers: PluginHandlers): void {
           return;
         }
         try {
-          const data = (msg.data ?? {}) as { params?: unknown; sessionId?: string };
-          await handlers.onPanelMounted(panelId, data.params, ctx, { sessionId: data.sessionId });
+          const data = (msg.data ?? {}) as {
+            params?: unknown;
+            sessionId?: string;
+            workspaceId?: string;
+          };
+          await handlers.onPanelMounted(panelId, data.params, ctx, {
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId,
+          });
         } catch (err) {
           log('error', `onPanelMounted for "${panelId}" threw: ${describe(err)}`);
         }

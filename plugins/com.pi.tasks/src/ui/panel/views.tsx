@@ -1,15 +1,16 @@
 /**
- * The three views: agenda (default), month, and the run log.
+ * The two list views: the agenda, and the run log.
  *
  * The agenda is the default on purpose. A calendar grid answers "what does this
  * month look like", which is rarely the question standing in front of the app —
  * "what is coming up and what did I forget" is, and that is what a grouped list
- * answers without any decoding.
+ * answers without any decoding. The calendar is the second question, asked on
+ * purpose and answered in `calendar.tsx`.
  */
-import { useMemo } from 'react';
-import type { DayNote, RunRecord } from '../../core/types.js';
-import { GROUP_LABEL, GROUP_ORDER, type AgendaGroup, type MonthOccurrence, type MonthView, type ViewItem, type Views } from '../../core/view.js';
-import { dayKey, dayStart, formatDay, formatTime, formatWhen, weekdayLabel } from '../../core/time.js';
+import type { ReactNode } from 'react';
+import type { RunRecord } from '../../core/types.js';
+import { GROUP_LABEL, GROUP_ORDER, type AgendaGroup, type ViewItem, type Views } from '../../core/view.js';
+import { formatWhen, workspaceLabel } from '../../core/time.js';
 
 const emptyGroup = (): Record<AgendaGroup, ViewItem[]> => ({
   overdue: [], today: [], tomorrow: [], week: [], later: [], undated: [],
@@ -21,33 +22,44 @@ export function AgendaView({
   onSelect,
   onToggle,
   now,
+  currentWorkspaceId,
+  empty,
 }: {
   items: ViewItem[];
   selectedId?: string;
   onSelect: (item: ViewItem) => void;
   onToggle: (item: ViewItem) => void;
   now: Date;
+  /** Items from any other workspace get a badge saying whose they are. */
+  currentWorkspaceId?: string | null;
+  /**
+   * What to say when the list is empty. Supplied by the shell because the
+   * right words depend on whether it is empty of everything or only of what
+   * the filter lets through.
+   */
+  empty?: ReactNode;
 }) {
-  const groups = useMemo(() => {
-    const g = emptyGroup();
-    for (const item of items) g[item.group]?.push(item);
-    // Done items sink within their group so the open ones stay at the top.
-    for (const key of GROUP_ORDER) {
-      g[key].sort((a, b) => {
-        if (a.done !== b.done) return a.done ? 1 : -1;
-        return (a.start ?? '9999') < (b.start ?? '9999') ? -1 : 1;
-      });
-    }
-    return g;
-  }, [items]);
+  const groups = emptyGroup();
+  for (const item of items) groups[item.group]?.push(item);
+  // Done items sink within their group so the open ones stay at the top.
+  for (const key of GROUP_ORDER) {
+    groups[key].sort((a, b) => {
+      if (a.done !== b.done) return a.done ? 1 : -1;
+      return (a.start ?? '9999') < (b.start ?? '9999') ? -1 : 1;
+    });
+  }
 
   const total = GROUP_ORDER.reduce((n, k) => n + groups[k].length, 0);
   if (total === 0) {
     return (
       <div className="empty">
-        还没有任何事项
-        <br />
-        点上面「新建」，或者直接对 agent 说「记一下…」
+        {empty ?? (
+          <>
+            还没有任何事项
+            <br />
+            点「＋ 新建」，或者直接对 agent 说「记一下…」
+          </>
+        )}
       </div>
     );
   }
@@ -74,6 +86,7 @@ export function AgendaView({
                 onSelect={() => onSelect(item)}
                 onToggle={() => onToggle(item)}
                 now={now}
+                currentWorkspaceId={currentWorkspaceId}
               />
             ))}
           </div>
@@ -89,12 +102,14 @@ function Row({
   onSelect,
   onToggle,
   now,
+  currentWorkspaceId,
 }: {
   item: ViewItem;
   selected: boolean;
   onSelect: () => void;
   onToggle: () => void;
   now: Date;
+  currentWorkspaceId?: string | null;
 }) {
   return (
     <div className="row" data-done={item.done} data-open={selected} onClick={onSelect}>
@@ -111,7 +126,12 @@ function Row({
         ✓
       </button>
       <div className="main">
-        <div className="title">{item.title}</div>
+        <div className="title">
+          {item.title}
+          {item.workspaceId && item.workspaceId !== currentWorkspaceId && (
+            <span className="ws-badge">{workspaceLabel(item.workspaceId)}</span>
+          )}
+        </div>
         <div className={`when ${item.group === 'overdue' && !item.done ? 'overdue' : ''}`}>
           {item.whenLabel}
           {item.nextFireAt && ` · 下次 ${formatWhen(new Date(item.nextFireAt), now)}`}
@@ -132,131 +152,6 @@ function Row({
   );
 }
 
-// ── month ──
-
-export function MonthViewPanel({
-  view,
-  cursor,
-  selectedDay,
-  notes,
-  onPrev,
-  onNext,
-  onToday,
-  onSelectDay,
-  onOpenDay,
-  onToggle,
-}: {
-  view: MonthView | null;
-  cursor: Date;
-  selectedDay: string;
-  notes: Record<string, DayNote>;
-  onPrev: () => void;
-  onNext: () => void;
-  onToday: () => void;
-  onSelectDay: (day: string) => void;
-  onOpenDay: (day: string) => void;
-  onToggle: (occ: MonthOccurrence) => void;
-}) {
-  const todayKey = dayKey(new Date());
-
-  const cells = useMemo(() => {
-    const first = new Date(cursor.getFullYear(), cursor.getMonth(), 1);
-    const start = new Date(first);
-    // Start the grid on Sunday, the way the weekday labels are ordered.
-    start.setDate(1 - first.getDay());
-    const out: Date[] = [];
-    for (let i = 0; i < 42; i++) {
-      const d = new Date(start);
-      d.setDate(start.getDate() + i);
-      out.push(d);
-    }
-    return out;
-  }, [cursor]);
-
-  const dayItems = view?.byDay[selectedDay] ?? [];
-
-  return (
-    <>
-      <div className="month-hd">
-        <span className="label">{view?.label ?? ''}</span>
-        <span className="grow" />
-        <button className="btn tiny" onClick={onPrev}>
-          ‹
-        </button>
-        <button className="btn tiny" onClick={onToday}>
-          今天
-        </button>
-        <button className="btn tiny" onClick={onNext}>
-          ›
-        </button>
-      </div>
-
-      <div className="grid">
-        {['日', '一', '二', '三', '四', '五', '六'].map((d) => (
-          <div key={d} className="dow">
-            {d}
-          </div>
-        ))}
-        {cells.map((d) => {
-          const key = dayKey(d);
-          const list = view?.byDay[key] ?? [];
-          const wrote = Boolean(notes[key]?.text?.trim());
-          return (
-            <button
-              key={key}
-              className="cell"
-              data-out={d.getMonth() !== cursor.getMonth()}
-              data-today={key === todayKey}
-              data-sel={key === selectedDay}
-              data-note={wrote}
-              onClick={() => onSelectDay(key)}
-            >
-              <span>{d.getDate()}</span>
-              <span className="dots">
-                {list.slice(0, 3).map((o) => (
-                  <span key={o.key} className={`dot ${o.done ? 'done' : ''}`} />
-                ))}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="group-hd" style={{ paddingTop: 14 }}>
-        {formatDay(dayStart(selectedDay))} {weekdayLabel(dayStart(selectedDay))}
-        <span className="grow" />
-        <button className="btn tiny" onClick={() => onOpenDay(selectedDay)}>
-          {notes[selectedDay]?.text?.trim() ? '看这一天的记录' : '写这一天的记录'}
-        </button>
-      </div>
-      {dayItems.length === 0 ? (
-        <div className="empty" style={{ padding: '18px 0' }}>
-          这一天没有事项
-        </div>
-      ) : (
-        dayItems.map((o) => (
-          <div key={o.key} className="row" data-done={o.done}>
-            <button
-              className="tick"
-              data-done={o.done}
-              onClick={() => onToggle(o)}
-              title={o.done ? '标记为未完成' : '标记完成'}
-            >
-              ✓
-            </button>
-            <div className="main">
-              <div className="title">{o.title}</div>
-              <div className="when">{formatTime(new Date(o.at))}</div>
-            </div>
-          </div>
-        ))
-      )}
-    </>
-  );
-}
-
-// ── the run log ──
-
 const STATUS_LABEL: Record<RunRecord['status'], string> = {
   ok: '已完成',
   missed: '错过',
@@ -275,18 +170,31 @@ export function LogView({
 }) {
   const { runs, missed } = view;
 
+  // The rule that matters, stated where its consequences are. It used to sit
+  // in the panel header as a permanent banner, where it was read once and then
+  // became furniture.
+  const caveat = (
+    <div className="hint" style={{ marginBottom: 10 }}>
+      定时任务只在应用运行时触发。没运行时错过的会记在这里，等你决定要不要补跑——不会自动补。
+    </div>
+  );
+
   if (runs.length === 0) {
     return (
-      <div className="empty">
-        还没有触发记录
-        <br />
-        给事项加一个触发，到点后这里会记下发生了什么
-      </div>
+      <>
+        {caveat}
+        <div className="empty">
+          还没有触发记录
+          <br />
+          给事项加一个触发，到点后这里会记下发生了什么
+        </div>
+      </>
     );
   }
 
   return (
     <>
+      {caveat}
       {missed.length > 0 && (
         <>
           <div className="group-hd overdue" data-first="true">

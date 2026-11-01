@@ -15,6 +15,12 @@ import { PermissionService, installPermissionGate, registerPermissionIpc } from 
 import { AskService, registerAskIpc } from '@main/asks';
 import { TodoService, registerTodoIpc } from '@main/todos';
 import { ToolSettingsService, registerToolSettingsIpc } from '@main/preferences/tools';
+import { VoiceSettingsService } from '@main/voice/settings';
+import { resolveVoiceProvider } from '@main/voice/registry';
+import { registerVoiceIpc, warmLocalTts } from '@main/voice/ipc';
+import { installMicrophonePermissionHandler } from '@main/voice/permissions';
+import { VoiceModelManager } from '@main/voice/builtin/model-manager';
+import { voiceInference } from '@main/voice/builtin/inference-client';
 import { buildToolCatalog } from '@main/tools/catalog';
 import { installToolContractGate } from '@main/tools/contracts';
 import { windows } from '@main/windows';
@@ -147,6 +153,27 @@ if (!gotLock) {
     );
     registerToolSettingsIpc(toolSettings, () => toolCatalog);
 
+    // Voice (设置 → 语音): provider list + preferences in userData/voice.json.
+    // Vendor calls happen in main and local inference in a utility process;
+    // the renderer only records, encodes WAV and plays back audio, so vendor
+    // keys never enter the renderer and `connect-src` stays 'self'.
+    const voiceSettings = new VoiceSettingsService(join(app.getPath('userData'), 'voice.json'));
+    const voiceModels = new VoiceModelManager(
+      join(app.getPath('userData'), 'voice-models'),
+      { onDeleted: (id) => voiceInference.evict(id) },
+    );
+    void voiceModels.cleanupParts();
+    // Filled in once the plugin kernel exists; voice playback state is routed
+    // back to plugin backends as the `voice.playback` host event.
+    let pluginPlaybackHook: (key: string, playing: boolean) => void = () => undefined;
+    registerVoiceIpc(voiceSettings, voiceModels, {
+      onPluginPlayback: (key, playing) => pluginPlaybackHook(key, playing),
+    });
+    installMicrophonePermissionHandler(windows);
+    // Warm the local TTS session after the window is up, so the first click on
+    // 朗读 does not pay the model-load cost.
+    setTimeout(() => warmLocalTts(voiceSettings, voiceModels), 3000);
+
     // Now that every handler the renderer's boot sequence touches exists,
     // reopen the windows from the previous run (VS Code's `restoreWindows:
     // all` behaviour). Each window's geometry is validated against the
@@ -165,18 +192,70 @@ if (!gotLock) {
     // is the browser engine and the panel views. `browserRouter` picks the
     // window a `browser.*` call runs against, and `eventSink` decides which
     // window a plugin event is shown in.
+    // Session → workspace, recorded when the session is built: its cwd IS the
+    // workspace id (`Workspace.id` is the absolute path). Plugin backends use
+    // it to attribute writes to a project. NOT `windows.forSession()`: that
+    // answers "which window shows this now", and a window may switch workspace
+    // while a run is in flight — the run would land in the new project.
+    const sessionWorkspaces = new Map<string, string>();
+    const homeCwd = app.getPath('home');
+    const rememberSessionWorkspace = (sessionKey: string, cwd: string | undefined): void => {
+      if (!sessionKey || sessionKey === 'default') return;
+      // The chat adapter falls back to the home directory when a send carries
+      // no workspaceCwd. Home is not a workspace; recording it would attribute
+      // those writes to a project that does not exist, so they stay "global".
+      if (!cwd || cwd === homeCwd) {
+        sessionWorkspaces.delete(sessionKey);
+        return;
+      }
+      sessionWorkspaces.set(sessionKey, cwd);
+    };
+    const resolveSessionWorkspace = (sessionId?: string): string | null =>
+      sessionId && sessionId !== 'default' ? (sessionWorkspaces.get(sessionId) ?? null) : null;
+
     const pluginSystem = new PluginSystem({
       browserRouter: windows,
       vlmAnalyzer,
-      // chat.send: relay a plugin's message to the renderer, which owns the composer.
-      sendToRenderer: (channel, payload) => windows.sendToFocused(channel, payload),
+      resolveSessionWorkspace,
+      // chat.send: relay a plugin's message to the renderer, which owns the
+      // composer. A payload naming a workspace goes to the window showing that
+      // workspace — a scheduled reminder must not inject into whichever window
+      // happens to be focused, or the agent writes its follow-up into the
+      // wrong project.
+      sendToRenderer: (channel, payload) => {
+        const workspaceId =
+          payload && typeof payload === 'object'
+            ? (payload as { workspaceId?: unknown }).workspaceId
+            : undefined;
+        if (typeof workspaceId === 'string' && workspaceId) {
+          windows.sendToWorkspace(workspaceId, channel, payload);
+          return;
+        }
+        windows.sendToFocused(channel, payload);
+      },
       getPermissionMode: (sessionId) => permissionModeFor(sessionId),
+      // Plugins may ask the shell to read text aloud (manifest permission:
+      // voice). Refuse early with the resolver's own Chinese error when no
+      // provider/model is configured.
+      voiceReady: () => {
+        try {
+          resolveVoiceProvider(voiceSettings.get(), 'tts', undefined, {
+            isModelInstalled: (id) => voiceModels.isInstalled(id),
+            modelRoot: voiceModels.root,
+          });
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      },
       eventSink: {
         broadcast: (channel, payload) => windows.broadcast(channel, payload),
         sendToSession: (sessionId, channel, payload) => windows.sendToSession(sessionId, channel, payload),
         sendToFocused: (channel, payload) => windows.sendToFocused(channel, payload),
       },
     });
+    pluginPlaybackHook = (key, playing) =>
+      pluginSystem.pushHostEvent('voice.playback', 'voice', { key, playing });
     // Register IPC handlers BEFORE init completes — the file:// renderer loads
     // in milliseconds in packaged builds, and its first `pi:plugin:list` must
     // queue behind kernel boot (whenReady) instead of rejecting outright.
@@ -194,6 +273,7 @@ if (!gotLock) {
       getGlobalDisabledTools: () => toolSettings.getDisabled(),
       pluginDocsProvider: () => pluginSystem.listPluginDocs(),
       onSessionCreated: (session, info) => {
+        rememberSessionWorkspace(info.sessionKey, info.cwd);
         installPermissionGate(session, info.sessionKey, permissionService);
         // Tool contracts (output bounds, image filtering, error prefix) are a
         // separate afterToolCall wrapper; it must run under the same session
@@ -203,6 +283,7 @@ if (!gotLock) {
       // Deleting a conversation must also settle anything it is blocked on;
       // otherwise the run, the pending promise and the card outlive the file.
       onSessionDeleted: (sessionId) => {
+        sessionWorkspaces.delete(sessionId);
         askService.cancelSession(sessionId);
         todoService.remove(sessionId);
         windows.releaseActiveSession(sessionId);
@@ -317,6 +398,8 @@ if (!gotLock) {
       // last todotool call (or a switch flip) loses that update.
       todoService.flushSync();
       toolSettings.flushSync();
+      voiceSettings.flushSync();
+      voiceInference.dispose();
       pluginSystem.dispose();
     });
 

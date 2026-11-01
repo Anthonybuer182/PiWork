@@ -85,6 +85,13 @@ const PLUGIN_SDK_SOURCE = String.raw`
   var VIEW = window.__piViewBridge || null;
   var IN_VIEW = !!VIEW;
 
+  // ── Workspace (protocol 7) ─────────────────────────────────────────
+  // Which workspace this panel is serving. Pushed by the preload (one value
+  // per view, which is why it cannot come through the backend — that is one
+  // process shared by every window). Null until the shell reports one.
+  var workspaceId = null;
+  var workspaceHandlers = [];
+
   /** Backend traffic: requests and events. */
   function postToHost(payload) {
     if (IN_VIEW) { VIEW.send(payload); return; }
@@ -171,6 +178,14 @@ const PLUGIN_SDK_SOURCE = String.raw`
       }, '*');
     });
     VIEW.onTheme(function (tokens) { applyThemeTokens(tokens); });
+    if (VIEW.onWorkspace) {
+      VIEW.onWorkspace(function (id) {
+        workspaceId = id || null;
+        for (var i = 0; i < workspaceHandlers.length; i++) {
+          try { workspaceHandlers[i](workspaceId); } catch (e) { console.error('[pi-sdk] workspace handler error:', e); }
+        }
+      });
+    }
 
     // Present a window.parent that behaves like an iframe parent, so plugin
     // code that posts to it directly keeps working. The property is an own,
@@ -313,6 +328,16 @@ const PLUGIN_SDK_SOURCE = String.raw`
     request: request,
     emit: emit,
     liveSlot: liveSlot,
+    // The workspace this panel is showing (absolute path), or null. Read it on
+    // demand; subscribe with onWorkspace to react to a workspace switch.
+    get workspace() {
+      return workspaceId;
+    },
+    onWorkspace: function (cb) {
+      if (workspaceHandlers.indexOf(cb) < 0) workspaceHandlers.push(cb);
+      // Replay: the mount report usually lands before the page subscribes.
+      cb(workspaceId);
+    },
     onMessage: function (cb) {
       if (handlers.indexOf(cb) < 0) handlers.push(cb);
     },

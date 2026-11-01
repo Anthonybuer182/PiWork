@@ -18,6 +18,7 @@ import {
   useTodoStore,
   initTodoBridge,
   initToolBridge,
+  initPluginVoiceBridge,
   getPluginBridge,
 } from '@pi/ui';
 import { AppShell } from '@pi/ui';
@@ -192,6 +193,8 @@ function AppContent() {
     initAskBridge();
     initTodoBridge();
     initToolBridge();
+    // Plugin `voice.speak` / `voice.stop` relay (manifest permission: voice).
+    initPluginVoiceBridge();
   }, []);
 
   const activeSessionId = useUIStore((s) => s.activeSessionId);

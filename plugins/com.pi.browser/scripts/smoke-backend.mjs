@@ -23,6 +23,7 @@ const CLIPS_KEY = 'clips.items';
 
 /** What chat.send said — the agent half of the selection-popup round trip. */
 const sentChats = [];
+const voiceCalls = [];
 
 /**
  * The fake page's selection-popup globals. `browser.evaluate` is the plugin's
@@ -183,6 +184,10 @@ function handleFromBackend(msg) {
           break;
         case 'chat.send':
           sentChats.push(String(msg.params.text ?? ''));
+          sendToBackend({ type: 'call-result', id: msg.id, result: { ok: true } });
+          break;
+        case 'voice.speak':
+          voiceCalls.push(msg.params);
           sendToBackend({ type: 'call-result', id: msg.id, result: { ok: true } });
           break;
         case 'browser.walk':
@@ -614,6 +619,32 @@ check(
   'the popup card shows a pending state while the agent works',
   fakePage.notes.some((n) => n.state === 'pending' && n.kind === 'translate'),
   JSON.stringify(fakePage.notes),
+);
+
+// 朗读: selection text goes to the host voice capability, not to the agent.
+voiceCalls.length = 0;
+sentChats.length = 0;
+fakePage.action = { action: '朗读', text: 'Read this sentence aloud.', url: 'https://example.com/', title: 'Example Domain' };
+await new Promise((r) => setTimeout(r, 900));
+check(
+  '朗读 calls voice.speak with the selected text and toggle',
+  voiceCalls.length === 1 &&
+    voiceCalls[0].text === 'Read this sentence aloud.' &&
+    voiceCalls[0].toggle === true &&
+    sentChats.length === 0,
+  JSON.stringify({ voiceCalls, sentChats }),
+);
+
+// 朗读结果: the translated/explained answer can be read from the result card.
+voiceCalls.length = 0;
+fakePage.action = { action: '朗读结果', text: '这是卡片里的译文内容。', url: 'https://example.com/', title: 'Example Domain' };
+await new Promise((r) => setTimeout(r, 900));
+check(
+  '朗读结果 reads the translated/explained text through voice.speak',
+  voiceCalls.length === 1 &&
+    voiceCalls[0].text === '这是卡片里的译文内容。' &&
+    voiceCalls[0].toggle === true,
+  JSON.stringify(voiceCalls),
 );
 
 const shown = await callTool('browser_show', { text: '你好,世界', kind: 'translate' });

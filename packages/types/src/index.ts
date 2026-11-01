@@ -5,6 +5,7 @@ export * from './tool-call.js';
 export * from './attachment.js';
 export * from './model.js';
 export * from './config.js';
+export * from './voice.js';
 export * from './events.js';
 export * from './slash-command.js';
 export * from './skill.js';

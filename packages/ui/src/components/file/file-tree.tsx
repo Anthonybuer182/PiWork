@@ -1,16 +1,41 @@
 import { useEffect, useRef, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, FileText, Folder, Loader2, RefreshCw, Search } from 'lucide-react';
-import type { FileSearchResult } from '@pi/sdk-wrapper';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { AlertTriangle, FileText, Folder, Loader2, RefreshCw, Search, Trash2 } from 'lucide-react';
+import type { FileEntry, FileSearchResult } from '@pi/sdk-wrapper';
 import { useSDK } from '@/hooks/use-sdk';
 import { useUIStore } from '@/stores/ui-store';
+import { toast } from '@/stores/toast-store';
 import { useI18n } from '@/i18n';
 import { FileTreeNode } from './file-tree-node';
 import { Button } from '@/components/ui/button';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { isPreviewableInRightPanel, openWithSystemApp } from '@/lib/utils';
 
 const HIDDEN_DIRS = new Set(['.git', 'node_modules', '.vite', 'dist', '.next', '__pycache__', '.DS_Store']);
 const DEBOUNCE_MS = 150;
+
+interface DeleteTarget {
+  workspaceId: string;
+  entry: FileEntry;
+}
+
+/** True when `child` is `parent` or lives under it (either separator). */
+function isPathWithin(child: string, parent: string): boolean {
+  return (
+    child === parent ||
+    child.startsWith(parent + '/') ||
+    child.startsWith(parent + '\\')
+  );
+}
 
 export function FileTree() {
   const sdk = useSDK();
@@ -56,6 +81,35 @@ export function FileTree() {
     },
     enabled: !!activeWorkspaceId && debounced.length > 0,
   });
+
+  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget | null>(null);
+
+  const deleteMutation = useMutation({
+    mutationFn: (target: DeleteTarget) => sdk.file.delete(target.workspaceId, target.entry.path),
+    onSuccess: (_result, target) => {
+      // Prefix invalidation covers the root list and every expanded directory.
+      queryClient.invalidateQueries({ queryKey: ['files', target.workspaceId] });
+      queryClient.invalidateQueries({ queryKey: ['file-search', target.workspaceId] });
+
+      const active = useUIStore.getState().activePreviewFilePath;
+      if (active && isPathWithin(active, target.entry.path)) {
+        useUIStore.getState().setActivePreviewFile(null);
+      }
+
+      toast(t('已删除「{name}」', { name: target.entry.name }));
+      setDeleteTarget(null);
+    },
+    onError: (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      toast(t('删除失败：{message}', { message }), 'error');
+      setDeleteTarget(null);
+    },
+  });
+
+  const requestDelete = (entry: FileEntry) => {
+    if (!activeWorkspaceId) return;
+    setDeleteTarget({ workspaceId: activeWorkspaceId, entry });
+  };
 
   const handleFileClick = (path: string) => {
     if (isPreviewableInRightPanel(path)) {
@@ -141,18 +195,37 @@ export function FileTree() {
             <p className="px-3 py-2 text-xs text-muted-foreground">{t('未找到匹配')}</p>
           )}
           {searchResult?.entries.map((entry) => (
-            <button
+            <div
               key={entry.path}
-              type="button"
+              role="button"
+              tabIndex={0}
               onClick={() => handleFileClick(entry.path)}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-accent/50"
+              onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) return;
+                if (e.key === 'Enter') handleFileClick(entry.path);
+              }}
+              className="group flex w-full cursor-pointer items-center gap-2 px-3 py-1.5 text-left transition-colors hover:bg-accent/50 focus-visible:bg-accent/50"
             >
               <FileText className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
               <span className="min-w-0 flex-1 truncate text-xs">{entry.name}</span>
               <span className="shrink-0 truncate text-[10px] text-muted-foreground max-w-[45%]">
                 {entry.path.split('/').slice(-2, -1)[0]}
               </span>
-            </button>
+              <button
+                type="button"
+                className="shrink-0 rounded p-0.5 opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100"
+                aria-label={t('删除 {name}', { name: entry.name })}
+                title={t('删除 {name}', { name: entry.name })}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  requestDelete(entry);
+                }}
+                onPointerDown={(e) => e.stopPropagation()}
+                onKeyDown={(e) => e.stopPropagation()}
+              >
+                <Trash2 className="h-3 w-3" />
+              </button>
+            </div>
           ))}
           {/* The three non-empty outcomes are reported differently on purpose —
               "capped" and "partly unreadable" are not the same as "no matches". */}
@@ -182,10 +255,51 @@ export function FileTree() {
                 workspaceId={activeWorkspaceId}
                 depth={0}
                 onFileClick={handleFileClick}
+                onRequestDelete={requestDelete}
               />
             ))}
         </div>
       )}
+
+      <AlertDialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => {
+          // A running recursive delete must not be dismissed into the background.
+          if (!open && !deleteMutation.isPending) setDeleteTarget(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {deleteTarget
+                ? deleteTarget.entry.type === 'directory'
+                  ? t('删除文件夹「{name}」？', { name: deleteTarget.entry.name })
+                  : t('删除文件「{name}」？', { name: deleteTarget.entry.name })
+                : null}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {deleteTarget?.entry.type === 'directory'
+                ? t('文件夹及其中的全部内容都会被删除，且无法恢复。')
+                : t('删除后无法恢复。')}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteMutation.isPending}>{t('取消')}</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              disabled={deleteMutation.isPending}
+              onClick={(e) => {
+                // AlertDialogAction closes by default; keep the dialog up until
+                // the mutation settles so 「正在删除…」 is actually visible.
+                e.preventDefault();
+                if (deleteTarget) deleteMutation.mutate(deleteTarget);
+              }}
+            >
+              {deleteMutation.isPending ? t('正在删除…') : t('删除')}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

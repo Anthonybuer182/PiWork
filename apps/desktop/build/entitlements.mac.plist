@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <!-- Electron's default hardened-runtime requirements. A custom
+         entitlements file replaces those defaults, so they must be repeated
+         here or V8 cannot reserve its JIT code range and the app crashes at
+         launch ("Failed to reserve virtual memory for CodeRange"). -->
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key>
+    <true/>
+    <!-- Native addons (sherpa-onnx, clipboard, pi-coding-agent) are signed
+         ad-hoc inside the asar-unpacked directory. -->
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <!-- Voice input (设置 → 语音): microphone capture for speech-to-text. -->
+    <key>com.apple.security.device.audio-input</key>
+    <true/>
+  </dict>
+</plist>

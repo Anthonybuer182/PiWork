@@ -21,8 +21,11 @@ import { QueueIndicator } from './queue-indicator';
 import { ModelSelector } from '../model/model-selector';
 import { ThinkLevelSelector } from '../model/think-level-selector';
 import { PermissionModeButton } from './permission-mode-button';
+import { VoiceInputButton } from './voice-input-button';
+import { useBuiltinModelsQuery, useVoiceSettingsQuery } from '@/lib/voice/voice-client';
 import { useI18n, type MessageKey } from '@/i18n';
 import { useCommandStore, commandDescription, type RegisteredCommand } from '@/stores/command-store';
+import { toast } from '@/stores/toast-store';
 import { usePluginStore } from '@/stores/plugin-store';
 import type { ContentBlock, Config, Skill } from '@pi/types';
 import { SKILL_REFERENCE_MARKER } from '@pi/types';
@@ -30,6 +33,9 @@ import type { Attachment } from '@pi/types';
 
 export function Composer() {
   const { t } = useI18n();
+  // Voice preferences live in main; the query is disabled in the web build.
+  const { data: voiceSettings } = useVoiceSettingsQuery();
+  const { data: voiceModels = [], isLoading: voiceModelsLoading } = useBuiltinModelsQuery();
   const sdk = useSDK();
   const queryClient = useQueryClient();
   // Command registry: host commands + plugin-contributed commands.
@@ -1002,6 +1008,57 @@ export function Composer() {
     clearAttachments();
   }, [value, activeSessionId, sendMutation, setValue, handleSlashCommand, sdk, queryClient, triggerScrollToBottom, pendingAttachments]);
 
+  // Read at call time: transcription takes seconds, and the user may start a
+  // stream or switch conversations while it is in flight.
+  const sendPendingRef = useRef(false);
+  sendPendingRef.current = sendMutation.isPending;
+
+  /** Insert a transcription into the composer, or send it when autoSend is on.
+   *  The draft is kept when sending (not replaced), and a transcript that
+   *  returns after switching conversations is dropped instead of leaking into
+   *  the new one. */
+  const handleVoiceTranscript = useCallback(
+    (text: string, recordedInSession: string | null) => {
+      const clean = text.trim();
+      if (!clean) return;
+      const state = useComposerStore.getState();
+      const currentSession = useUIStore.getState().activeSessionId;
+      if (recordedInSession && currentSession && recordedInSession !== currentSession) {
+        toast(t('已切换会话，转写结果已丢弃'));
+        return;
+      }
+      if (!currentSession) return;
+
+      const draft = state.value.replace(/\s+$/, '');
+      const next = draft ? `${draft} ${clean}` : clean;
+      if (voiceSettings?.stt.autoSend && !sendPendingRef.current && !state.isStreaming) {
+        sendMutation.mutate(next);
+        state.setValue('');
+        state.clearAttachments();
+        state.triggerScrollToBottom();
+        return;
+      }
+      state.setValue(next);
+      setFocusVersion((version) => version + 1);
+    },
+    [voiceSettings?.stt.autoSend, sendMutation, t],
+  );
+
+  const builtinSttModelId = voiceSettings?.stt.builtinModel || 'sensevoice';
+  const builtinSttReady =
+    voiceSettings?.stt.builtin !== 'off' &&
+    voiceModels.some((model) => model.id === builtinSttModelId && model.installed);
+  // Until settings/models load, assume configured; otherwise a fast click
+  // wrongly reports "model not downloaded".
+  const sttConfigured =
+    !voiceSettings || voiceModelsLoading || !!voiceSettings.stt.activeProvider || builtinSttReady;
+  const sttNeedsModelDownload =
+    !!voiceSettings &&
+    !voiceModelsLoading &&
+    !voiceSettings.stt.activeProvider &&
+    voiceSettings.stt.builtin !== 'off' &&
+    !builtinSttReady;
+
   /** Queue a steering message via the SDK. It will be delivered after the
    *  current assistant turn's tool calls complete, redirecting the agent.
    *  If the stream has already ended (fast model, no tool calls), fall back
@@ -1322,10 +1379,10 @@ export function Composer() {
       {/* Divider */}
       <Separator className="mt-3" />
 
-      {/* Bottom tools row. One line, three zones: input action · model/effort ·
-          capabilities, then status and the primary action on the right. Every
-          control is 28px tall; the model name is the only thing that shrinks.
-          Voice input slots in immediately before Send. */}
+      {/* Bottom tools row. Left zone: input action · model/effort ·
+          permission mode. Right zone: voice input and the primary action,
+          separated by a wider gap so the mic does not crowd Send. Every
+          control is 28px tall; the model name is the only thing that shrinks. */}
       <div className="flex min-w-0 items-center gap-1 px-2.5 py-2">
         <FileUploadButton
           disabled={isStreaming}
@@ -1340,9 +1397,15 @@ export function Composer() {
           value={config?.defaultThinkLevel ?? 'medium'}
           onChange={(level) => updateConfigMut.mutate({ defaultThinkLevel: level })}
         />
-        <div className="ml-auto flex shrink-0 items-center gap-1">
-          <PermissionModeButton />
-          {/* Voice input button goes here, before Send. */}
+        <PermissionModeButton />
+        <div className="ml-auto flex shrink-0 items-center gap-3">
+          <VoiceInputButton
+            disabled={!activeSessionId}
+            configured={sttConfigured}
+            needsModelDownload={sttNeedsModelDownload}
+            sessionId={activeSessionId}
+            onTranscribed={handleVoiceTranscript}
+          />
 
         {isStreaming ? (
           <>

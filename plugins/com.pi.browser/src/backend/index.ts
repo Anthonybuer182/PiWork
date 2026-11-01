@@ -274,12 +274,14 @@ const INJECT_SOURCE = `(function () {
     }
     var btnTranslate = actionBtn('翻译');
     var btnExplain = actionBtn('解释');
+    var btnSpeak = actionBtn('朗读');
     var btnClip = actionBtn('收藏');
     var btnClose = styled('button',
       'all:unset;cursor:pointer;margin-left:auto;padding:4px 6px;color:#8b93a7;font:14px/1 system-ui,sans-serif');
     btnClose.textContent = '×';
     row.appendChild(btnTranslate);
     row.appendChild(btnExplain);
+    row.appendChild(btnSpeak);
     row.appendChild(btnClip);
     row.appendChild(btnClose);
 
@@ -333,10 +335,10 @@ const INJECT_SOURCE = `(function () {
     function syncButtons() {
       var hasQuote = !!quoteText;
       var hasQuestion = !!question.value.trim();
-      var three = [btnTranslate, btnExplain, btnClip];
-      for (var i = 0; i < three.length; i++) {
-        three[i].style.opacity = hasQuote ? '1' : '0.4';
-        three[i].style.cursor = hasQuote ? 'pointer' : 'default';
+      var quoteActions = [btnTranslate, btnExplain, btnSpeak, btnClip];
+      for (var i = 0; i < quoteActions.length; i++) {
+        quoteActions[i].style.opacity = hasQuote ? '1' : '0.4';
+        quoteActions[i].style.cursor = hasQuote ? 'pointer' : 'default';
       }
       btnSend.style.opacity = (hasQuote || hasQuestion) ? '1' : '0.4';
       btnSend.style.cursor = (hasQuote || hasQuestion) ? 'pointer' : 'default';
@@ -346,9 +348,37 @@ const INJECT_SOURCE = `(function () {
 
     // ── the results area (and the clips list) ──
     var results = styled('div', 'display:none;margin-top:6px;max-height:40vh;overflow:auto');
-    var resultsHead = styled('div', 'font-weight:600;margin-bottom:4px;color:#9db2ff;font:12px/1 system-ui,sans-serif');
+    var resultsHeadRow = styled('div', 'display:flex;align-items:center;gap:6px;margin-bottom:4px');
+    var resultsHead = styled('div', 'font-weight:600;color:#9db2ff;font:12px/1 system-ui,sans-serif;flex:0 1 auto;min-width:0');
+    var COMPACT_BTN = 'all:unset;cursor:pointer;padding:2px 7px;border-radius:4px;' +
+      'border:1px solid rgba(255,255,255,.22);color:#cdd6e8;font:11px/1.2 system-ui,sans-serif;white-space:nowrap';
+    // Icon-only read control: the text label crowded the result heading.
+    var SPEAKER_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"' +
+      ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>' +
+      '<path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>' +
+      '<path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>';
+    var STOP_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">' +
+      '<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"></rect></svg>';
+    var ICON_BTN = 'all:unset;cursor:pointer;padding:3px;border-radius:4px;display:inline-flex;' +
+      'align-items:center;justify-content:center;line-height:0;border:1px solid rgba(255,255,255,.22);' +
+      'color:#cdd6e8;background:rgba(255,255,255,.04)';
+    var lastResultText = '';
+    var btnReadResult = styled('button', ICON_BTN);
+    btnReadResult.innerHTML = SPEAKER_SVG;
+    btnReadResult.title = '朗读结果（再次点击停止）';
+    btnReadResult.setAttribute('aria-label', '朗读结果');
+    btnReadResult.style.display = 'none';
+    btnReadResult.addEventListener('click', function () {
+      if (!lastResultText) return;
+      pin();
+      report('朗读结果', { text: lastResultText.slice(0, 8000) });
+      setReadUI(!readPlaying);
+    });
+    resultsHeadRow.appendChild(resultsHead);
+    resultsHeadRow.appendChild(btnReadResult);
     var resultsBody = styled('div', 'white-space:pre-wrap;word-break:break-word');
-    results.appendChild(resultsHead);
+    results.appendChild(resultsHeadRow);
     results.appendChild(resultsBody);
 
     popup.appendChild(row);
@@ -361,15 +391,51 @@ const INJECT_SOURCE = `(function () {
       'overflow:auto;padding:10px 30px 10px 12px;border-radius:10px;background:rgba(18,20,28,.96);' +
       'color:#e8eaf0;box-shadow:0 6px 20px rgba(0,0,0,.4);font:12.5px/1.6 system-ui,sans-serif;' +
       'white-space:pre-wrap;word-break:break-word');
-    var cardTitle = styled('div', 'font-weight:600;margin-bottom:4px;color:#9db2ff;font:12.5px/1.4 system-ui,sans-serif');
+    var cardTitle = styled('div', 'font-weight:600;color:#9db2ff;font:12.5px/1.4 system-ui,sans-serif;flex:0 1 auto;min-width:0');
     var cardBody = styled('div', '');
     var cardClose = styled('button',
       'all:unset;cursor:pointer;position:absolute;top:8px;right:9px;color:#8b93a7;font:14px/1 system-ui,sans-serif');
     cardClose.textContent = '×';
     cardClose.addEventListener('click', function () { card.style.display = 'none'; });
-    card.appendChild(cardTitle);
+    var cardRead = styled('button', ICON_BTN);
+    cardRead.innerHTML = SPEAKER_SVG;
+    cardRead.title = '朗读结果（再次点击停止）';
+    cardRead.setAttribute('aria-label', '朗读结果');
+    cardRead.style.display = 'none';
+    cardRead.addEventListener('click', function () {
+      var text = String(cardBody.textContent || '');
+      if (!text.trim()) return;
+      report('朗读结果', { text: text.slice(0, 8000) });
+      setReadUI(!readPlaying);
+    });
+    var cardHeadRow = styled('div', 'display:flex;align-items:center;gap:6px;margin-bottom:4px');
+    cardHeadRow.appendChild(cardTitle);
+    cardHeadRow.appendChild(cardRead);
+    card.appendChild(cardHeadRow);
     card.appendChild(cardBody);
     card.appendChild(cardClose);
+
+    var readPlaying = false;
+    function setReadUI(playing) {
+      readPlaying = !!playing;
+      var icon = readPlaying ? STOP_SVG : SPEAKER_SVG;
+      var color = readPlaying ? '#9db2ff' : '#cdd6e8';
+      var border = readPlaying ? 'rgba(120,160,255,.75)' : 'rgba(255,255,255,.22)';
+      var bg = readPlaying ? 'rgba(80,120,255,.22)' : 'rgba(255,255,255,.04)';
+      btnReadResult.innerHTML = icon;
+      cardRead.innerHTML = icon;
+      btnReadResult.title = readPlaying ? '停止朗读' : '朗读结果（再次点击停止）';
+      cardRead.title = btnReadResult.title;
+      btnReadResult.style.color = color;
+      btnReadResult.style.borderColor = border;
+      btnReadResult.style.background = bg;
+      cardRead.style.color = color;
+      cardRead.style.borderColor = border;
+      cardRead.style.background = bg;
+    }
+    // The backend pushes the host's real playback state here, so the icon
+    // resets when a clip finishes on its own.
+    window.__piReadState = function (playing) { setReadUI(!!playing); };
 
     // ── one-line toast, for the failure paths only ──
     var toast = styled('div',
@@ -430,10 +496,13 @@ const INJECT_SOURCE = `(function () {
         for (var k in extra) window.__piSelAction[k] = extra[k];
       }
     }
-    function showResult(title, body) {
+    function showResult(title, body, readable) {
       resultsHead.textContent = title;
       resultsBody.textContent = body || '';
       results.style.display = 'block';
+      lastResultText = body ? String(body) : '';
+      if (!readable) setReadUI(false);
+      btnReadResult.style.display = readable && lastResultText.trim() ? 'inline-flex' : 'none';
     }
 
     // ── selection tracking ──
@@ -530,6 +599,12 @@ const INJECT_SOURCE = `(function () {
       report('解释', { text: quoteText.slice(0, 8000) });
       showResult('解释中…', '');
     });
+    btnSpeak.addEventListener('click', function () {
+      if (!quoteText) return;
+      pin();
+      report('朗读', { text: quoteText.slice(0, 8000) });
+      showResult('朗读', '用宿主语音朗读选中内容；再点一次停止。');
+    });
     btnClip.addEventListener('click', function () {
       if (!quoteText) return;
       pin();
@@ -560,18 +635,26 @@ const INJECT_SOURCE = `(function () {
       if (payload.state === 'pending' || payload.state === 'pending-hint') {
         var head = kind === 'explain' ? '解释中…' : kind === 'chat' ? '思考中…' : '翻译中…';
         if (inPopup) { showResult(head, pendingText); }
-        else { cardTitle.textContent = head; cardBody.textContent = pendingText; card.style.display = 'block'; }
+        else { cardTitle.textContent = head; cardBody.textContent = pendingText; cardRead.style.display = 'none'; card.style.display = 'block'; }
         return;
       }
       if (payload.state === 'timeout') {
         var tmsg = '等得有点久了 — 去对话里看看进度。';
         if (inPopup) { showResult('还在等结果', tmsg); }
-        else { cardTitle.textContent = '还在等结果'; cardBody.textContent = tmsg; card.style.display = 'block'; }
+        else { cardTitle.textContent = '还在等结果'; cardBody.textContent = tmsg; cardRead.style.display = 'none'; card.style.display = 'block'; }
         return;
       }
       var title = payload.title || (kind === 'explain' ? '解释' : kind === 'translate' ? '译文' : kind === 'chat' ? '回答' : '结果');
-      if (inPopup) { showResult(title, payload.text || ''); }
-      else { cardTitle.textContent = title; cardBody.textContent = payload.text || ''; card.style.display = 'block'; }
+      if (inPopup) {
+        setReadUI(false);
+        showResult(title, payload.text || '', true);
+      } else {
+        cardTitle.textContent = title;
+        cardBody.textContent = payload.text || '';
+        setReadUI(false);
+        cardRead.style.display = (payload.text || '').trim() ? 'inline-flex' : 'none';
+        card.style.display = 'block';
+      }
     };
     window.__piRenderClips = function (clips, newestId) {
       resultsHead.textContent = '收藏的文字';
@@ -1518,6 +1601,13 @@ async function showNoteInPage(
   return r === true;
 }
 
+async function setReadStateInPage(ctx: PluginContext, playing: boolean): Promise<void> {
+  await callInjected<unknown>(
+    ctx,
+    `window.__piReadState ? (window.__piReadState(${playing ? 'true' : 'false'}), true) : false`,
+  );
+}
+
 async function toastInPage(ctx: PluginContext, message: string): Promise<void> {
   await callInjected(ctx, `window.__piToast ? (window.__piToast(${JSON.stringify(message)}), true) : false`);
 }
@@ -1686,6 +1776,20 @@ async function handleAction(ctx: PluginContext, action: SelAction): Promise<void
       } catch (err) {
         ctx.log.warn(`chat.send failed: ${describe(err)}`);
         void toastInPage(ctx, '发送到对话失败');
+      }
+      return;
+    }
+    case '朗读':
+    case '朗读结果': {
+      if (!text) return;
+      try {
+        // toggle: pressing it again while this plugin is speaking stops it.
+        await ctx.call('voice.speak', { text, toggle: true });
+        void setReadStateInPage(ctx, true).catch(() => undefined);
+      } catch (err) {
+        ctx.log.warn(`voice.speak failed: ${describe(err)}`);
+        void setReadStateInPage(ctx, false).catch(() => undefined);
+        void toastInPage(ctx, `朗读失败：${describe(err)}`);
       }
       return;
     }
@@ -2176,6 +2280,10 @@ plugin({
       panelSession = d.sessionId ?? null;
       await ensureLoaded(ctx);
       await syncBucket(ctx);
+      return;
+    }
+    if (event === 'voice.playback') {
+      await setReadStateInPage(ctx, Boolean((d as { playing?: boolean }).playing));
       return;
     }
     if (event === 'browser.tabOpened') {

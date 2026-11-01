@@ -113,7 +113,7 @@ pnpm dev:desktop:plugins
 
 **`plugins/` 不属 pnpm workspace。** `pnpm-workspace.yaml` 只包含 `packages/*` 和 `apps/*`，所以根目录的 `pnpm install` 和 `turbo run build` 都不会碰插件。每个插件是独立的 npm 项目，自带 `package-lock.json`，需要单独安装和构建——这正是 `pnpm setup` 替你做的事。
 
-**面板入口是构建产物。** `com.pi.files`（文件查看器）和 `com.pi.tasks`（事项）的 `manifest.json` 里，面板入口指向 `./ui-dist/panel/index.html`，而 `ui-dist/` 被插件自己的 `.gitignore` 忽略。不构建就没有面板可显示，只会看到插件静默消失。
+**面板入口是构建产物。** `com.pi.files`（文件查看器）和 `com.pi.tasks`（日程本）的 `manifest.json` 里，面板入口指向 `./ui-dist/panel/index.html`，而 `ui-dist/` 被插件自己的 `.gitignore` 忽略。不构建就没有面板可显示，只会看到插件静默消失。
 
 **两种启动方式，对应两种插件来源。** 插件的查找根按优先级 `dev > user` 解析：
 

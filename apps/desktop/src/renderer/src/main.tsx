@@ -20,6 +20,9 @@ const csp = [
   "style-src 'self' 'unsafe-inline'",
   "img-src 'self' data: blob: pi-plugin:",
   "font-src 'self' data:",
+  // TTS playback: synthesized audio arrives as bytes and is played from a
+  // Blob URL (vendor requests happen in main, so connect-src stays 'self').
+  "media-src 'self' blob: data:",
   // Vite HMR (dev) + plugin panel iframes (pi-plugin:// unique origins).
   isDev ? "connect-src 'self' ws: http://localhost:*" : "connect-src 'self'",
   "frame-src pi-plugin:",

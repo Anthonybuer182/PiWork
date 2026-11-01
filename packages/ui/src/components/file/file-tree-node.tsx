@@ -1,8 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { ChevronRight, CircleAlert, File, FileCode, FileText, FileImage, FileVideo, Folder, FolderOpen, Loader2 } from 'lucide-react';
+import { ChevronRight, CircleAlert, File, FileCode, FileText, FileImage, FileVideo, Folder, FolderOpen, Loader2, Trash2 } from 'lucide-react';
 import { useSDK } from '@/hooks/use-sdk';
 import { useUIStore } from '@/stores/ui-store';
+import { useI18n } from '@/i18n';
 import { cn } from '@/lib/utils';
 import type { FileEntry } from '@pi/sdk-wrapper';
 
@@ -11,6 +12,7 @@ interface FileTreeNodeProps {
   workspaceId: string;
   depth: number;
   onFileClick: (path: string) => void;
+  onRequestDelete: (entry: FileEntry) => void;
 }
 
 function getFileIcon(name: string, isDirectory: boolean) {
@@ -33,8 +35,9 @@ function getFileIcon(name: string, isDirectory: boolean) {
   }
 }
 
-export function FileTreeNode({ entry, workspaceId, depth, onFileClick }: FileTreeNodeProps) {
+export function FileTreeNode({ entry, workspaceId, depth, onFileClick, onRequestDelete }: FileTreeNodeProps) {
   const sdk = useSDK();
+  const { t } = useI18n();
   const ref = useRef<HTMLDivElement>(null);
   const activePreviewFilePath = useUIStore((s) => s.activePreviewFilePath);
   const [expanded, setExpanded] = useState(false);
@@ -86,7 +89,17 @@ export function FileTreeNode({ entry, workspaceId, depth, onFileClick }: FileTre
         role="button"
         tabIndex={0}
         onClick={handleClick}
-        onKeyDown={(e) => e.key === 'Enter' && handleClick()}
+        onKeyDown={(e) => {
+          // Ignore keys that bubbled from the trash button — it handles its own.
+          if (e.target !== e.currentTarget) return;
+          if (e.key === 'Enter') {
+            handleClick();
+          } else if (e.key === 'Delete' || e.key === 'Backspace') {
+            e.preventDefault();
+            e.stopPropagation();
+            onRequestDelete(entry);
+          }
+        }}
         aria-expanded={isDirectory ? expanded : undefined}
         aria-selected={isSelected || undefined}
         aria-label={isDirectory ? `Toggle directory: ${entry.name}` : `Preview file: ${entry.name}`}
@@ -118,6 +131,20 @@ export function FileTreeNode({ entry, workspaceId, depth, onFileClick }: FileTre
           </>
         )}
         <span className="flex-1 truncate text-xs">{entry.name}</span>
+        <button
+          type="button"
+          className="shrink-0 rounded p-0.5 opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100"
+          aria-label={t('删除 {name}', { name: entry.name })}
+          title={t('删除 {name}', { name: entry.name })}
+          onClick={(e) => {
+            e.stopPropagation();
+            onRequestDelete(entry);
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          onKeyDown={(e) => e.stopPropagation()}
+        >
+          <Trash2 className="h-3 w-3" />
+        </button>
       </div>
 
       {isDirectory && expanded && (
@@ -155,6 +182,7 @@ export function FileTreeNode({ entry, workspaceId, depth, onFileClick }: FileTre
                 workspaceId={workspaceId}
                 depth={depth + 1}
                 onFileClick={onFileClick}
+                onRequestDelete={onRequestDelete}
               />
             ))}
         </div>

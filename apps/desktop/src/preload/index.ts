@@ -1,4 +1,17 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type {
+  BuiltinModelId,
+  VoiceBuiltinModel,
+  VoiceCapability,
+  VoiceModelProgress,
+  VoicePreferencesPatch,
+  VoiceProviderEntry,
+  VoiceSettings,
+  VoiceSynthesizeRequest,
+  VoiceSynthesizeResult,
+  VoiceTranscribeRequest,
+  VoiceTranscribeResult,
+} from '@pi/types';
 
 /** `--pi-window-id=<n>` is injected per BrowserWindow via additionalArguments. */
 function readWindowId(): number | null {
@@ -105,6 +118,33 @@ export interface ElectronAPI {
     getVersion: () => Promise<string>;
   };
 
+  // ── Voice ──
+  // Provider config stays in main (userData/voice.json) and outbound requests
+  // are made there; the renderer only records audio and plays the result.
+  voice: {
+    get: () => Promise<VoiceSettings>;
+    saveProvider: (
+      capability: VoiceCapability,
+      originalName: string | null,
+      name: string,
+      provider: VoiceProviderEntry,
+    ) => Promise<VoiceSettings>;
+    deleteProvider: (capability: VoiceCapability, name: string) => Promise<VoiceSettings>;
+    setPreferences: (
+      capability: VoiceCapability,
+      patch: VoicePreferencesPatch,
+    ) => Promise<VoiceSettings>;
+    transcribe: (request: VoiceTranscribeRequest) => Promise<VoiceTranscribeResult>;
+    synthesize: (request: VoiceSynthesizeRequest) => Promise<VoiceSynthesizeResult>;
+    cancelSynthesis: (generation?: number) => Promise<void>;
+    notifyPlayback: (key: string, playing: boolean) => Promise<void>;
+    getModels: () => Promise<VoiceBuiltinModel[]>;
+    downloadModel: (modelId: BuiltinModelId) => Promise<VoiceBuiltinModel[]>;
+    cancelModelDownload: (modelId: BuiltinModelId) => Promise<void>;
+    deleteModel: (modelId: BuiltinModelId) => Promise<VoiceBuiltinModel[]>;
+    onModelProgress: (callback: (progress: VoiceModelProgress) => void) => () => void;
+  };
+
   // ── Plugin System ──
   // (exposed as a separate `window.pluginBridge` global — see bottom of file)
 }
@@ -200,6 +240,32 @@ const electronAPI: ElectronAPI = {
   app: {
     getPath: (name) => ipcRenderer.invoke('pi:app:getPath', name),
     getVersion: () => ipcRenderer.invoke('pi:app:getVersion'),
+  },
+
+  voice: {
+    get: () => ipcRenderer.invoke('pi:voice:get'),
+    saveProvider: (capability, originalName, name, provider) =>
+      ipcRenderer.invoke('pi:voice:save-provider', { capability, originalName, name, provider }),
+    deleteProvider: (capability, name) =>
+      ipcRenderer.invoke('pi:voice:delete-provider', { capability, name }),
+    setPreferences: (capability, patch) =>
+      ipcRenderer.invoke('pi:voice:set-preferences', { capability, patch }),
+    transcribe: (request) => ipcRenderer.invoke('pi:voice:transcribe', request),
+    synthesize: (request) => ipcRenderer.invoke('pi:voice:synthesize', request),
+    cancelSynthesis: (generation) =>
+      ipcRenderer.invoke('pi:voice:cancel-synthesis', { generation }),
+    notifyPlayback: (key, playing) =>
+      ipcRenderer.invoke('pi:voice:plugin-playback', { key, playing }),
+    getModels: () => ipcRenderer.invoke('pi:voice:get-models'),
+    downloadModel: (modelId) => ipcRenderer.invoke('pi:voice:download-model', { modelId }),
+    cancelModelDownload: (modelId) =>
+      ipcRenderer.invoke('pi:voice:cancel-model-download', { modelId }),
+    deleteModel: (modelId) => ipcRenderer.invoke('pi:voice:delete-model', { modelId }),
+    onModelProgress: (callback) => {
+      const listener = (_event: unknown, progress: VoiceModelProgress) => callback(progress);
+      ipcRenderer.on('pi:voice:model-progress', listener);
+      return () => ipcRenderer.removeListener('pi:voice:model-progress', listener);
+    },
   },
 
 };

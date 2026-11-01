@@ -97,6 +97,16 @@ export class PluginSystem {
   private activeSessionId: string | null = null;
   /** Renderer delivery; null falls back to broadcasting to every window. */
   private readonly eventSink?: PluginEventSink;
+  /**
+   * session → workspace, resolved once when the session is built.
+   *
+   * Deliberately not `windows.forSession(sessionId)`: that returns the
+   * window's CURRENT workspace, and a window may switch workspace while a run
+   * is in flight — the run would then be attributed to the new project. Null
+   * when unknown, and a plugin must read null as "no workspace" rather than
+   * guessing.
+   */
+  private readonly resolveSessionWorkspace?: (sessionId?: string) => string | null;
 
   constructor(opts?: {
     agentDir?: string;
@@ -104,10 +114,15 @@ export class PluginSystem {
     vlmAnalyzer?: VlmAnalyzer;
     sendToRenderer?: (channel: string, payload: unknown) => void;
     getPermissionMode?: (sessionId: string) => 'default' | 'full';
+    /** Whether the app's TTS is usable; exposed as the `voice` capability. */
+    voiceReady?: () => { ok: boolean; error?: string };
     /** Renderer delivery for plugin events (one PluginEvent has one target). */
     eventSink?: PluginEventSink;
+    /** session → workspace id; see `resolveSessionWorkspace`. */
+    resolveSessionWorkspace?: (sessionId?: string) => string | null;
   }) {
     this.eventSink = opts?.eventSink;
+    this.resolveSessionWorkspace = opts?.resolveSessionWorkspace;
     this.registry = new PluginRegistry({ ...opts, appVersion: app.getVersion() });
     this.capabilityHub = new CapabilityHub({
       registry: this.registry,
@@ -116,6 +131,7 @@ export class PluginSystem {
       vlmAnalyzer: opts?.vlmAnalyzer,
       sendToRenderer: opts?.sendToRenderer,
       getPermissionMode: opts?.getPermissionMode,
+      voiceReady: opts?.voiceReady,
     });
     this.marketplace = new PluginMarketplace(this.registry);
   }
@@ -400,7 +416,17 @@ export class PluginSystem {
             // invocation) yields undefined — handlers fall back to global
             // state, which is exactly the pre-session-scoping behaviour.
             const sessionId = takeToolSession(_toolCallId);
-            const result = await this.executeTool(pluginId, tool.name, params ?? {}, sessionId);
+            // Workspace comes from the session's own record, not from window
+            // focus — see `resolveSessionWorkspace`. Undefined stays undefined
+            // all the way down, so a plugin can tell "global" from "unknown".
+            const workspaceId = this.resolveSessionWorkspace?.(sessionId) ?? undefined;
+            const result = await this.executeTool(
+              pluginId,
+              tool.name,
+              params ?? {},
+              sessionId,
+              workspaceId,
+            );
             const content = (result.content ?? []).map((c) =>
               c.type === 'image' && c.data
                 ? { type: 'image' as const, data: c.data, mimeType: c.mimeType ?? 'image/png' }
@@ -440,12 +466,13 @@ export class PluginSystem {
     name: string,
     params: Record<string, unknown>,
     sessionId?: string,
+    workspaceId?: string,
   ): Promise<{ content?: PluginToolContent[]; details?: unknown; card?: UiNode }> {
     const proc = this.processes.get(pluginId);
     if (!proc) {
       throw new Error(`plugin "${pluginId}" has no backend (tool "${name}")`);
     }
-    const result = await proc.executeTool(name, params, sessionId);
+    const result = await proc.executeTool(name, params, sessionId, workspaceId);
     // Agent-activity linkage: a tool that just ran means the plugin is doing
     // visible work — surface its primary panel so the effect is shown. Plugins
     // that contribute no panel have nothing to open, and `openPanelForActivity`

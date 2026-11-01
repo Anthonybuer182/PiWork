@@ -15,7 +15,7 @@
  * skipped and offer to do it.
  */
 import { plugin, type PluginContext, type ToolResult } from '@pi/plugin-sdk';
-import type { Item, RunRecord, RunStatus, TasksState, Trigger } from '../core/types.js';
+import type { DayNote, Item, RunRecord, RunStatus, TasksState, Trigger } from '../core/types.js';
 import { parseWhen, FREE_TEXT_HINT } from '../core/parse-when.js';
 import { buildRRule, describeRepeat, expandOccurrences, alignStartToRule } from '../core/recur.js';
 import {
@@ -23,10 +23,22 @@ import {
   nextTriggerAt,
   nextFireAcrossItems,
   currentOccurrenceKey,
+  completionKey,
   describeTrigger,
   type DueRun,
 } from '../core/triggers.js';
-import { addDays, dayKey, dayStart, formatWhen, formatMonth, toLocalIso, weekdayLabel } from '../core/time.js';
+import { emptyState, migrateState } from '../core/migrate.js';
+import {
+  addDays,
+  dayEnd,
+  dayKey,
+  dayStart,
+  formatWhen,
+  formatMonth,
+  toLocalIso,
+  weekdayLabel,
+  workspaceLabel,
+} from '../core/time.js';
 
 /**
  * The SDK's context, kept at module scope.
@@ -55,23 +67,19 @@ const MAX_TICK_MS = 30_000;
 /** Floor, so a firing due "now" cannot spin the loop. */
 const MIN_TICK_MS = 250;
 
-let state: TasksState = { items: [], runs: [], notes: {}, completedAt: {} };
+let state: TasksState = emptyState();
 
 /** The panel this plugin draws into. One plugin, one panel. */
 const PANEL = 'items';
 
 async function load(): Promise<void> {
   const saved = await ctx.call('storage.get', { key: STORAGE_KEY }).catch(() => undefined);
-  const s = (saved && typeof saved === 'object' ? saved : {}) as Partial<TasksState>;
-  state = {
-    items: Array.isArray(s.items) ? s.items : [],
-    runs: Array.isArray(s.runs) ? s.runs : [],
-    // Both are newer than the first release, so older stored state simply has
-    // them absent — defaulted here rather than migrated.
-    notes: s.notes && typeof s.notes === 'object' ? s.notes : {},
-    completedAt: s.completedAt && typeof s.completedAt === 'object' ? s.completedAt : {},
-    lastTickAt: s.lastTickAt,
-  };
+  // Shape repair and schema upgrades live in one pure function so the
+  // pre-workspace layouts can be pinned by tests instead of discovered by a
+  // user whose notes vanished.
+  const { state: next, changed } = migrateState(saved);
+  state = next;
+  if (changed) await save();
 }
 
 async function save(): Promise<void> {
@@ -85,7 +93,7 @@ async function save(): Promise<void> {
 
 // ── the view the panel renders ──
 
-import type { AgendaGroup, Views, ViewItem } from '../core/view.js';
+import type { AgendaGroup, MonthOccurrence, Views, ViewItem } from '../core/view.js';
 import { buildDayPage, type DayPage } from '../core/day.js';
 
 function groupOf(start: Date | undefined, now: Date): AgendaGroup {
@@ -125,13 +133,29 @@ function toViewItem(item: Item, now: Date): ViewItem {
         : formatWhen(start!, now)
       : '无日期',
     group: groupOf(start, now),
+    workspaceId: item.workspaceId,
   };
+}
+
+/** Every workspace id the stored data mentions — items and notes alike. */
+function knownWorkspaces(): string[] {
+  const ids = new Set<string>();
+  for (const item of state.items) if (item.workspaceId) ids.add(item.workspaceId);
+  for (const scopes of Object.values(state.notes)) {
+    for (const key of Object.keys(scopes)) if (key) ids.add(key);
+  }
+  return [...ids].sort();
 }
 
 function buildView(now: Date, truncated: string[] = []): Views {
   const runs = [...state.runs].reverse();
   return {
+    // Deliberately unfiltered: the panel is the only place that knows which
+    // workspace IT is showing, and `ui.render` goes to every window's view of
+    // this panel. Filtering here would mean the last window to mount decides
+    // what all of them see.
     items: state.items.map((i) => toViewItem(i, now)),
+    workspaces: knownWorkspaces(),
     runs,
     missed: runs.filter((r) => r.status === 'missed' || r.status === 'undelivered'),
     notes: state.notes,
@@ -143,6 +167,63 @@ function buildView(now: Date, truncated: string[] = []): Views {
 /** Assemble one day's page — the auto half plus whatever the user wrote. */
 function dayPage(day: string): DayPage {
   return buildDayPage(state.items, state.runs, state.notes, state.completedAt, day);
+}
+
+/**
+ * The day page narrowed to one workspace (plus global), or everything.
+ *
+ * Narrowing happens here rather than in `buildDayPage` because the page's
+ * assembly — which occurrence belongs to which day, which completion landed on
+ * it — is scope-independent. Only the final lists are.
+ */
+function scopedDayPage(day: string, workspaceId: string | undefined, all: boolean): DayPage {
+  const page = dayPage(day);
+  if (all) return page;
+  const keep = (e: { workspaceId?: string }): boolean => !e.workspaceId || e.workspaceId === workspaceId;
+  const notes: Record<string, DayNote> = {};
+  for (const [scope, note] of Object.entries(page.notes)) {
+    if (!scope || scope === workspaceId) notes[scope] = note;
+  }
+  return { ...page, planned: page.planned.filter(keep), done: page.done.filter(keep), notes };
+}
+
+/**
+ * Occurrences inside `[from, to]`, grouped by local day and time-ordered.
+ *
+ * `expandOccurrences` is half-open `(from, to]`, so the window starts one
+ * millisecond earlier: an item at exactly 00:00 belongs to the day the caller
+ * asked from, not to the one before it.
+ */
+function occurrencesBetween(from: Date, to: Date): Record<string, MonthOccurrence[]> {
+  const byDay: Record<string, MonthOccurrence[]> = {};
+  const start = new Date(from.getTime() - 1);
+  for (const item of state.items) {
+    for (const occ of expandOccurrences(item, start, to)) {
+      const key = dayKey(occ.at!);
+      (byDay[key] ??= []).push({
+        itemId: item.id,
+        title: item.title,
+        key: occ.key,
+        at: toLocalIso(occ.at!),
+        allDay: Boolean(item.allDay),
+        done: item.completions.includes(occ.key),
+        workspaceId: item.workspaceId,
+      });
+    }
+  }
+  // A day reads in the order things happen; the grid shows the first two.
+  for (const list of Object.values(byDay)) {
+    list.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+  }
+  return byDay;
+}
+
+/** A day's written notes, each labelled with the workspace it came from. */
+function noteLines(page: DayPage): string[] {
+  return Object.entries(page.notes)
+    .filter(([, n]) => Boolean(n.text?.trim()))
+    .sort(([a], [b]) => (a < b ? -1 : 1))
+    .map(([scope, n]) => `${scope ? `[${workspaceLabel(scope)}] ` : ''}${n.text.trim()}`);
 }
 
 function render(truncated: string[] = []): void {
@@ -240,7 +321,12 @@ async function perform(run: DueRun): Promise<void> {
 
   if (trigger.action.kind === 'notify') {
     const title = trigger.action.title || item.title;
-    const body = item.note || formatWhen(fireAt, now, Boolean(item.allDay));
+    // Name the project: a reminder with no context reads as noise, and with
+    // several workspaces in play "站会" alone does not say which standup.
+    const body =
+      [formatWhen(fireAt, now, Boolean(item.allDay)), item.workspaceId ? workspaceLabel(item.workspaceId) : '', item.note]
+        .filter(Boolean)
+        .join(' · ');
     try {
       await ctx.call('notify.show', { title, body });
       state.runs.push(record(run, 'ok', now, '已发送系统通知'));
@@ -263,7 +349,14 @@ async function perform(run: DueRun): Promise<void> {
   }
 
   try {
-    await ctx.call('chat.send', { text: trigger.action.prompt });
+    // `workspaceId` routes the message to the window showing that workspace.
+    // Without it the host falls back to the focused window, and a reminder for
+    // project A would land in project B's conversation — the agent would then
+    // write its follow-up into the wrong project.
+    await ctx.call('chat.send', {
+      text: trigger.action.prompt,
+      ...(item.workspaceId ? { workspaceId: item.workspaceId } : {}),
+    });
     state.runs.push(record(run, 'ok', now, '已送进对话'));
   } catch (err) {
     // Recorded as "not delivered" rather than "failed". From the user's side
@@ -327,6 +420,8 @@ interface SaveInput {
   allDay?: boolean;
   rrule?: string | null;
   triggers?: Trigger[];
+  /** `null` / `''` puts the item in the global list. */
+  workspaceId?: string | null;
 }
 
 /** Create or update an item. Returns the stored item. */
@@ -347,6 +442,7 @@ function saveItem(input: SaveInput): Item {
   if (input.allDay !== undefined) item.allDay = input.allDay;
   if (input.rrule !== undefined) item.rrule = input.rrule || undefined;
   if (input.triggers !== undefined) item.triggers = input.triggers;
+  if (input.workspaceId !== undefined) item.workspaceId = input.workspaceId || undefined;
 
   // Triggers are anchored to an occurrence, so an item with no time can have
   // none — and nothing to repeat either. Dropping them here rather than letting
@@ -384,20 +480,44 @@ function saveItem(input: SaveInput): Item {
  * occurrence key is the dateless constant `'once'`.
  */
 function setCompletion(item: Item, key: string, done: boolean, now = new Date()): void {
+  const stamp = completionKey(item.id, key);
   if (done) {
     item.completions = Array.from(new Set([...item.completions, key]));
-    state.completedAt[key] = toLocalIso(now);
+    state.completedAt[stamp] = toLocalIso(now);
   } else {
     item.completions = item.completions.filter((k) => k !== key);
-    delete state.completedAt[key];
+    delete state.completedAt[stamp];
   }
 }
 
+/**
+ * The items a call may see: the calling conversation's workspace plus global
+ * ones.
+ *
+ * Scoping reads as well as writes is the point — an agent working in project B
+ * asking to update "周会" must not silently edit project A's 周会. `all` is the
+ * deliberate opt-out for genuinely cross-project questions.
+ */
+function itemsInScope(workspaceId: string | undefined, all: boolean): Item[] {
+  if (all) return state.items;
+  return state.items.filter((i) => !i.workspaceId || i.workspaceId === workspaceId);
+}
+
+/** `scope: 'all'` in a tool call — everything, regardless of workspace. */
+function wantsAll(scope: unknown): boolean {
+  return String(scope ?? '').trim().toLowerCase() === 'all';
+}
+
+/** `scope: 'global'` in a tool call — put it in the cross-project list. */
+function wantsGlobal(scope: unknown): boolean {
+  return String(scope ?? '').trim().toLowerCase() === 'global';
+}
+
 /** Find an item by title substring, most recently created first. */
-function findByTitle(title: string, preferOpen = true): Item | undefined {
+function findByTitle(title: string, pool: Item[], preferOpen = true): Item | undefined {
   const needle = String(title ?? '').trim();
   if (!needle) return undefined;
-  const matches = state.items
+  const matches = pool
     .filter((i) => i.title.includes(needle))
     .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
   return (preferOpen && matches.find((i) => i.completions.length === 0)) || matches[0];
@@ -434,8 +554,21 @@ function repeatSpec(value: unknown): string | undefined {
   );
 }
 
-async function onTool(name: string, params: Record<string, unknown>): Promise<ToolResult | string> {
+async function onTool(
+  name: string,
+  params: Record<string, unknown>,
+  _context: PluginContext,
+  call: { sessionId?: string; workspaceId?: string } = {},
+): Promise<ToolResult | string> {
   const p = params ?? {};
+  /**
+   * Where new items go by default: the workspace this conversation belongs to.
+   *
+   * Undefined when the host could not resolve one (a session that was never
+   * sent from). That is NOT a cue to fall back to whatever window is focused —
+   * it means "global", which is the only claim we can actually make.
+   */
+  const workspaceId = call.workspaceId;
 
   switch (name) {
     case 'item_add': {
@@ -478,6 +611,7 @@ async function onTool(name: string, params: Record<string, unknown>): Promise<To
         allDay,
         rrule,
         triggers,
+        workspaceId: wantsGlobal(p.scope) ? null : workspaceId,
       });
       await save();
       render();
@@ -486,6 +620,7 @@ async function onTool(name: string, params: Record<string, unknown>): Promise<To
       if (echo) lines.push(`时间：${echo}${p.when && !String(p.when).match(/^\d{4}-/) ? `（${FREE_TEXT_HINT}）` : ''}`);
       else lines.push('时间：无（纯待办）');
       if (item.rrule) lines.push(`重复：${describeRepeat(item.rrule)}`);
+      lines.push(`归属：${item.workspaceId ? workspaceLabel(item.workspaceId) : '全局'}`);
       for (const t of item.triggers) lines.push(`触发：${describeTrigger(t)}`);
       return {
         ...text(lines.join('\n')),
@@ -499,6 +634,7 @@ async function onTool(name: string, params: Record<string, unknown>): Promise<To
                 items: [
                   ['事项', item.title],
                   ...(echo ? [['时间', echo]] : []),
+                  ['归属', item.workspaceId ? workspaceLabel(item.workspaceId) : '全局'],
                   ...(item.rrule ? [['重复', describeRepeat(item.rrule)]] : []),
                   ...item.triggers.map((t) => ['触发', describeTrigger(t)]),
                 ],
@@ -523,13 +659,15 @@ async function onTool(name: string, params: Record<string, unknown>): Promise<To
       if (span < 0) throw new Error('from 比 to 还晚');
       if (span > 90) throw new Error('一次最多读 90 天，请缩短范围');
 
+      const all = wantsAll(p.scope);
       const lines: string[] = [];
       let wrote = 0;
       for (let i = 0; i <= span; i++) {
         const day = dayKey(addDays(fromD, i));
-        const page = dayPage(day);
-        const note = page.note?.text?.trim();
-        const empty = page.planned.length === 0 && page.done.length === 0 && page.missed.length === 0 && !note;
+        const page = scopedDayPage(day, workspaceId, all);
+        const notes = noteLines(page);
+        const empty =
+          page.planned.length === 0 && page.done.length === 0 && page.missed.length === 0 && notes.length === 0;
         if (empty) continue;
         wrote++;
 
@@ -539,7 +677,7 @@ async function onTool(name: string, params: Record<string, unknown>): Promise<To
         if (page.missed.length) {
           lines.push(`  错过的触发：${page.missed.map((r) => `${r.itemTitle}（${STATUS_CN[r.status]}）`).join('、')}`);
         }
-        if (note) lines.push(`  用户写的：${note.replace(/\n/g, '\n    ')}`);
+        if (notes.length) lines.push(`  用户写的：${notes.join('\n    ')}`);
         lines.push('');
       }
 
@@ -554,14 +692,21 @@ async function onTool(name: string, params: Record<string, unknown>): Promise<To
       if (!body) throw new Error('没给要写的内容');
 
       const mode = p.mode === 'replace' ? 'replace' : 'append';
-      const existing = state.notes[day]?.text ?? '';
+      // One note per (day, workspace). Writing project B's day must not touch
+      // project A's — they are different sentences about different work.
+      const scopeKey = wantsGlobal(p.scope) ? '' : (workspaceId ?? '');
+      const existing = state.notes[day]?.[scopeKey]?.text ?? '';
       const next = mode === 'replace' || !existing.trim() ? body : `${existing}\n\n${body}`;
-      state.notes[day] = { text: next, updatedAt: toLocalIso(new Date()) };
+      state.notes[day] = {
+        ...(state.notes[day] ?? {}),
+        [scopeKey]: { text: next, updatedAt: toLocalIso(new Date()) },
+      };
       await save();
       render();
 
       return text(
-        `已写入 ${day} 的记录${mode === 'replace' && existing.trim() ? '（覆盖了原来的内容）' : ''}。\n` +
+        `已写入 ${day} 的记录${scopeKey ? `（${workspaceLabel(scopeKey)}）` : '（全局）'}` +
+          `${mode === 'replace' && existing.trim() ? '，覆盖了原来的内容' : ''}。\n` +
           `现在这一天是：\n${next}`,
       );
     }
@@ -569,7 +714,8 @@ async function onTool(name: string, params: Record<string, unknown>): Promise<To
     case 'item_list': {
       const now = new Date();
       const range = String(p.range ?? 'week');
-      let items = state.items;
+      const all = wantsAll(p.scope);
+      let items = itemsInScope(workspaceId, all);
       if (range === 'today') {
         const today = dayKey(now);
         items = items.filter((i) => i.start && dayKey(new Date(i.start)) === today);
@@ -586,15 +732,20 @@ async function onTool(name: string, params: Record<string, unknown>): Promise<To
           const mark = v.done ? '✓' : '○';
           const rep = i.rrule ? ` ↻${describeRepeat(i.rrule)}` : '';
           const fire = v.nextFireAt ? ` · 下次触发 ${formatWhen(new Date(v.nextFireAt), now)}` : '';
-          return `${mark} ${v.whenLabel} — ${i.title}${rep}${fire}${i.note ? `（${i.note}）` : ''}`;
+          // Always name the owner: with scoped reads an item may be global or
+          // come from the current project, and the agent must be able to say
+          // which when it reports back.
+          const owner = i.workspaceId ? ` ·[${workspaceLabel(i.workspaceId)}]` : ' ·[全局]';
+          return `${mark} ${v.whenLabel} — ${i.title}${owner}${rep}${fire}${i.note ? `（${i.note}）` : ''}`;
         });
       const open = items.filter((i) => !toViewItem(i, now).done).length;
-      return text(`事项（范围：${range}，${open} 项未完成）：\n${lines.join('\n')}`);
+      const where = all ? '全部工作区' : `${workspaceId ? workspaceLabel(workspaceId) : '全局'} 及全局`;
+      return text(`事项（范围：${range}，${where}，${open} 项未完成）：\n${lines.join('\n')}`);
     }
 
     case 'item_update': {
-      const item = findByTitle(String(p.title ?? ""), true);
-      if (!item) throw new Error(`没找到事项：${p.title}`);
+      const item = findByTitle(String(p.title ?? ''), itemsInScope(workspaceId, wantsAll(p.scope)), true);
+      if (!item) throw new Error(`没找到事项：${p.title}${wantsAll(p.scope) ? '' : '（只在当前工作区和全局里找；要跨工作区请用 scope: "all"）'}`);
       const input: SaveInput = { id: item.id };
 
       if (p.when !== undefined) {
@@ -629,8 +780,8 @@ async function onTool(name: string, params: Record<string, unknown>): Promise<To
     }
 
     case 'item_remove': {
-      const item = findByTitle(String(p.title ?? ""), false);
-      if (!item) throw new Error(`没找到事项：${p.title}`);
+      const item = findByTitle(String(p.title ?? ''), itemsInScope(workspaceId, wantsAll(p.scope)), false);
+      if (!item) throw new Error(`没找到事项：${p.title}${wantsAll(p.scope) ? '' : '（只在当前工作区和全局里找；要跨工作区请用 scope: "all"）'}`);
       state.items = state.items.filter((i) => i.id !== item.id);
       await save();
       render();
@@ -649,8 +800,19 @@ async function onUiRequest(method: string, params: any): Promise<unknown> {
     case 'state.get':
       return buildView(new Date());
 
-    case 'day.get':
-      return dayPage(String(params?.day ?? dayKey(new Date())));
+    /**
+     * One day's page.
+     *
+     * `workspaceId` narrows it to that project plus global; `scope: 'all'`
+     * keeps every project. The panel sends whichever its filter is showing —
+     * the backend does not guess, because it cannot know which window asked.
+     */
+    case 'day.get': {
+      const day = String(params?.day ?? dayKey(new Date()));
+      const workspaceId =
+        typeof params?.workspaceId === 'string' && params.workspaceId ? params.workspaceId : undefined;
+      return scopedDayPage(day, workspaceId, wantsAll(params?.scope));
+    }
 
     /**
      * Write the day's free text.
@@ -664,16 +826,23 @@ async function onUiRequest(method: string, params: any): Promise<unknown> {
       const day = String(params?.day ?? dayKey(new Date()));
       const text = String(params?.text ?? '');
       const mode = params?.mode === 'replace' ? 'replace' : 'append';
-      const existing = state.notes[day]?.text ?? '';
+      // `''` is the global scope; the panel passes a workspace id when writing
+      // from a project view. Two scopes never share one block of text.
+      const scopeKey =
+        typeof params?.workspaceId === 'string' && params.workspaceId ? params.workspaceId : '';
+      const dayNotes = state.notes[day] ?? {};
+      const existing = dayNotes[scopeKey]?.text ?? '';
       const next = mode === 'replace' || !existing.trim() ? text : `${existing}\n\n${text}`;
       if (next.trim()) {
-        state.notes[day] = { text: next, updatedAt: toLocalIso(new Date()) };
+        state.notes[day] = { ...dayNotes, [scopeKey]: { text: next, updatedAt: toLocalIso(new Date()) } };
       } else {
-        delete state.notes[day];
+        delete dayNotes[scopeKey];
+        if (Object.keys(dayNotes).length > 0) state.notes[day] = dayNotes;
+        else delete state.notes[day];
       }
       await save();
       render();
-      return { ok: true, day, text: next };
+      return { ok: true, day, workspaceId: scopeKey, text: next };
     }
 
     /** Occurrences for the month grid. The panel cannot expand RRULEs itself. */
@@ -682,20 +851,24 @@ async function onUiRequest(method: string, params: any): Promise<unknown> {
       const month = Number(params?.month ?? new Date().getMonth());
       const from = new Date(year, month, 1, 0, 0, 0, 0);
       const to = new Date(year, month + 1, 0, 23, 59, 59, 999);
-      const byDay: Record<string, Array<{ itemId: string; title: string; key: string; at: string; done: boolean }>> = {};
-      for (const item of state.items) {
-        for (const occ of expandOccurrences(item, from, to)) {
-          const key = dayKey(occ.at!);
-          (byDay[key] ??= []).push({
-            itemId: item.id,
-            title: item.title,
-            key: occ.key,
-            at: toLocalIso(occ.at!),
-            done: item.completions.includes(occ.key),
-          });
-        }
+      return { year, month, label: formatMonth(from), byDay: occurrencesBetween(from, to) };
+    }
+
+    /**
+     * Occurrences for an arbitrary span of whole days.
+     *
+     * The month grid asks "what does 11月 look like"; the week view asks the
+     * same question about seven days, which may straddle two months. One
+     * expansion routine answers both, so the two views cannot drift.
+     */
+    case 'range.get': {
+      const from = dayStart(String(params?.from ?? dayKey(new Date())));
+      const to = dayEnd(String(params?.to ?? dayKey(new Date())));
+      if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+        throw new Error('日期要写成 2026-09-30 这样');
       }
-      return { year, month, label: formatMonth(from), byDay };
+      if (to < from) throw new Error('from 比 to 还晚');
+      return { from: dayKey(from), to: dayKey(to), byDay: occurrencesBetween(from, to) };
     }
 
     case 'item.save': {

@@ -1,19 +1,22 @@
 import { useEffect, useState } from 'react';
-import { Cpu, Hammer, SlidersHorizontal, Sparkles } from 'lucide-react';
+import { AudioLines, Cpu, Hammer, SlidersHorizontal, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '@/stores/ui-store';
 import { useI18n, type MessageKey } from '@/i18n';
+import { hasVoiceApi } from '@/lib/voice/voice-client';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { GeneralSettingsPage } from './general-settings';
 import { ModelsSettingsPage } from './models-settings';
 import { SkillsSettingsPage } from './skills-settings';
 import { ToolsSettingsPage } from './tools-settings';
+import { VoiceSettingsPage } from './voice-settings';
 
-type SectionId = 'general' | 'models' | 'tools' | 'skills';
+type SectionId = 'general' | 'models' | 'voice' | 'tools' | 'skills';
 
 const SECTIONS: { id: SectionId; label: MessageKey; icon: typeof Cpu }[] = [
   { id: 'general', label: '通用', icon: SlidersHorizontal },
   { id: 'models', label: '模型', icon: Cpu },
+  { id: 'voice', label: '语音', icon: AudioLines },
   { id: 'tools', label: '工具', icon: Hammer },
   { id: 'skills', label: '技能', icon: Sparkles },
 ];
@@ -56,7 +59,10 @@ export function SettingsDialog() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  const active = SECTIONS.find((s) => s.id === section) ?? SECTIONS[0];
+  // Voice is desktop-only: the web build has no microphone bridge or TTS
+  // playback path, so the section is absent rather than broken.
+  const sections = SECTIONS.filter((s) => s.id !== 'voice' || hasVoiceApi());
+  const active = sections.find((s) => s.id === section) ?? sections[0];
 
   return (
     <Dialog open={open} onOpenChange={setSettingsOpen}>
@@ -81,7 +87,7 @@ export function SettingsDialog() {
             <div className="px-2.5 pb-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
               {t('设置')}
             </div>
-            {SECTIONS.map(({ id, label, icon: Icon }) => (
+            {sections.map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
                 type="button"
@@ -112,6 +118,7 @@ export function SettingsDialog() {
             <div className="min-h-0 flex-1">
               {section === 'general' && <GeneralSettingsPage />}
               {section === 'models' && <ModelsSettingsPage />}
+              {section === 'voice' && hasVoiceApi() && <VoiceSettingsPage />}
               {section === 'tools' && <ToolsSettingsPage />}
               {section === 'skills' && <SkillsSettingsPage />}
             </div>

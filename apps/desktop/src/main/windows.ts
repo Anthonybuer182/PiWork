@@ -522,6 +522,17 @@ export class WindowRegistry implements BrowserRouter {
     this.send(target?.win, channel, payload);
   }
 
+  /**
+   * Deliver to the window showing `workspaceId`, falling back to the focused
+   * one when no window shows it (the project was switched away from, or a
+   * workspace-scoped send arrived while that window was closed).
+   */
+  sendToWorkspace(workspaceId: string | null | undefined, channel: string, payload: unknown): void {
+    const target =
+      (workspaceId ? this.byWorkspace(workspaceId) : undefined) ?? this.focused() ?? this.first();
+    this.send(target?.win, channel, payload);
+  }
+
   broadcast(channel: string, payload: unknown): void {
     for (const ctx of this.byWindowId.values()) this.send(ctx.win, channel, payload);
   }

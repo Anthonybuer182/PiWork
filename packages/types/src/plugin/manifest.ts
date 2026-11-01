@@ -245,6 +245,13 @@ export type PluginPermission = string;
  *
  * History:
  *
+ * 7 — added optional workspace attribution: `PluginToolCallMessage.workspaceId`
+ *     (the calling conversation's workspace), `panel.mounted`'s
+ *     `data.workspaceId`, and an injected `piSDK.workspace` /
+ *     `piSDK.onWorkspace(cb)` channel that tells a panel page which workspace
+ *     it is showing. Purely additive — every existing plugin ignores fields it
+ *     does not read, so the floor stays 3.
+ *
  * 6 — added optional `contributes.tools[].contract` (domain, summary,
  *     guidelines, output limits, unsupported operations, model requirement).
  *     Purely additive; the host enforces limits and renders the guidance into
@@ -274,7 +281,7 @@ export type PluginPermission = string;
  *     A manifest still declaring `selectionActions` is now rejected rather than
  *     silently ignored — see the `apiVersion` note on PluginManifest.
  */
-export const PLUGIN_PROTOCOL_VERSION = 6;
+export const PLUGIN_PROTOCOL_VERSION = 7;
 
 /**
  * The OLDEST protocol version this build still loads — the lower bound of the

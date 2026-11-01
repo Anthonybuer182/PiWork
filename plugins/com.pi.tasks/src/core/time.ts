@@ -120,6 +120,21 @@ export function formatMonth(date: Date): string {
   return `${date.getFullYear()}年${date.getMonth() + 1}月`;
 }
 
+/**
+ * A workspace id's display label: its last path segment.
+ *
+ * Workspace ids ARE absolute paths, and the plugin has no access to the
+ * workspace registry, so the folder name is the best label available. Doing it
+ * here rather than denormalising a name onto every item keeps one source of
+ * truth: if the folder moves, the id is stale too, and a stored copy would just
+ * be stale in a second place.
+ */
+export function workspaceLabel(workspaceId: string): string {
+  const trimmed = workspaceId.replace(/[\\/]+$/, '');
+  const cut = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf('\\'));
+  return cut >= 0 ? trimmed.slice(cut + 1) || trimmed : trimmed;
+}
+
 /** `1 小时 30 分钟` / `15 分钟` — trigger offsets, read by a person. */
 export function formatOffset(minutes: number): string {
   const abs = Math.abs(minutes);

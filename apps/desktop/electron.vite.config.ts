@@ -29,6 +29,9 @@ export default defineConfig({
       rollupOptions: {
         input: {
           index: resolve(__dirname, 'src/main/index.ts'),
+          // Voice inference runs in its own utility process (crash isolation,
+          // no main-thread stalls). It is loaded by path, not imported.
+          'voice-worker': resolve(__dirname, 'src/main/voice/worker.ts'),
         },
         output: {
           // Output ESM so dynamic imports work with externalized ESM-only packages

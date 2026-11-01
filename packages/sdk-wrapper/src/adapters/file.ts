@@ -1,8 +1,19 @@
 import type { FileService, FileEntry, FileContent, OfficeContent, DocxContent, XlsxContent, XlsxSheet, XlsxRow, XlsxCell, PptxContent, PptxSlide, PptxShape, PptxParagraph, PptxTextRun, PptxShapeFill, PptxShapeOutline, PptxTable, PptxTableCell, PptxTableRow } from '../services/file.js';
 import { IGNORED_DIR_NAMES } from '../services/file.js';
-import { readFileSync, writeFileSync, readdirSync, statSync, unlinkSync, type Dirent } from 'fs';
+import {
+  readFileSync,
+  writeFileSync,
+  readdirSync,
+  statSync,
+  lstatSync,
+  realpathSync,
+  rmSync,
+  unlinkSync,
+  type Dirent,
+  type Stats,
+} from 'fs';
 import { readdir, stat } from 'fs/promises';
-import { join, extname } from 'path';
+import { join, extname, basename, dirname, isAbsolute, relative, resolve, sep } from 'path';
 import ExcelJS from 'exceljs';
 import AdmZip from 'adm-zip';
 
@@ -259,8 +270,69 @@ export function createRealFileService(): FileService {
       writeFileSync(filePath, content, 'utf-8');
     },
 
-    async delete(_workspaceId: string, filePath: string): Promise<void> {
-      unlinkSync(filePath);
+    /**
+     * Delete a file or a directory tree.
+     *
+     * The renderer supplies both the workspace root and the target, so the
+     * service — not the caller — is the trust boundary: a target outside the
+     * workspace, the workspace root itself, or a path reached through a
+     * symlinked ancestor that escapes the workspace is refused. A missing
+     * target is a success (the postcondition already holds).
+     */
+    async delete(workspaceId: string, filePath: string): Promise<void> {
+      if (!workspaceId || !filePath) {
+        throw new Error('delete requires a workspace and a path');
+      }
+      const root = resolve(workspaceId);
+      const target = resolve(filePath);
+
+      // Lexical containment. `relative` also catches the `/ws` vs `/ws-evil`
+      // prefix trap that a naive startsWith() would let through.
+      const rel = relative(root, target);
+      if (!rel || rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+        throw new Error(`Refusing to delete outside the workspace: ${target}`);
+      }
+
+      // Real-path containment: deleting *through* a symlinked ancestor must
+      // not reach outside the workspace. The parent is resolved rather than
+      // the target so deleting the symlink itself stays allowed.
+      const rootReal = realpathSync(root);
+      const parent = dirname(target);
+      let parentReal: string;
+      try {
+        parentReal = realpathSync(parent);
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') return; // already gone
+        throw new Error(`Cannot resolve ${parent} (${code ?? 'UNKNOWN'})`);
+      }
+      // The parent may legitimately be the workspace root (prel === '').
+      const prel = relative(rootReal, parentReal);
+      if (prel === '..' || prel.startsWith(`..${sep}`) || isAbsolute(prel)) {
+        throw new Error(`Refusing to delete through a symlink outside the workspace: ${target}`);
+      }
+
+      const guarded = join(parentReal, basename(target));
+      let st: Stats;
+      try {
+        st = lstatSync(guarded);
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        if (code === 'ENOENT') return; // already gone
+        throw new Error(`Cannot delete ${guarded} (${code ?? 'UNKNOWN'})`);
+      }
+
+      try {
+        if (st.isDirectory()) {
+          rmSync(guarded, { recursive: true, force: true });
+        } else {
+          // Regular file, or a symlink: remove the link itself, never its target.
+          unlinkSync(guarded);
+        }
+      } catch (err) {
+        const code = (err as NodeJS.ErrnoException).code;
+        throw new Error(`Cannot delete ${guarded} (${code ?? 'UNKNOWN'})`);
+      }
     },
 
     async readOffice(_workspaceId: string, filePath: string): Promise<OfficeContent> {

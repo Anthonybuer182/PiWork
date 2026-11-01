@@ -21,6 +21,20 @@ files:
 asarUnpack:
   - "node_modules/@earendil-works/pi-coding-agent/**/*"
   - "node_modules/@mariozechner/clipboard*/**/*"
+  # Built-in voice: prebuilt N-API addon + platform runtime libs. `.node`,
+  # `.dylib` and `.so` files cannot be loaded from inside an asar archive.
+  - "node_modules/sherpa-onnx-node/**/*"
+  - "node_modules/sherpa-onnx-*/**/*"
+  - "**/node_modules/sherpa-onnx-node/**/*"
+  - "**/node_modules/sherpa-onnx-*/**/*"
+  # The inference worker is forked by path; keep it and the code-split chunks
+  # it imports outside the asar so Node can resolve them from the unpacked dir.
+  - "out/main/voice-worker.mjs"
+  - "out/main/chunks/**/*"
+
+# Strip sherpa packages for other platforms after packing, and fail the build
+# if the target platform's addon is missing.
+afterPack: "./scripts/prune-sherpa.cjs"
 
 # ── No built-in plugins, but a bundled offline market ──
 #
@@ -59,6 +73,9 @@ extraResources:
 
 mac:
   category: public.app-category.developer-tools
+  extendInfo:
+    # Required by macOS before the app may open the microphone (语音转写).
+    NSMicrophoneUsageDescription: PI 需要访问麦克风，把语音转写成文字。
   target:
     - dmg
     - zip

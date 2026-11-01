@@ -59,6 +59,11 @@ export class PluginWebViews {
    * broadcasts on change and on panel mount of the panels IT renders.
    */
   private lastTheme: Record<string, string> | null = null;
+  /** Last `panel.mounted` report per slot, replayed after a page reload. */
+  private readonly mounted = new Map<
+    string,
+    { panelId?: string; params?: unknown; sessionId?: string; workspaceId?: string }
+  >();
 
   constructor(
     private readonly opts: {
@@ -87,17 +92,29 @@ export class PluginWebViews {
     panelId?: string;
     params?: unknown;
     sessionId?: string;
+    workspaceId?: string;
   }): { ok: boolean; error?: string } {
     const slotId = `${msg?.pluginId}:${msg?.panelId}`;
     const view = this.views.get(slotId);
     if (!view || view.webContents.isDestroyed()) {
       return { ok: false, error: `no view for ${slotId}` };
     }
-    view.webContents.send('pi:plugin:panel-mounted', {
+    const payload = {
       panelId: msg?.panelId,
       params: msg?.params,
       sessionId: msg?.sessionId,
-    });
+      // The shell reports this, rather than main reading it off the window
+      // context: React flushes the panel's mount effect before the shell's own
+      // "active workspace changed" IPC, so ctx still holds the PREVIOUS
+      // workspace at this moment — and that stale value would stick.
+      workspaceId: msg?.workspaceId,
+    };
+    // Kept so a panel page that reloads (crash recovery, dev reload) gets the
+    // same report again. The shell only reports on mount, and a page reload is
+    // not a mount — without this the page comes back believing it serves no
+    // workspace, and every scoped panel silently falls back to "everything".
+    this.mounted.set(slotId, payload);
+    view.webContents.send('pi:plugin:panel-mounted', payload);
     return { ok: true };
   }
 
@@ -371,6 +388,7 @@ export class PluginWebViews {
     const view = this.views.get(slotId);
     this.views.delete(slotId);
     this.registered.delete(slotId);
+    this.mounted.delete(slotId);
     try {
       view?.webContents.close();
     } catch {
@@ -475,11 +493,14 @@ export class PluginWebViews {
     });
 
     // Late-created views miss the shell's last theme push, so replay it once
-    // the page can receive it.
+    // the page can receive it. The same goes for the mount report on a RELOAD:
+    // the shell only reports when it mounts the slot, so a page that comes
+    // back on its own would otherwise never learn its session or workspace.
     view.webContents.on('did-finish-load', () => {
-      if (this.lastTheme && !view.webContents.isDestroyed()) {
-        view.webContents.send('pi:plugin:theme', this.lastTheme);
-      }
+      if (view.webContents.isDestroyed()) return;
+      if (this.lastTheme) view.webContents.send('pi:plugin:theme', this.lastTheme);
+      const mounted = this.mounted.get(slotId);
+      if (mounted) view.webContents.send('pi:plugin:panel-mounted', mounted);
     });
 
     // A crashed renderer leaves a blank rectangle above the shell; surface it

@@ -43,6 +43,18 @@ export function runKey(itemId: string, occKey: string, triggerId: string): strin
   return `${itemId}|${occKey}|${triggerId}`;
 }
 
+/**
+ * Key for "when was this occurrence completed".
+ *
+ * The item id is part of it because every undated item's occurrence key is the
+ * constant `'once'` — keying by occurrence alone made them share one entry,
+ * so ticking one off overwrote another's timestamp and un-ticking one erased
+ * them all.
+ */
+export function completionKey(itemId: string, occKey: string): string {
+  return `${itemId}|${occKey}`;
+}
+
 /** When this trigger fires for this occurrence. */
 export function fireAt(occurrence: Occurrence, trigger: Pick<Trigger, 'offsetMinutes'>): Date | null {
   if (!occurrence.at) return null;

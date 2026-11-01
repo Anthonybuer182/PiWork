@@ -1,9 +1,9 @@
 {
   "id": "com.pi.tasks",
-  "name": "事项",
-  "description": "官方插件:待办 / 日程 / 定时任务 —— 没有时间的是待办,有时间的是日程,有时间+重复+动作的是定时任务",
-  "version": "0.1.0",
-  "apiVersion": 3,
+  "name": "日程本",
+  "description": "官方插件:待办 / 日程 / 定时任务 / 每日记录 —— 没有时间的是待办,有时间的是日程,有时间+重复+动作的是定时任务;每天还能写一段自己的工作记录",
+  "version": "0.2.0",
+  "apiVersion": 7,
   "engines": {
     "pi-desktop": ">=0.1.0"
   },
@@ -16,7 +16,7 @@
     "panels": [
       {
         "id": "items",
-        "title": "事项",
+        "title": "日程本",
         "icon": "calendar",
         "entry": "./ui-dist/panel/index.html",
         "keepAlive": "lru"
@@ -56,6 +56,13 @@
             "onDue": {
               "type": "string",
               "description": "A message to send to you (the agent) at that moment — e.g. '总结昨天的提交'. Requires `when`. The user must confirm this, so only set it when they asked for it."
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "global"
+              ],
+              "description": "Pass 'global' only when the item belongs to no project at all (e.g. 交房租, or a reminder to tidy all your to-dos). Otherwise omit it: the item goes into the workspace this conversation belongs to."
             }
           },
           "required": [
@@ -78,6 +85,13 @@
                 "all"
               ],
               "description": "Which window to list. Defaults to week."
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "all"
+              ],
+              "description": "Pass 'all' to list every workspace's items. By default only the current workspace's items and the global ones are listed."
             }
           },
           "additionalProperties": false
@@ -108,6 +122,13 @@
             "done": {
               "type": "boolean",
               "description": "Mark the current occurrence done or not done"
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "all"
+              ],
+              "description": "Pass 'all' to search every workspace. By default only the current workspace's items and the global ones are searched."
             }
           },
           "required": [
@@ -125,6 +146,13 @@
             "title": {
               "type": "string",
               "description": "Title (or part of it) of the item to delete"
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "all"
+              ],
+              "description": "Pass 'all' to search every workspace. By default only the current workspace's items and the global ones are searched."
             }
           },
           "required": [
@@ -150,6 +178,13 @@
             "to": {
               "type": "string",
               "description": "End of a range, YYYY-MM-DD. Defaults to today."
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "all"
+              ],
+              "description": "Pass 'all' to include every workspace. By default only the current workspace's items and notes (plus global ones) are read."
             }
           },
           "additionalProperties": false
@@ -176,6 +211,13 @@
                 "replace"
               ],
               "description": "Defaults to append. 'replace' discards whatever is already there — confirm with the user first."
+            },
+            "scope": {
+              "type": "string",
+              "enum": [
+                "global"
+              ],
+              "description": "Pass 'global' for a note that belongs to no project. Otherwise the note is written under the workspace this conversation belongs to; another project's note for the same day is never touched."
             }
           },
           "required": [

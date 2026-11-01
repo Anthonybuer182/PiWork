@@ -165,15 +165,25 @@ function toBackend(payload: unknown): void {
  */
 ipcRenderer.on(
   'pi:plugin:panel-mounted',
-  (_event, msg: { panelId?: string; params?: unknown; sessionId?: string }) => {
+  (
+    _event,
+    msg: { panelId?: string; params?: unknown; sessionId?: string; workspaceId?: string },
+  ) => {
     toBackend({
       kind: 'event',
       event: 'panel.mounted',
       panelId: msg?.panelId,
       // sessionId rides in `data` (NOT in params): it identifies the
-      // conversation the panel now serves, it is not an open param.
-      data: { panelId: msg?.panelId, params: msg?.params, sessionId: msg?.sessionId },
+      // conversation the panel now serves, it is not an open param. Same for
+      // workspaceId — it is the project the panel is serving.
+      data: {
+        panelId: msg?.panelId,
+        params: msg?.params,
+        sessionId: msg?.sessionId,
+        workspaceId: msg?.workspaceId,
+      },
     });
+    notifyWorkspace(msg?.workspaceId);
   },
 );
 
@@ -186,6 +196,21 @@ ipcRenderer.on('pi:plugin:theme', (_event, tokens: Record<string, string>) => {
   lastThemeTokens = tokens;
   themeCallback?.(tokens);
 });
+
+/**
+ * The workspace this panel serves. The BACKEND also receives it in
+ * `panel.mounted`, but a backend is one process shared by every window, so it
+ * cannot hold "the panel's workspace" without the last window to mount
+ * winning. The page can: each view has its own. So the value is pushed here
+ * and read through `piSDK.workspace` / `piSDK.onWorkspace`, not round-tripped
+ * through the backend.
+ */
+let workspaceCallback: ((workspaceId: string | null) => void) | null = null;
+let lastWorkspaceId: string | null = null;
+function notifyWorkspace(workspaceId: string | undefined): void {
+  lastWorkspaceId = typeof workspaceId === 'string' && workspaceId ? workspaceId : null;
+  workspaceCallback?.(lastWorkspaceId);
+}
 
 const bridge = {
   pluginId: PLUGIN_ID,
@@ -219,6 +244,18 @@ const bridge = {
     themeCallback = cb;
     // Replay if the tokens landed before the page subscribed.
     if (lastThemeTokens) cb(lastThemeTokens);
+  },
+
+  /**
+   * The workspace this panel is showing — `Workspace.id` (an absolute path),
+   * or null while the shell is not in any workspace.
+   *
+   * Replays on subscribe like `onTheme`, so a page that boots after the mount
+   * report still learns it. Fires again when the window switches workspace.
+   */
+  onWorkspace: (cb: (workspaceId: string | null) => void): void => {
+    workspaceCallback = cb;
+    cb(lastWorkspaceId);
   },
 
   /**

@@ -48,6 +48,13 @@ export function LiveSlot({
   // would change that reference on every switch. Re-firing on session change
   // is the point: the backend learns the panel now serves the new session.
   const sessionId = useUIStore((s) => s.activeSessionId);
+  // The workspace this window shows. Travels with the mount report for the
+  // same reason `sessionId` does, and one stronger one: main cannot read it
+  // off the window context here, because this effect runs before the shell's
+  // "active workspace changed" IPC lands — main would still hold the previous
+  // workspace, and the panel would keep that stale value until the next
+  // session switch.
+  const workspaceId = useUIStore((s) => s.activeWorkspaceId);
   // Host overlays that must cover native views. Settings is currently the only
   // one; a second overlay must be OR-ed in here (or this should become a
   // suspension counter on the slot registry) or it will be covered by every
@@ -65,9 +72,9 @@ export function LiveSlot({
     // Re-fires whenever params change; the view's preload queues it if the
     // panel's page (and its port) are not up yet.
     api
-      .invoke('pi:plugin:panel-mounted', { pluginId, panelId, params, sessionId })
+      .invoke('pi:plugin:panel-mounted', { pluginId, panelId, params, sessionId, workspaceId })
       .catch(() => {});
-  }, [pluginId, panelId, params, sessionId, notifyMounted]);
+  }, [pluginId, panelId, params, sessionId, workspaceId, notifyMounted]);
 
   useEffect(() => {
     const api = (window as unknown as {

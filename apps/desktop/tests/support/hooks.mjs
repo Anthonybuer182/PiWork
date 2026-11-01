@@ -24,9 +24,21 @@ function isFile(url) {
   }
 }
 
+/** `@main/foo` → `apps/desktop/src/main/foo` (same mapping the bundler uses). */
+const MAIN_PREFIX = '@main/';
+const MAIN_BASE = new URL('../../src/main/', import.meta.url);
+
 export async function resolve(specifier, context, nextResolve) {
   if (specifier === 'electron') {
     return { url: electronStub, shortCircuit: true };
+  }
+
+  if (specifier.startsWith(MAIN_PREFIX)) {
+    const base = new URL(specifier.slice(MAIN_PREFIX.length), MAIN_BASE);
+    for (const suffix of SUFFIXES) {
+      const candidate = new URL(`${base.href}${suffix}`);
+      if (isFile(candidate)) return { url: candidate.href, shortCircuit: true };
+    }
   }
 
   if (RELATIVE.test(specifier) && !HAS_EXTENSION.test(specifier) && context.parentURL) {

@@ -4,6 +4,8 @@ import { Virtuoso, VirtuosoHandle } from 'react-virtuoso';
 import { ArrowDown, AlertTriangle, RefreshCw, MessageSquare } from 'lucide-react';
 import { useSDK } from '@/hooks/use-sdk';
 import { useUIStore } from '@/stores/ui-store';
+import { useBuiltinModelsQuery, useVoiceSettingsQuery, hasVoiceApi } from '@/lib/voice/voice-client';
+import { stopSpeaking, useVoicePlaybackStore } from '@/stores/voice-playback-store';
 import { useComposerStore } from '@/stores/composer-store';
 import { Button } from '@/components/ui/button';
 import { stripAppendedContext } from '@/lib/quote-helpers';
@@ -225,6 +227,8 @@ export function ChatTimeline() {
   const setTriggerSend = useComposerStore((s) => s.setTriggerSend);
   const setEditingMessage = useComposerStore((s) => s.setEditingMessage);
   const clearEditingMessage = useComposerStore((s) => s.clearEditingMessage);
+  const { data: voiceSettings } = useVoiceSettingsQuery();
+  const { data: builtinModels = [] } = useBuiltinModelsQuery();
 
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -233,6 +237,14 @@ export function ChatTimeline() {
   // Track last scrollToBottomTrigger to avoid duplicate scrolls when
   // chatItems.length also changes (the effect watches both values).
   const lastScrollTriggerRef = useRef(0);
+  // Auto-read (设置 → 语音): speak a reply once its stream has finished and the
+  // final message is in the transcript. `preStreamIds` distinguishes the new
+  // reply from the previous one if the cache update lands a beat late.
+  const prevVoiceStreamingRef = useRef(isStreaming);
+  const preStreamIdsRef = useRef<Set<string>>(new Set());
+  const autoReadPendingRef = useRef(false);
+  const lastAutoReadRef = useRef<string | null>(null);
+  const streamSessionRef = useRef<string | null>(null);
 
   const { data: session, isLoading, error, refetch } = useQuery({
     queryKey: ['session', activeSessionId],
@@ -299,6 +311,57 @@ export function ChatTimeline() {
     }
     prevIsStreamingRef.current = isStreaming;
   }, [isStreaming, messages.length]);
+
+  useEffect(() => {
+    if (isStreaming && !prevVoiceStreamingRef.current) {
+      preStreamIdsRef.current = new Set(storedMessages.map((message) => message.id));
+      streamSessionRef.current = activeSessionId;
+      autoReadPendingRef.current = false;
+    } else if (!isStreaming && prevVoiceStreamingRef.current && !streamError) {
+      // Only read if the reply finished in the conversation still on screen.
+      autoReadPendingRef.current = streamSessionRef.current === activeSessionId;
+    }
+    prevVoiceStreamingRef.current = isStreaming;
+  }, [isStreaming, streamError, storedMessages, activeSessionId]);
+
+  useEffect(() => {
+    lastAutoReadRef.current = null;
+    autoReadPendingRef.current = false;
+    preStreamIdsRef.current = new Set();
+    // Leaving a conversation must stop audio it owns; otherwise speech keeps
+    // playing with no visible stop control.
+    return () => stopSpeaking();
+  }, [activeSessionId]);
+
+  useEffect(() => {
+    if (!autoReadPendingRef.current || isStreaming || streamError) return;
+    if (!hasVoiceApi() || !voiceSettings?.tts.autoRead) return;
+    if (!voiceSettings.tts.activeProvider && voiceSettings.tts.builtin === 'off') return;
+    // A local TTS model that is not downloaded would toast an error on every
+    // reply; stay silent until it is installed.
+    if (!voiceSettings.tts.activeProvider && voiceSettings.tts.builtin === 'local-tts') {
+      const modelId = voiceSettings.tts.builtinModel || 'melo-int8';
+      const ready = builtinModels.some((model) => model.id === modelId && model.installed);
+      if (!ready) return;
+    }
+    // Reading from a background window is surprising; a focused window is the
+    // signal that the user is actually there to listen.
+    if (!document.hasFocus() || document.visibilityState !== 'visible') return;
+    if (useVoicePlaybackStore.getState().status !== 'idle') {
+      // Another message is being read: skip this one rather than queueing it
+      // forever.
+      autoReadPendingRef.current = false;
+      return;
+    }
+    const last = [...storedMessages]
+      .reverse()
+      .find((message) => message.role === 'assistant' && message.content.trim());
+    if (!last || lastAutoReadRef.current === last.id) return;
+    if (preStreamIdsRef.current.has(last.id)) return;
+    autoReadPendingRef.current = false;
+    lastAutoReadRef.current = last.id;
+    void useVoicePlaybackStore.getState().speak(last.id, last.content);
+  }, [storedMessages, isStreaming, streamError, voiceSettings, builtinModels]);
 
   const chatItems = useMemo(
     () => addDateSeparators(messages, t, language),

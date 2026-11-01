@@ -1,8 +1,8 @@
 {
   "name": "com.pi.tasks",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "事项 — 待办 / 日程 / 定时任务。没有时间的是待办，有时间的是日程，有时间+重复+动作的是定时任务",
+  "description": "日程本 — 待办 / 日程 / 定时任务 / 每日记录。没有时间的是待办，有时间的是日程，有时间+重复+动作的是定时任务",
   "type": "module",
   "scripts": {
     "build": "node scripts/build-backend.mjs && node scripts/build-panel.mjs",

@@ -16,6 +16,17 @@ export interface Item {
   note?: string;
   createdAt: string;
 
+  /**
+   * The workspace this belongs to — `Workspace.id`, which is the absolute
+   * directory path. Absent means **global**: not part of any project ("交房租",
+   * "每周一整理待办"). That absence is the whole distinction; there is no
+   * separate flag.
+   *
+   * Treated as an opaque string here. The display label is the basename, which
+   * is exactly as stable as the id itself (both break if the folder is moved).
+   */
+  workspaceId?: string;
+
   /** Local ISO with offset. Absent = a plain to-do with no time at all. */
   start?: string;
   /** Local ISO with offset. Optional even when `start` is set. */
@@ -133,12 +144,23 @@ export interface DayNote {
 
 /** The whole persisted state, as stored under one `storage` key. */
 export interface TasksState {
+  /**
+   * Schema version. Absent (or 1) means the pre-workspace layout, which
+   * `migrate()` upgrades on load — see `backend/index.ts`.
+   */
+  version: number;
   items: Item[];
   runs: RunRecord[];
-  /** Free text per `YYYY-MM-DD` day. */
-  notes: Record<string, DayNote>;
   /**
-   * When each completion happened, keyed by occurrence key.
+   * Free text per day, per scope: `notes[YYYY-MM-DD][scopeKey]`.
+   *
+   * Nested rather than `"${scopeKey}|${day}"` because a workspace id is a
+   * filesystem path and can contain any separator we might pick.
+   * `scopeKey` is `''` for global, otherwise the workspace id.
+   */
+  notes: Record<string, Record<string, DayNote>>;
+  /**
+   * When each completion happened, keyed by `${itemId}|${occurrenceKey}`.
    *
    * `completions` alone cannot answer "what did I finish today" for an item
    * with no time: its occurrence key is the constant `'once'`, which carries no
@@ -146,7 +168,10 @@ export interface TasksState {
    * trace on any day, and the day page — whose entire job is "what did I
    * actually do" — would quietly omit them.
    *
-   * Kept separate from `completions` so existing stored data stays readable.
+   * The item id is part of the key, not decoration: every undated item's
+   * occurrence key is `'once'`, so keying by occurrence alone made all of them
+   * share one timestamp — completing one overwrote the others, un-completing
+   * one erased them all.
    */
   completedAt: Record<string, string>;
   /**

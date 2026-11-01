@@ -85,6 +85,17 @@ export interface PluginToolCallMessage {
    * concurrent sessions must not share one.
    */
   sessionId?: string;
+  /**
+   * The workspace that conversation belongs to — `Workspace.id`, which is the
+   * absolute directory path. Absent when it could not be resolved (a session
+   * that has never been sent from, a direct/test invocation), which a backend
+   * must treat as "no workspace", never as "the focused window's".
+   *
+   * Resolved from the session, not from window focus: a window can switch
+   * workspace while a run is in flight, and attributing that run's writes to
+   * the new workspace would put them in the wrong project.
+   */
+  workspaceId?: string;
 }
 
 /** A text/image content block returned by plugin tools (agent-facing). */
@@ -273,4 +284,10 @@ export type CapabilityMethod =
   | 'browser.setSplitTabs'
   | 'network.fetch'
   /** Put a message into the conversation, exactly as typing it would. */
-  | 'chat.send';
+  | 'chat.send'
+  /**
+   * Read text aloud through the app's configured TTS. `toggle: true` stops
+   * when this plugin is already speaking; requires the `voice` permission.
+   */
+  | 'voice.speak'
+  | 'voice.stop';

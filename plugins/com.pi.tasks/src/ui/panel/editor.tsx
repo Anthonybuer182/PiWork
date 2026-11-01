@@ -15,7 +15,7 @@
 import { useMemo, useState } from 'react';
 import type { Trigger } from '../../core/types.js';
 import { parseRepeat, buildRRule, describeRepeat, type RepeatKind } from '../../core/recur.js';
-import { dayKey, formatTime, toLocalIso } from '../../core/time.js';
+import { dayKey, formatTime, toLocalIso, workspaceLabel } from '../../core/time.js';
 import type { ViewItem } from '../../core/view.js';
 
 const REPEAT_KINDS: Array<{ kind: RepeatKind; label: string }> = [
@@ -44,6 +44,8 @@ export interface Draft {
   id?: string;
   title: string;
   note: string;
+  /** `''` = global. Decides which workspace's calendar this shows up in. */
+  workspaceId: string;
   hasTime: boolean;
   date: string;
   time: string;
@@ -54,14 +56,21 @@ export interface Draft {
   triggers: Trigger[];
 }
 
-function blankDraft(): Draft {
+function blankDraft(currentWorkspaceId: string | null, initialDay?: string): Draft {
   const now = new Date();
   return {
     id: undefined,
     title: '',
     note: '',
-    hasTime: false,
-    date: dayKey(now),
+    // New items belong to the project you are in — that is where you were
+    // standing when you wrote them down.
+    workspaceId: currentWorkspaceId ?? '',
+    // Opened from a day in the calendar, the item is meant to land on that
+    // day — so the time is on, pre-set to the date clicked. From the generic
+    // 「＋ 新建」 there is no such intent, and a plain to-do is the safer
+    // default.
+    hasTime: Boolean(initialDay),
+    date: initialDay ?? dayKey(now),
     time: '09:00',
     allDay: false,
     repeatKind: 'none',
@@ -78,6 +87,9 @@ function draftFrom(item: ViewItem): Draft {
     id: item.id,
     title: item.title,
     note: item.note ?? '',
+    // The item's own owner, never the filter's. Editing something you can see
+    // through 全部 must not quietly move it into the current project.
+    workspaceId: item.workspaceId ?? '',
     hasTime: Boolean(start),
     date: start ? dayKey(start) : dayKey(new Date()),
     time: start ? formatTime(start) : '09:00',
@@ -91,28 +103,60 @@ function draftFrom(item: ViewItem): Draft {
 
 let triggerSeq = 0;
 function newTrigger(): Trigger {
-  return { id: `g${Date.now().toString(36)}${(triggerSeq++).toString(36)}`, offsetMinutes: -15, action: { kind: 'notify' }, enabled: true };
+  return {
+    id: `g${Date.now().toString(36)}${(triggerSeq++).toString(36)}`,
+    // "到点时" rather than "提前 15 分钟": the row is added before the action
+    // is chosen, and firing exactly when the thing is due is the right default
+    // for both kinds — an agent told to run 15 minutes early is a surprise,
+    // not a feature.
+    offsetMinutes: 0,
+    action: { kind: 'notify' },
+    enabled: true,
+  };
 }
 
 export function Editor({
   item,
+  workspaces,
+  currentWorkspaceId,
+  initialDay,
   onSave,
   onDelete,
   onClose,
 }: {
   /** Absent = creating a new item. */
   item?: ViewItem;
+  /** Every workspace the planner knows about, for the 归属 select. */
+  workspaces: string[];
+  currentWorkspaceId: string | null;
+  /** A day picked in the calendar — a new item defaults onto it. */
+  initialDay?: string;
   onSave: (params: Record<string, unknown>) => Promise<void>;
   onDelete?: () => Promise<void>;
   onClose: () => void;
 }) {
-  const [draft, setDraft] = useState<Draft>(() => (item ? draftFrom(item) : blankDraft()));
+  const [draft, setDraft] = useState<Draft>(() =>
+    item ? draftFrom(item) : blankDraft(currentWorkspaceId, initialDay),
+  );
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   const set = <K extends keyof Draft>(key: K, value: Draft[K]): void =>
     setDraft((d) => ({ ...d, [key]: value }));
+
+  /**
+   * Options for 归属: everything the planner knows, plus the item's own owner
+   * and this window's workspace. The last one matters for an item whose
+   * project was deleted — dropping it from the list would silently rewrite it
+   * to 全局 the moment the dialog opened.
+   */
+  const ownerOptions = useMemo(() => {
+    const ids = new Set<string>(workspaces);
+    if (currentWorkspaceId) ids.add(currentWorkspaceId);
+    if (draft.workspaceId) ids.add(draft.workspaceId);
+    return [...ids].sort((a, b) => workspaceLabel(a).localeCompare(workspaceLabel(b)));
+  }, [workspaces, currentWorkspaceId, draft.workspaceId]);
 
   /** Built here so the preview line and the save agree on one interpretation. */
   const rrule = useMemo(
@@ -147,6 +191,7 @@ export function Editor({
         id: draft.id,
         title,
         note: draft.note.trim() || undefined,
+        workspaceId: draft.workspaceId || null,
         start: start ? toLocalIso(start) : null,
         allDay: draft.hasTime ? draft.allDay : undefined,
         rrule: rrule ?? null,
@@ -184,6 +229,19 @@ export function Editor({
       </div>
 
       <div className="field">
+        <label>归属</label>
+        <select value={draft.workspaceId} onChange={(e) => set('workspaceId', e.target.value)}>
+          <option value="">全局（不属于任何项目）</option>
+          {ownerOptions.map((id) => (
+            <option key={id} value={id}>
+              {workspaceLabel(id)}
+              {id === currentWorkspaceId ? '（当前工作区）' : ''}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <div className="field">
         <label>时间</label>
         <div className="chips" style={{ marginBottom: 6 }}>
           <button className="chip" data-on={!draft.hasTime} onClick={() => set('hasTime', false)}>
@@ -211,7 +269,11 @@ export function Editor({
             </div>
           </>
         )}
-        {!draft.hasTime && <div className="hint">没有时间就是一条纯待办，不会触发任何提醒。</div>}
+        {!draft.hasTime && (
+          <div className="hint">
+            没有时间就是一条纯待办，不会触发任何提醒。要定时提醒、或者让 agent 到点干活，先切到「有日期」。
+          </div>
+        )}
       </div>
 
       {draft.hasTime && (

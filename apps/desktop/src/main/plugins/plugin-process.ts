@@ -217,6 +217,7 @@ export class PluginProcess {
     name: string,
     params: Record<string, unknown>,
     sessionId?: string,
+    workspaceId?: string,
   ): Promise<{ content?: PluginToolContent[]; details?: unknown; card?: PluginToolCard }> {
     if (!this.child) {
       return Promise.reject(new Error('backend not running'));
@@ -228,7 +229,7 @@ export class PluginProcess {
         reject(new Error(`tool ${name} timed out`));
       }, TOOL_TIMEOUT_MS);
       this.toolPending.set(id, { resolve, reject, timer });
-      this.post({ type: 'tool-call', id, name, params, sessionId });
+      this.post({ type: 'tool-call', id, name, params, sessionId, workspaceId });
     });
   }
 

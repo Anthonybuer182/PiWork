@@ -3393,11 +3393,11 @@ function plugin(handlers) {
   const pendingProbes = /* @__PURE__ */ new Map();
   function routeFor(panelId) {
     if (panelId) {
-      const p = panelPorts.get(panelId);
-      if (p)
-        return p;
+      const ports = panelPorts.get(panelId);
+      if (ports && ports.size > 0)
+        return [...ports];
     }
-    return panelPort;
+    return panelPort ? [panelPort] : [];
   }
   __name(routeFor, "routeFor");
   const post = /* @__PURE__ */ __name((message) => host.postMessage(message), "post");
@@ -3421,15 +3421,22 @@ function plugin(handlers) {
       });
     },
     send(panelId, event, data) {
-      const port = routeFor(panelId);
-      if (!port)
+      const ports = routeFor(panelId);
+      if (ports.length === 0)
         return false;
-      port.postMessage({ kind: "event", event, panelId, data });
-      return true;
+      let delivered = false;
+      for (const port of ports) {
+        try {
+          port.postMessage({ kind: "event", event, panelId, data });
+          delivered = true;
+        } catch {
+        }
+      }
+      return delivered;
     },
     panelAlive(panelId, timeoutMs = PROBE_TIMEOUT_MS) {
-      const port = routeFor(panelId);
-      if (!port)
+      const ports = routeFor(panelId);
+      if (ports.length === 0)
         return Promise.resolve(false);
       const id = "probe-" + ++probeSeq;
       return new Promise((resolve) => {
@@ -3441,7 +3448,12 @@ function plugin(handlers) {
           clearTimeout(timer);
           resolve(true);
         });
-        port.postMessage({ kind: "event", event: "pi.probe", panelId, data: { id } });
+        for (const port of ports) {
+          try {
+            port.postMessage({ kind: "event", event: "pi.probe", panelId, data: { id } });
+          } catch {
+          }
+        }
       });
     },
     async openPanel(panelId, options) {
@@ -3474,7 +3486,8 @@ function plugin(handlers) {
     }
     try {
       const result = await handlers.onTool(name, msg.params ?? {}, ctx2, {
-        sessionId: msg.sessionId
+        sessionId: msg.sessionId,
+        workspaceId: msg.workspaceId
       });
       if (result === void 0 || result === null) {
         post({
@@ -3502,7 +3515,7 @@ function plugin(handlers) {
       const id = String(msg.id ?? "");
       const method = String(msg.method ?? "");
       const panelId = msg.panelId ?? "";
-      const replyPort = sourcePort ?? routeFor(panelId);
+      const replyPort = sourcePort ?? routeFor(panelId)[0];
       const reply = /* @__PURE__ */ __name((ok, error, result) => {
         replyPort?.postMessage({ kind: "response", id, ok, panelId, error, result });
       }, "reply");
@@ -3553,7 +3566,10 @@ function plugin(handlers) {
         }
         try {
           const data = msg.data ?? {};
-          await handlers.onPanelMounted(panelId, data.params, ctx2, { sessionId: data.sessionId });
+          await handlers.onPanelMounted(panelId, data.params, ctx2, {
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId
+          });
         } catch (err) {
           log("error", `onPanelMounted for "${panelId}" threw: ${describe(err)}`);
         }
@@ -3639,18 +3655,25 @@ function plugin(handlers) {
           const pid = e.data?.panelId;
           if (pid) {
             portPanel.set(port, pid);
-            panelPorts.set(pid, port);
+            const ports = panelPorts.get(pid) ?? /* @__PURE__ */ new Set();
+            ports.add(port);
+            panelPorts.set(pid, ports);
           }
           void onPanelMessage(e.data, port);
         });
         try {
           port.on("close", () => {
             const pid = portPanel.get(port);
-            if (pid && panelPorts.get(pid) === port)
-              panelPorts.delete(pid);
+            if (pid) {
+              const ports = panelPorts.get(pid);
+              ports?.delete(port);
+              if (ports && ports.size === 0)
+                panelPorts.delete(pid);
+            }
             portPanel.delete(port);
             if (panelPort === port) {
-              panelPort = panelPorts.size > 0 ? [...panelPorts.values()][panelPorts.size - 1] : null;
+              const last = [...panelPorts.values()].at(-1);
+              panelPort = last ? [...last].at(-1) ?? null : null;
               if (!panelPort)
                 portClosed = true;
             }
@@ -8515,6 +8538,12 @@ function formatMonth(date) {
   return `${date.getFullYear()}\u5E74${date.getMonth() + 1}\u6708`;
 }
 __name(formatMonth, "formatMonth");
+function workspaceLabel(workspaceId) {
+  const trimmed = workspaceId.replace(/[\\/]+$/, "");
+  const cut = Math.max(trimmed.lastIndexOf("/"), trimmed.lastIndexOf("\\"));
+  return cut >= 0 ? trimmed.slice(cut + 1) || trimmed : trimmed;
+}
+__name(workspaceLabel, "workspaceLabel");
 
 // src/core/parse-when.ts
 function normalizeRelative(input, now2) {
@@ -8691,6 +8720,10 @@ function runKey(itemId, occKey, triggerId) {
   return `${itemId}|${occKey}|${triggerId}`;
 }
 __name(runKey, "runKey");
+function completionKey(itemId, occKey) {
+  return `${itemId}|${occKey}`;
+}
+__name(completionKey, "completionKey");
 function fireAt(occurrence, trigger) {
   if (!occurrence.at) return null;
   return new Date(occurrence.at.getTime() + trigger.offsetMinutes * 6e4);
@@ -8788,6 +8821,63 @@ function formatSpan(minutes) {
 }
 __name(formatSpan, "formatSpan");
 
+// src/core/migrate.ts
+var STATE_VERSION = 2;
+function emptyState() {
+  return { version: STATE_VERSION, items: [], runs: [], notes: {}, completedAt: {} };
+}
+__name(emptyState, "emptyState");
+function isDayNote(value) {
+  return Boolean(value) && typeof value === "object" && typeof value.text === "string";
+}
+__name(isDayNote, "isDayNote");
+function migrateState(saved) {
+  const raw = saved && typeof saved === "object" ? saved : {};
+  const version = typeof raw.version === "number" ? raw.version : 1;
+  const items = Array.isArray(raw.items) ? raw.items : [];
+  const runs = Array.isArray(raw.runs) ? raw.runs : [];
+  const rawNotes = raw.notes && typeof raw.notes === "object" ? raw.notes : {};
+  const notes = {};
+  let changed = version !== STATE_VERSION;
+  for (const [day, value] of Object.entries(rawNotes)) {
+    if (isDayNote(value)) {
+      notes[day] = { "": value };
+      changed = true;
+    } else if (value && typeof value === "object") {
+      notes[day] = value;
+    }
+  }
+  const rawCompleted = raw.completedAt && typeof raw.completedAt === "object" ? raw.completedAt : {};
+  const completedAt = version < STATE_VERSION ? migrateCompletions(items, rawCompleted) : rawCompleted;
+  const state2 = {
+    version: STATE_VERSION,
+    items,
+    runs,
+    notes,
+    completedAt,
+    lastTickAt: typeof raw.lastTickAt === "string" ? raw.lastTickAt : void 0
+  };
+  return { state: state2, changed };
+}
+__name(migrateState, "migrateState");
+function migrateCompletions(items, old) {
+  const claimants = /* @__PURE__ */ new Map();
+  for (const item of items) {
+    for (const key of item.completions ?? []) {
+      const list = claimants.get(key);
+      if (list) list.push(item.id);
+      else claimants.set(key, [item.id]);
+    }
+  }
+  const next = {};
+  for (const [key, at] of Object.entries(old)) {
+    const owners = claimants.get(key);
+    if (owners?.length === 1) next[completionKey(owners[0], key)] = at;
+  }
+  return next;
+}
+__name(migrateCompletions, "migrateCompletions");
+
 // src/core/day.ts
 var MISSED_STATUSES = /* @__PURE__ */ new Set(["missed", "undelivered"]);
 function buildDayPage(items, runs, notes, completedAt, day) {
@@ -8805,7 +8895,8 @@ function buildDayPage(items, runs, notes, completedAt, day) {
         title: item.title,
         key: occ.key,
         at: occ.at ? toLocalIso(occ.at) : void 0,
-        repeat: repeats
+        repeat: repeats,
+        workspaceId: item.workspaceId
       };
       seen.add(`${item.id}|${occ.key}`);
       if (item.completions.includes(occ.key)) done.push(entry);
@@ -8813,10 +8904,16 @@ function buildDayPage(items, runs, notes, completedAt, day) {
     }
     if (!item.start) {
       for (const key of item.completions) {
-        const at = completedAt[key];
+        const at = completedAt[completionKey(item.id, key)];
         if (!at || dayKey(new Date(at)) !== day) continue;
         if (seen.has(`${item.id}|${key}`)) continue;
-        done.push({ itemId: item.id, title: item.title, key, repeat: false });
+        done.push({
+          itemId: item.id,
+          title: item.title,
+          key,
+          repeat: false,
+          workspaceId: item.workspaceId
+        });
       }
     }
   }
@@ -8826,8 +8923,7 @@ function buildDayPage(items, runs, notes, completedAt, day) {
   const byTime = /* @__PURE__ */ __name((a, b) => (a.at ?? "") < (b.at ?? "") ? -1 : (a.at ?? "") > (b.at ?? "") ? 1 : 0, "byTime");
   planned.sort(byTime);
   done.sort(byTime);
-  const note = notes[day];
-  return { day, planned, done, missed, ...note ? { note } : {} };
+  return { day, planned, done, missed, notes: notes[day] ?? {} };
 }
 __name(buildDayPage, "buildDayPage");
 
@@ -8837,20 +8933,13 @@ var STORAGE_KEY = "tasks";
 var MAX_RUNS = 500;
 var MAX_TICK_MS = 3e4;
 var MIN_TICK_MS = 250;
-var state = { items: [], runs: [], notes: {}, completedAt: {} };
+var state = emptyState();
 var PANEL = "items";
 async function load() {
   const saved = await ctx.call("storage.get", { key: STORAGE_KEY }).catch(() => void 0);
-  const s = saved && typeof saved === "object" ? saved : {};
-  state = {
-    items: Array.isArray(s.items) ? s.items : [],
-    runs: Array.isArray(s.runs) ? s.runs : [],
-    // Both are newer than the first release, so older stored state simply has
-    // them absent — defaulted here rather than migrated.
-    notes: s.notes && typeof s.notes === "object" ? s.notes : {},
-    completedAt: s.completedAt && typeof s.completedAt === "object" ? s.completedAt : {},
-    lastTickAt: s.lastTickAt
-  };
+  const { state: next, changed } = migrateState(saved);
+  state = next;
+  if (changed) await save();
 }
 __name(load, "load");
 async function save() {
@@ -8894,14 +8983,29 @@ function toViewItem(item, now2) {
     occurrenceKey: occKey,
     nextFireAt: next ? next.toISOString() : void 0,
     whenLabel: item.start ? item.allDay ? `${formatWhen(start, now2, true)} \u5168\u5929` : formatWhen(start, now2) : "\u65E0\u65E5\u671F",
-    group: groupOf(start, now2)
+    group: groupOf(start, now2),
+    workspaceId: item.workspaceId
   };
 }
 __name(toViewItem, "toViewItem");
+function knownWorkspaces() {
+  const ids = /* @__PURE__ */ new Set();
+  for (const item of state.items) if (item.workspaceId) ids.add(item.workspaceId);
+  for (const scopes of Object.values(state.notes)) {
+    for (const key of Object.keys(scopes)) if (key) ids.add(key);
+  }
+  return [...ids].sort();
+}
+__name(knownWorkspaces, "knownWorkspaces");
 function buildView(now2, truncated = []) {
   const runs = [...state.runs].reverse();
   return {
+    // Deliberately unfiltered: the panel is the only place that knows which
+    // workspace IT is showing, and `ui.render` goes to every window's view of
+    // this panel. Filtering here would mean the last window to mount decides
+    // what all of them see.
     items: state.items.map((i) => toViewItem(i, now2)),
+    workspaces: knownWorkspaces(),
     runs,
     missed: runs.filter((r) => r.status === "missed" || r.status === "undelivered"),
     notes: state.notes,
@@ -8914,6 +9018,44 @@ function dayPage(day) {
   return buildDayPage(state.items, state.runs, state.notes, state.completedAt, day);
 }
 __name(dayPage, "dayPage");
+function scopedDayPage(day, workspaceId, all) {
+  const page = dayPage(day);
+  if (all) return page;
+  const keep = /* @__PURE__ */ __name((e) => !e.workspaceId || e.workspaceId === workspaceId, "keep");
+  const notes = {};
+  for (const [scope, note] of Object.entries(page.notes)) {
+    if (!scope || scope === workspaceId) notes[scope] = note;
+  }
+  return { ...page, planned: page.planned.filter(keep), done: page.done.filter(keep), notes };
+}
+__name(scopedDayPage, "scopedDayPage");
+function occurrencesBetween(from, to) {
+  const byDay = {};
+  const start = new Date(from.getTime() - 1);
+  for (const item of state.items) {
+    for (const occ of expandOccurrences(item, start, to)) {
+      const key = dayKey(occ.at);
+      (byDay[key] ??= []).push({
+        itemId: item.id,
+        title: item.title,
+        key: occ.key,
+        at: toLocalIso(occ.at),
+        allDay: Boolean(item.allDay),
+        done: item.completions.includes(occ.key),
+        workspaceId: item.workspaceId
+      });
+    }
+  }
+  for (const list of Object.values(byDay)) {
+    list.sort((a, b) => new Date(a.at).getTime() - new Date(b.at).getTime());
+  }
+  return byDay;
+}
+__name(occurrencesBetween, "occurrencesBetween");
+function noteLines(page) {
+  return Object.entries(page.notes).filter(([, n]) => Boolean(n.text?.trim())).sort(([a], [b]) => a < b ? -1 : 1).map(([scope, n]) => `${scope ? `[${workspaceLabel(scope)}] ` : ""}${n.text.trim()}`);
+}
+__name(noteLines, "noteLines");
 function render(truncated = []) {
   ctx.send(PANEL, "ui.render", buildView(/* @__PURE__ */ new Date(), truncated));
   scheduleNextTick();
@@ -8975,7 +9117,7 @@ async function perform(run) {
   void ctx.call("panel.open", { panelId: "items", focus: false }).catch(() => void 0);
   if (trigger.action.kind === "notify") {
     const title = trigger.action.title || item.title;
-    const body = item.note || formatWhen(fireAt2, now2, Boolean(item.allDay));
+    const body = [formatWhen(fireAt2, now2, Boolean(item.allDay)), item.workspaceId ? workspaceLabel(item.workspaceId) : "", item.note].filter(Boolean).join(" \xB7 ");
     try {
       await ctx.call("notify.show", { title, body });
       state.runs.push(record(run, "ok", now2, "\u5DF2\u53D1\u9001\u7CFB\u7EDF\u901A\u77E5"));
@@ -8989,7 +9131,10 @@ async function perform(run) {
     return;
   }
   try {
-    await ctx.call("chat.send", { text: trigger.action.prompt });
+    await ctx.call("chat.send", {
+      text: trigger.action.prompt,
+      ...item.workspaceId ? { workspaceId: item.workspaceId } : {}
+    });
     state.runs.push(record(run, "ok", now2, "\u5DF2\u9001\u8FDB\u5BF9\u8BDD"));
   } catch (err) {
     state.runs.push(
@@ -9048,6 +9193,7 @@ function saveItem(input) {
   if (input.allDay !== void 0) item.allDay = input.allDay;
   if (input.rrule !== void 0) item.rrule = input.rrule || void 0;
   if (input.triggers !== void 0) item.triggers = input.triggers;
+  if (input.workspaceId !== void 0) item.workspaceId = input.workspaceId || void 0;
   if (!item.start) {
     item.triggers = [];
     item.rrule = void 0;
@@ -9065,19 +9211,33 @@ function saveItem(input) {
 }
 __name(saveItem, "saveItem");
 function setCompletion(item, key, done, now2 = /* @__PURE__ */ new Date()) {
+  const stamp = completionKey(item.id, key);
   if (done) {
     item.completions = Array.from(/* @__PURE__ */ new Set([...item.completions, key]));
-    state.completedAt[key] = toLocalIso(now2);
+    state.completedAt[stamp] = toLocalIso(now2);
   } else {
     item.completions = item.completions.filter((k) => k !== key);
-    delete state.completedAt[key];
+    delete state.completedAt[stamp];
   }
 }
 __name(setCompletion, "setCompletion");
-function findByTitle(title, preferOpen = true) {
+function itemsInScope(workspaceId, all) {
+  if (all) return state.items;
+  return state.items.filter((i) => !i.workspaceId || i.workspaceId === workspaceId);
+}
+__name(itemsInScope, "itemsInScope");
+function wantsAll(scope) {
+  return String(scope ?? "").trim().toLowerCase() === "all";
+}
+__name(wantsAll, "wantsAll");
+function wantsGlobal(scope) {
+  return String(scope ?? "").trim().toLowerCase() === "global";
+}
+__name(wantsGlobal, "wantsGlobal");
+function findByTitle(title, pool, preferOpen = true) {
   const needle = String(title ?? "").trim();
   if (!needle) return void 0;
-  const matches = state.items.filter((i) => i.title.includes(needle)).sort((a, b) => a.createdAt < b.createdAt ? 1 : -1);
+  const matches = pool.filter((i) => i.title.includes(needle)).sort((a, b) => a.createdAt < b.createdAt ? 1 : -1);
   return preferOpen && matches.find((i) => i.completions.length === 0) || matches[0];
 }
 __name(findByTitle, "findByTitle");
@@ -9101,8 +9261,9 @@ function repeatSpec(value) {
   );
 }
 __name(repeatSpec, "repeatSpec");
-async function onTool(name, params) {
+async function onTool(name, params, _context, call = {}) {
   const p = params ?? {};
+  const workspaceId = call.workspaceId;
   switch (name) {
     case "item_add": {
       if (!p.title) throw new Error("missing title");
@@ -9139,7 +9300,8 @@ async function onTool(name, params) {
         start,
         allDay,
         rrule,
-        triggers
+        triggers,
+        workspaceId: wantsGlobal(p.scope) ? null : workspaceId
       });
       await save();
       render();
@@ -9147,6 +9309,7 @@ async function onTool(name, params) {
       if (echo) lines.push(`\u65F6\u95F4\uFF1A${echo}${p.when && !String(p.when).match(/^\d{4}-/) ? `\uFF08${FREE_TEXT_HINT}\uFF09` : ""}`);
       else lines.push("\u65F6\u95F4\uFF1A\u65E0\uFF08\u7EAF\u5F85\u529E\uFF09");
       if (item.rrule) lines.push(`\u91CD\u590D\uFF1A${describeRepeat(item.rrule)}`);
+      lines.push(`\u5F52\u5C5E\uFF1A${item.workspaceId ? workspaceLabel(item.workspaceId) : "\u5168\u5C40"}`);
       for (const t of item.triggers) lines.push(`\u89E6\u53D1\uFF1A${describeTrigger(t)}`);
       return {
         ...text(lines.join("\n")),
@@ -9160,6 +9323,7 @@ async function onTool(name, params) {
                 items: [
                   ["\u4E8B\u9879", item.title],
                   ...echo ? [["\u65F6\u95F4", echo]] : [],
+                  ["\u5F52\u5C5E", item.workspaceId ? workspaceLabel(item.workspaceId) : "\u5168\u5C40"],
                   ...item.rrule ? [["\u91CD\u590D", describeRepeat(item.rrule)]] : [],
                   ...item.triggers.map((t) => ["\u89E6\u53D1", describeTrigger(t)])
                 ]
@@ -9181,13 +9345,14 @@ async function onTool(name, params) {
       const span = Math.round((toD.getTime() - fromD.getTime()) / 864e5);
       if (span < 0) throw new Error("from \u6BD4 to \u8FD8\u665A");
       if (span > 90) throw new Error("\u4E00\u6B21\u6700\u591A\u8BFB 90 \u5929\uFF0C\u8BF7\u7F29\u77ED\u8303\u56F4");
+      const all = wantsAll(p.scope);
       const lines = [];
       let wrote = 0;
       for (let i = 0; i <= span; i++) {
         const day = dayKey(addDays(fromD, i));
-        const page = dayPage(day);
-        const note = page.note?.text?.trim();
-        const empty = page.planned.length === 0 && page.done.length === 0 && page.missed.length === 0 && !note;
+        const page = scopedDayPage(day, workspaceId, all);
+        const notes = noteLines(page);
+        const empty = page.planned.length === 0 && page.done.length === 0 && page.missed.length === 0 && notes.length === 0;
         if (empty) continue;
         wrote++;
         lines.push(`\u3010${day} ${weekdayLabel(dayStart(day))}\u3011`);
@@ -9196,7 +9361,7 @@ async function onTool(name, params) {
         if (page.missed.length) {
           lines.push(`  \u9519\u8FC7\u7684\u89E6\u53D1\uFF1A${page.missed.map((r) => `${r.itemTitle}\uFF08${STATUS_CN[r.status]}\uFF09`).join("\u3001")}`);
         }
-        if (note) lines.push(`  \u7528\u6237\u5199\u7684\uFF1A${note.replace(/\n/g, "\n    ")}`);
+        if (notes.length) lines.push(`  \u7528\u6237\u5199\u7684\uFF1A${notes.join("\n    ")}`);
         lines.push("");
       }
       if (wrote === 0) return text(`${from} \u5230 ${to} \u4E4B\u95F4\u6CA1\u6709\u4EFB\u4F55\u8BB0\u5F55\u3002`);
@@ -9210,15 +9375,19 @@ ${lines.join("\n")}`);
       const body = String(p.text ?? "").trim();
       if (!body) throw new Error("\u6CA1\u7ED9\u8981\u5199\u7684\u5185\u5BB9");
       const mode = p.mode === "replace" ? "replace" : "append";
-      const existing = state.notes[day]?.text ?? "";
+      const scopeKey = wantsGlobal(p.scope) ? "" : workspaceId ?? "";
+      const existing = state.notes[day]?.[scopeKey]?.text ?? "";
       const next = mode === "replace" || !existing.trim() ? body : `${existing}
 
 ${body}`;
-      state.notes[day] = { text: next, updatedAt: toLocalIso(/* @__PURE__ */ new Date()) };
+      state.notes[day] = {
+        ...state.notes[day] ?? {},
+        [scopeKey]: { text: next, updatedAt: toLocalIso(/* @__PURE__ */ new Date()) }
+      };
       await save();
       render();
       return text(
-        `\u5DF2\u5199\u5165 ${day} \u7684\u8BB0\u5F55${mode === "replace" && existing.trim() ? "\uFF08\u8986\u76D6\u4E86\u539F\u6765\u7684\u5185\u5BB9\uFF09" : ""}\u3002
+        `\u5DF2\u5199\u5165 ${day} \u7684\u8BB0\u5F55${scopeKey ? `\uFF08${workspaceLabel(scopeKey)}\uFF09` : "\uFF08\u5168\u5C40\uFF09"}${mode === "replace" && existing.trim() ? "\uFF0C\u8986\u76D6\u4E86\u539F\u6765\u7684\u5185\u5BB9" : ""}\u3002
 \u73B0\u5728\u8FD9\u4E00\u5929\u662F\uFF1A
 ${next}`
       );
@@ -9226,7 +9395,8 @@ ${next}`
     case "item_list": {
       const now2 = /* @__PURE__ */ new Date();
       const range = String(p.range ?? "week");
-      let items = state.items;
+      const all = wantsAll(p.scope);
+      let items = itemsInScope(workspaceId, all);
       if (range === "today") {
         const today2 = dayKey(now2);
         items = items.filter((i) => i.start && dayKey(new Date(i.start)) === today2);
@@ -9240,15 +9410,17 @@ ${next}`
         const mark = v.done ? "\u2713" : "\u25CB";
         const rep = i.rrule ? ` \u21BB${describeRepeat(i.rrule)}` : "";
         const fire = v.nextFireAt ? ` \xB7 \u4E0B\u6B21\u89E6\u53D1 ${formatWhen(new Date(v.nextFireAt), now2)}` : "";
-        return `${mark} ${v.whenLabel} \u2014 ${i.title}${rep}${fire}${i.note ? `\uFF08${i.note}\uFF09` : ""}`;
+        const owner = i.workspaceId ? ` \xB7[${workspaceLabel(i.workspaceId)}]` : " \xB7[\u5168\u5C40]";
+        return `${mark} ${v.whenLabel} \u2014 ${i.title}${owner}${rep}${fire}${i.note ? `\uFF08${i.note}\uFF09` : ""}`;
       });
       const open = items.filter((i) => !toViewItem(i, now2).done).length;
-      return text(`\u4E8B\u9879\uFF08\u8303\u56F4\uFF1A${range}\uFF0C${open} \u9879\u672A\u5B8C\u6210\uFF09\uFF1A
+      const where = all ? "\u5168\u90E8\u5DE5\u4F5C\u533A" : `${workspaceId ? workspaceLabel(workspaceId) : "\u5168\u5C40"} \u53CA\u5168\u5C40`;
+      return text(`\u4E8B\u9879\uFF08\u8303\u56F4\uFF1A${range}\uFF0C${where}\uFF0C${open} \u9879\u672A\u5B8C\u6210\uFF09\uFF1A
 ${lines.join("\n")}`);
     }
     case "item_update": {
-      const item = findByTitle(String(p.title ?? ""), true);
-      if (!item) throw new Error(`\u6CA1\u627E\u5230\u4E8B\u9879\uFF1A${p.title}`);
+      const item = findByTitle(String(p.title ?? ""), itemsInScope(workspaceId, wantsAll(p.scope)), true);
+      if (!item) throw new Error(`\u6CA1\u627E\u5230\u4E8B\u9879\uFF1A${p.title}${wantsAll(p.scope) ? "" : '\uFF08\u53EA\u5728\u5F53\u524D\u5DE5\u4F5C\u533A\u548C\u5168\u5C40\u91CC\u627E\uFF1B\u8981\u8DE8\u5DE5\u4F5C\u533A\u8BF7\u7528 scope: "all"\uFF09'}`);
       const input = { id: item.id };
       if (p.when !== void 0) {
         if (p.when === null || p.when === "") {
@@ -9280,8 +9452,8 @@ ${lines.join("\n")}`);
 \u72B6\u6001\uFF1A${v.done ? "\u5DF2\u5B8C\u6210" : "\u672A\u5B8C\u6210"}`);
     }
     case "item_remove": {
-      const item = findByTitle(String(p.title ?? ""), false);
-      if (!item) throw new Error(`\u6CA1\u627E\u5230\u4E8B\u9879\uFF1A${p.title}`);
+      const item = findByTitle(String(p.title ?? ""), itemsInScope(workspaceId, wantsAll(p.scope)), false);
+      if (!item) throw new Error(`\u6CA1\u627E\u5230\u4E8B\u9879\uFF1A${p.title}${wantsAll(p.scope) ? "" : '\uFF08\u53EA\u5728\u5F53\u524D\u5DE5\u4F5C\u533A\u548C\u5168\u5C40\u91CC\u627E\uFF1B\u8981\u8DE8\u5DE5\u4F5C\u533A\u8BF7\u7528 scope: "all"\uFF09'}`);
       state.items = state.items.filter((i) => i.id !== item.id);
       await save();
       render();
@@ -9296,8 +9468,18 @@ async function onUiRequest(method, params) {
   switch (method) {
     case "state.get":
       return buildView(/* @__PURE__ */ new Date());
-    case "day.get":
-      return dayPage(String(params?.day ?? dayKey(/* @__PURE__ */ new Date())));
+    /**
+     * One day's page.
+     *
+     * `workspaceId` narrows it to that project plus global; `scope: 'all'`
+     * keeps every project. The panel sends whichever its filter is showing —
+     * the backend does not guess, because it cannot know which window asked.
+     */
+    case "day.get": {
+      const day = String(params?.day ?? dayKey(/* @__PURE__ */ new Date()));
+      const workspaceId = typeof params?.workspaceId === "string" && params.workspaceId ? params.workspaceId : void 0;
+      return scopedDayPage(day, workspaceId, wantsAll(params?.scope));
+    }
     /**
      * Write the day's free text.
      *
@@ -9310,18 +9492,22 @@ async function onUiRequest(method, params) {
       const day = String(params?.day ?? dayKey(/* @__PURE__ */ new Date()));
       const text2 = String(params?.text ?? "");
       const mode = params?.mode === "replace" ? "replace" : "append";
-      const existing = state.notes[day]?.text ?? "";
+      const scopeKey = typeof params?.workspaceId === "string" && params.workspaceId ? params.workspaceId : "";
+      const dayNotes = state.notes[day] ?? {};
+      const existing = dayNotes[scopeKey]?.text ?? "";
       const next = mode === "replace" || !existing.trim() ? text2 : `${existing}
 
 ${text2}`;
       if (next.trim()) {
-        state.notes[day] = { text: next, updatedAt: toLocalIso(/* @__PURE__ */ new Date()) };
+        state.notes[day] = { ...dayNotes, [scopeKey]: { text: next, updatedAt: toLocalIso(/* @__PURE__ */ new Date()) } };
       } else {
-        delete state.notes[day];
+        delete dayNotes[scopeKey];
+        if (Object.keys(dayNotes).length > 0) state.notes[day] = dayNotes;
+        else delete state.notes[day];
       }
       await save();
       render();
-      return { ok: true, day, text: next };
+      return { ok: true, day, workspaceId: scopeKey, text: next };
     }
     /** Occurrences for the month grid. The panel cannot expand RRULEs itself. */
     case "month.get": {
@@ -9329,20 +9515,23 @@ ${text2}`;
       const month = Number(params?.month ?? (/* @__PURE__ */ new Date()).getMonth());
       const from = new Date(year, month, 1, 0, 0, 0, 0);
       const to = new Date(year, month + 1, 0, 23, 59, 59, 999);
-      const byDay = {};
-      for (const item of state.items) {
-        for (const occ of expandOccurrences(item, from, to)) {
-          const key = dayKey(occ.at);
-          (byDay[key] ??= []).push({
-            itemId: item.id,
-            title: item.title,
-            key: occ.key,
-            at: toLocalIso(occ.at),
-            done: item.completions.includes(occ.key)
-          });
-        }
+      return { year, month, label: formatMonth(from), byDay: occurrencesBetween(from, to) };
+    }
+    /**
+     * Occurrences for an arbitrary span of whole days.
+     *
+     * The month grid asks "what does 11月 look like"; the week view asks the
+     * same question about seven days, which may straddle two months. One
+     * expansion routine answers both, so the two views cannot drift.
+     */
+    case "range.get": {
+      const from = dayStart(String(params?.from ?? dayKey(/* @__PURE__ */ new Date())));
+      const to = dayEnd(String(params?.to ?? dayKey(/* @__PURE__ */ new Date())));
+      if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+        throw new Error("\u65E5\u671F\u8981\u5199\u6210 2026-09-30 \u8FD9\u6837");
       }
-      return { year, month, label: formatMonth(from), byDay };
+      if (to < from) throw new Error("from \u6BD4 to \u8FD8\u665A");
+      return { from: dayKey(from), to: dayKey(to), byDay: occurrencesBetween(from, to) };
     }
     case "item.save": {
       const item = saveItem(params);

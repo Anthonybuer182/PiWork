@@ -53,6 +53,12 @@ export type { PermissionMode, PermissionDecision, PermissionRequest } from './st
 export { useAskStore, initAskBridge } from './stores/ask-store';
 export { useTodoStore, initTodoBridge } from './stores/todo-store';
 export { useToolStore, initToolBridge } from './stores/tool-store';
+export {
+  initPluginVoiceBridge,
+  speakExternal,
+  toggleExternal,
+  stopSpeaking,
+} from './stores/voice-playback-store';
 export { usePluginStore, getPluginBridge } from './stores/plugin-store';
 export { usePanelStore, pluginPanelId, usePanelActivation } from './stores/panel-store';
 export type { PanelEntry, PanelKeepAlive, PanelRuntimeState, PanelRegion, PanelAnchor } from './stores/panel-store';

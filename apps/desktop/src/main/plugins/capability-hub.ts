@@ -42,6 +42,8 @@ export interface CapabilityDeps {
   sendToRenderer?: (channel: string, payload: unknown) => void;
   /** The conversation's permission mode (默认 / 完全访问), for dialog policy. */
   getPermissionMode?: (sessionId: string) => 'default' | 'full';
+  /** Whether a TTS provider is ready; plugins get the error text when not. */
+  voiceReady?: () => { ok: boolean; error?: string };
 }
 
 interface CapabilitySpec {
@@ -61,6 +63,7 @@ export class CapabilityHub {
   private readonly vlmAnalyzer?: VlmAnalyzer;
   private readonly sendToRenderer?: (channel: string, payload: unknown) => void;
   private readonly getPermissionMode?: (sessionId: string) => 'default' | 'full';
+  private readonly voiceReady?: () => { ok: boolean; error?: string };
   private readonly capabilities = new Map<string, CapabilitySpec>();
 
   constructor(deps: CapabilityDeps) {
@@ -70,6 +73,7 @@ export class CapabilityHub {
     this.vlmAnalyzer = deps.vlmAnalyzer;
     this.sendToRenderer = deps.sendToRenderer;
     this.getPermissionMode = deps.getPermissionMode;
+    this.voiceReady = deps.voiceReady;
 
     this.registerCapabilities();
   }
@@ -96,10 +100,48 @@ export class CapabilityHub {
         if (!this.sendToRenderer) throw new Error('chat.send: no renderer attached');
         const plugin = this.registry.get(pluginId);
         const name = plugin?.manifest.name ?? pluginId;
+        // `workspaceId` is routing, not content: the shell delivers the message
+        // to the window showing that workspace. A scheduled job must reach the
+        // conversation it was scheduled from, not whichever window is focused.
+        const workspaceId =
+          typeof params.workspaceId === 'string' && params.workspaceId ? params.workspaceId : undefined;
         this.sendToRenderer('pi:chat:send', {
           text: `[插件消息 · 来自 ${name}（${pluginId}）]\n${text}`,
           pluginId,
+          ...(workspaceId ? { workspaceId } : {}),
         });
+        return { ok: true };
+      },
+    });
+
+    // ── voice.speak / voice.stop (permission: voice) ──
+    // Audio playback lives in the shell renderer, so the capability only
+    // relays the request there. Plugins cannot stream their own audio into the
+    // player; text is capped like the composer path.
+    this.capabilities.set('voice.speak', {
+      permission: 'voice',
+      handler: ({ pluginId, params }) => {
+        const raw = String(params.text ?? '');
+        const text = raw.trim().slice(0, 8000);
+        if (!text) throw new Error('voice.speak: text is required');
+        const ready = this.voiceReady?.() ?? { ok: true };
+        if (!ready.ok) throw new Error(ready.error ?? '语音合成未配置');
+        if (!this.sendToRenderer) throw new Error('voice.speak: no renderer attached');
+        this.sendToRenderer('pi:voice:speak', {
+          text,
+          key: `plugin:${pluginId}`,
+          toggle: params.toggle !== false,
+          pluginId,
+        });
+        return { ok: true };
+      },
+    });
+
+    this.capabilities.set('voice.stop', {
+      permission: 'voice',
+      handler: () => {
+        if (!this.sendToRenderer) throw new Error('voice.stop: no renderer attached');
+        this.sendToRenderer('pi:voice:stop', {});
         return { ok: true };
       },
     });

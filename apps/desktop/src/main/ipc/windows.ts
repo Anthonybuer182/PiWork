@@ -85,7 +85,16 @@ export function registerWindowIpcHandlers(windows: WindowRegistry): void {
   // must travel on the port of THAT window's view for that panel.
   ipcMain.handle(
     'pi:plugin:panel-mounted',
-    (event, msg: { pluginId?: string; panelId?: string; params?: unknown; sessionId?: string }) => {
+    (
+      event,
+      msg: {
+        pluginId?: string;
+        panelId?: string;
+        params?: unknown;
+        sessionId?: string;
+        workspaceId?: string;
+      },
+    ) => {
       const ctx = windows.byWebContents(event.sender);
       if (!ctx?.pluginWebViews) return { ok: false, error: 'unknown window' };
       return ctx.pluginWebViews.handlePanelMounted(msg);

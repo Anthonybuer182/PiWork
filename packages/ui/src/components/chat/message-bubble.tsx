@@ -9,6 +9,7 @@ import { MarkdownContent } from './markdown-content';
 import { renderTokenizedText } from '@/lib/token-parser';
 import { ImageBlockDisplay } from './image-block-display';
 import { FileBlockDisplay } from './file-block-display';
+import { SpeakButton } from './speak-button';
 import { extractAppendedQuotes } from '@/lib/quote-helpers';
 import { Button } from '@/components/ui/button';
 import {
@@ -335,6 +336,9 @@ function MessageBubbleImpl({
                 </TooltipTrigger>
                 <TooltipContent side="bottom">{copied ? t('已复制！') : t('复制')}</TooltipContent>
               </Tooltip>
+              {isAssistant && (
+                <SpeakButton messageId={message.id} text={message.content} />
+              )}
               {isUser && message.entryId && (
                 <Tooltip>
                   <TooltipTrigger asChild>

@@ -14,7 +14,7 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react';
 import type { DayEntry, DayPage } from '../../core/day.js';
 import type { RunRecord } from '../../core/types.js';
-import { dayKey, dayStart, formatDay, weekdayLabel } from '../../core/time.js';
+import { dayKey, dayStart, formatDay, weekdayLabel, workspaceLabel } from '../../core/time.js';
 
 /** Quiet period before a keystroke becomes a save. */
 const AUTOSAVE_MS = 800;
@@ -23,12 +23,19 @@ type SaveState = 'idle' | 'saving' | 'saved';
 
 export function DayPageView({
   page,
+  noteKey,
   onNavigate,
   onSaveNote,
   onRerun,
   onOpenItem,
 }: {
   page: DayPage | null;
+  /**
+   * Which note the textarea edits: `''` for the global one, else a workspace
+   * id. Notes are per scope, so this is the difference between writing "what I
+   * did in this project" and overwriting another project's day by accident.
+   */
+  noteKey: string;
   onNavigate: (day: string) => void;
   onSaveNote: (day: string, text: string) => Promise<void>;
   onRerun: (key: string) => void;
@@ -47,7 +54,7 @@ export function DayPageView({
   const loadedFor = useRef<string | null>(null);
 
   useEffect(() => {
-    const incoming = page?.note?.text ?? '';
+    const incoming = page?.notes?.[noteKey]?.text ?? '';
     if (loadedFor.current === day) {
       // Already showing this day. Adopt incoming text only when we are not
       // holding something of our own:
@@ -66,7 +73,7 @@ export function DayPageView({
     // Keyed on the day and the note's timestamp rather than the whole `page`
     // object, which is replaced on every tick and would re-run this constantly.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [day, page?.note?.updatedAt]);
+  }, [day, noteKey, page?.notes?.[noteKey]?.updatedAt]);
 
   useEffect(() => {
     if (timer.current) clearTimeout(timer.current);
@@ -112,6 +119,17 @@ export function DayPageView({
 
   const nothingHappened = page.planned.length === 0 && page.done.length === 0 && page.missed.length === 0;
 
+  /**
+   * Notes for this day written in OTHER scopes.
+   *
+   * Shown, not editable: the textarea belongs to the scope the filter is on.
+   * Seeing the other halves is still the point — "I wrote about today" should
+   * not look false just because it was written under a different project.
+   */
+  const otherNotes = Object.entries(page.notes).filter(
+    ([key, note]) => key !== noteKey && Boolean(note.text?.trim()),
+  );
+
   return (
     <>
       <div className="month-hd">
@@ -134,7 +152,10 @@ export function DayPageView({
       <div className="day-col">
         <div className="day-label">那天</div>
         {nothingHappened ? (
-          <div className="day-empty">这一天没有计划，也没有记录。</div>
+          // Only the auto half is empty here — whatever the user wrote renders
+          // below, so claiming "也没有记录" would contradict the textarea
+          // sitting right under it.
+          <div className="day-empty">这一天没有计划。</div>
         ) : (
           <>
             {page.done.length > 0 && (
@@ -161,6 +182,18 @@ export function DayPageView({
           </>
         )}
       </div>
+
+      {otherNotes.length > 0 && (
+        <div className="day-col">
+          <div className="day-label">别处写的</div>
+          {otherNotes.map(([key, note]) => (
+            <div key={key} className="note-other">
+              <div className="note-other-hd">{key ? workspaceLabel(key) : '全局'}</div>
+              <div className="note-other-body">{note.text}</div>
+            </div>
+          ))}
+        </div>
+      )}
 
       <div className="day-col">
         <div className="day-label">

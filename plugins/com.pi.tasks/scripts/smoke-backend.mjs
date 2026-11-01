@@ -101,14 +101,20 @@ function respondToCall(msg) {
   sendToBackend({ type: 'call-result', id, result, error });
 }
 
-/** Call a tool and wait for its result. */
+/**
+ * Call a tool and wait for its result.
+ *
+ * `call` is the context main attaches: `{ sessionId, workspaceId }`. Omitting
+ * it is exactly what a direct/test invocation looks like, and it must behave
+ * the same as an agent call from a session the host could not place.
+ */
 let current = null;
 let seq = 0;
-function callTool(name, params) {
+function callTool(name, params, call) {
   return new Promise((resolve, reject) => {
     const id = 't' + ++seq;
     current = { resolve, reject };
-    sendToBackend({ type: 'tool-call', id, name, params });
+    sendToBackend({ type: 'tool-call', id, name, params, ...(call ?? {}) });
     setTimeout(() => reject(new Error(`tool ${name} timed out`)), 5000);
   });
 }
@@ -223,6 +229,16 @@ check('the view describes the repeat', row?.repeatLabel === '每天', row?.repea
 const month = await uiRequest('month.get', { year: 2026, month: 8 });
 check('month.get expands recurring items into days', Object.keys(month.byDay ?? {}).length > 0);
 
+const week = await uiRequest('range.get', { from: '2026-09-27', to: '2026-10-03' });
+check('range.get answers a week that straddles two months', Object.keys(week.byDay ?? {}).length > 0, JSON.stringify(week));
+check(
+  'range.get keeps each day under its own local date',
+  Object.keys(week.byDay ?? {}).every((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)),
+  Object.keys(week.byDay ?? {}).join(','),
+);
+const badRange = await uiRequest('range.get', { from: '2026-10-03', to: '2026-09-27' }).catch((e) => ({ error: e.message }));
+check('range.get refuses a range that runs backwards', Boolean(badRange.error));
+
 await uiRequest('item.save', { title: '面板建的', start: '2026-10-01T10:00:00', allDay: false, triggers: [] });
 check('item.save writes through the panel path', store.tasks.items.some((i) => i.title === '面板建的'));
 
@@ -276,6 +292,44 @@ check('a backwards range is refused', Boolean(readBad.error), JSON.stringify(rea
 
 const readHuge = await callTool('day_read', { from: '2020-01-01', to: '2026-09-30' }).catch((e) => ({ error: e.message }));
 check('an unbounded range is refused instead of dumping years of text', /90/.test(readHuge.error ?? ''), readHuge.error);
+
+// ── workspace attribution ──
+
+const WS_A = '/tmp/smoke-A';
+const WS_B = '/tmp/smoke-B';
+
+await callTool('item_add', { title: 'A 项目的站会', when: '2026-10-01 09:00' }, { workspaceId: WS_A });
+await callTool('item_add', { title: 'B 项目的站会', when: '2026-10-01 09:00' }, { workspaceId: WS_B });
+await callTool('item_add', { title: '交房租', scope: 'global' }, { workspaceId: WS_A });
+
+const storedA = store.tasks.items.find((i) => i.title === 'A 项目的站会');
+const storedGlobal = store.tasks.items.find((i) => i.title === '交房租');
+check('an item defaults to the calling conversation’s workspace', storedA?.workspaceId === WS_A, JSON.stringify(storedA));
+check(
+  'scope: global keeps it out of every project',
+  Boolean(storedGlobal) && storedGlobal.workspaceId === undefined,
+  JSON.stringify(storedGlobal),
+);
+
+const listA = await callTool('item_list', { range: 'all' }, { workspaceId: WS_A });
+const listAText = listA.content?.[0]?.text ?? '';
+check('item_list shows its own project and the global items', listAText.includes('A 项目的站会') && listAText.includes('交房租'));
+check('item_list hides another project’s items', !listAText.includes('B 项目的站会'), listAText);
+
+const listAll = await callTool('item_list', { range: 'all', scope: 'all' }, { workspaceId: WS_A });
+check('scope: all sees every project', (listAll.content?.[0]?.text ?? '').includes('B 项目的站会'));
+
+const updateForeign = await callTool(
+  'item_update',
+  { title: 'B 项目的站会', done: true },
+  { workspaceId: WS_A },
+).catch((e) => ({ error: e.message }));
+check('editing another project’s item is refused by default', Boolean(updateForeign.error), JSON.stringify(updateForeign));
+
+// A host that cannot place the session must not guess: the write lands global.
+await callTool('item_add', { title: '没有工作区时记的事' });
+const unplaced = store.tasks.items.find((i) => i.title === '没有工作区时记的事');
+check('an unplaced call writes a global item, never a guessed project', unplaced?.workspaceId === undefined, JSON.stringify(unplaced));
 
 // ── the persisted shape ──
 

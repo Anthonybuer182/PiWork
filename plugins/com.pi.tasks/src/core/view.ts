@@ -34,32 +34,52 @@ export interface ViewItem {
   /** `今天 09:00` / `9月30日 周三 14:00` / `无日期` */
   whenLabel: string;
   group: AgendaGroup;
+  /** Absent = a global item (not part of any project). */
+  workspaceId?: string;
 }
 
 export interface Views {
   items: ViewItem[];
+  /**
+   * Every workspace id that appears in `notes` or `items`, so the panel's
+   * filter can list them without a second round trip. Ids are absolute paths;
+   * the panel derives the label (see `workspaceLabel`).
+   */
+  workspaces: string[];
   /** Newest first. */
   runs: RunRecord[];
   /** Recorded as missed or undelivered — awaiting a decision. */
   missed: RunRecord[];
   /**
-   * Every day's free text, so the panel's search box can match it without a
-   * round trip per keystroke. Bounded by how much a person writes, which is
-   * small; a real index would be premature.
+   * Every day's free text, per scope, so the panel's search box can match it
+   * without a round trip per keystroke. Bounded by how much a person writes,
+   * which is small; a real index would be premature.
    */
-  notes: Record<string, DayNote>;
+  notes: Record<string, Record<string, DayNote>>;
   now: string;
   /** Items whose rule expansion hit its ceiling. Surfaced, never hidden. */
   truncated: string[];
 }
 
-/** One occurrence in the month grid. */
+/** One occurrence in the month grid or the week columns. */
 export interface MonthOccurrence {
   itemId: string;
   title: string;
   key: string;
   at: string;
+  /** An all-day item shows no clock time — the cell has no room for a fake one. */
+  allDay?: boolean;
   done: boolean;
+  /** Absent = a global item. */
+  workspaceId?: string;
+}
+
+/** A span of whole days — what the week view asks for. */
+export interface RangeView {
+  /** `YYYY-MM-DD`, inclusive. */
+  from: string;
+  to: string;
+  byDay: Record<string, MonthOccurrence[]>;
 }
 
 export interface MonthView {
