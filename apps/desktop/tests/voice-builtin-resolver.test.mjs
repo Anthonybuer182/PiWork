@@ -86,7 +86,10 @@ test('turning the builtin off falls back to a configuration error', (t) => {
 
 test('system speech is the default TTS on macOS/Windows only', (t) => {
   const mac = service(t, 'darwin').get();
-  const provider = resolveVoiceProvider(mac, 'tts', undefined, {});
+  // Both halves must pass the platform explicitly. The resolver falls back to
+  // `process.platform`, so without it this test asserted macOS behaviour while
+  // running on the Linux CI runner — green locally, red on every push.
+  const provider = resolveVoiceProvider(mac, 'tts', undefined, { platform: 'darwin' });
   assert.equal(provider.entry.type, 'system-say');
   assert.equal(provider.name, '内置朗读（系统）');
 
