@@ -250,13 +250,21 @@ async function main() {
   }
 
   // ── Find asset ──
+  //
+  // The version segment in the asset name no longer matches the tag: upstream
+  // ships `MinGit-2.56.0.4-busybox-64-bit.zip` for `v2.56.0.windows.4`, while
+  // older releases used `MinGit-2.54.0-...`. Reconstructing the name from the
+  // tag therefore finds nothing and the release silently ships without bash —
+  // so match the known-good exact name first, then fall back to the shape.
   const cleanVersion = tag.replace(/^v/, '').replace(/\.windows\.\d+$/, '');
   // busybox flavor — see the header comment for why standard MinGit is not usable.
   const assetName = `MinGit-${cleanVersion}-busybox-64-bit.zip`;
-  const asset = assets.find((a) => a.name === assetName);
+  const asset =
+    assets.find((a) => a.name === assetName) ??
+    assets.find((a) => /^MinGit-[\d.]+-busybox-64-bit\.zip$/i.test(a.name));
 
   if (!asset) {
-    warn(`Asset "${assetName}" not found in release ${tag}.`);
+    warn(`Asset "${assetName}" (or any MinGit-*-busybox-64-bit.zip) not found in release ${tag}.`);
     if (cachedVersion) return log(`Reusing cached (${cachedVersion}).`);
     warn('Build will proceed without bundled bash.');
     return;

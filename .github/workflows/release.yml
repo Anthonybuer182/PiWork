@@ -215,13 +215,33 @@ jobs:
         if: matrix.platform == 'win'
         run: node apps/desktop/scripts/download-bash-bundle.cjs
 
+      # Windows 的实时防护会扫刚从 artifact 解出来的 zip，扫描期间文件被占用，
+      # electron-builder 复制进 resources/market/ 时会 EBUSY。装插件之后才会
+      # 复制大 zip，所以这个失败是加了插件市场才暴露出来的。
+      - name: Windows: keep Defender out of the workspace
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionPath "$env:TEMP" -ErrorAction SilentlyContinue
+
       # pnpm 的 workspace 软链会让 electron-builder 去包目录外找文件。
       - name: Prepare packaging
         run: node apps/desktop/scripts/prepare-pack.cjs
 
+      # 再留一次重试：EBUSY 是竞态，排除目录能大幅降低概率但不能证明为零。
       - name: Package
         working-directory: apps/desktop
-        run: pnpm exec electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+        run: |
+          for attempt in 1 2; do
+            if pnpm exec electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never; then
+              exit 0
+            fi
+            echo "::warning::electron-builder failed (attempt ${attempt}); retrying"
+            sleep 15
+          done
+          echo "::error::electron-builder failed twice"
+          exit 1
 
       - name: Check expected installers exist
         run: |
