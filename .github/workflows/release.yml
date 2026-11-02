@@ -290,8 +290,12 @@ jobs:
       # 唯一需要写权限的 job：创建 Release 并上传 Assets。
       contents: write
     steps:
+      # 只取安装包产物。不写 pattern 会把 plugin-market 那个 artifact 也下载
+      # 下来，于是每个插件的 zip 和 index.json 都会作为 Release asset 挂出去
+      # ——它们是打进安装包里的中间产物，不是给用户下载的文件。
       - uses: actions/download-artifact@v8
         with:
+          pattern: installers-*
           path: artifacts
           merge-multiple: true
 
