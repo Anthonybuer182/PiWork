@@ -58,10 +58,83 @@ jobs:
       - name: Test
         run: pnpm test
 
+  # ── 插件市场：构建一次，四个平台共用 ────────────────────────────────
+  # 首方插件的面板产物（plugins/*/ui-dist）是 gitignore 的构建输出，干净
+  # checkout 里没有；而每个打包 job 各装一遍依赖太贵（com.pi.files 一个就
+  # 约 790 MB，乘四个 runner）。所以在这里构建一次，打包 job 下载同一个
+  # artifact —— 之前那套「构建不出来就空市场出包」的兜底因此可以删掉：
+  # 一个没有插件的安装包不如出包失败。
+  market:
+    name: Build plugin market
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # 插件通过 file:../../packages/plugin-sdk 依赖宿主包，而它的入口是
+      # packages/*/dist —— 必须先把宿主包构建出来，插件才装得上、编得过。
+      - name: Build packages
+        run: pnpm build
+
+      - name: Install plugin dependencies
+        run: |
+          for dir in plugins/*/; do
+            # com.pi.devdocs 是纯 UI 插件，没有 package.json，也就没有构建。
+            [ -f "$dir/package.json" ] || continue
+            echo "::group::npm ci $dir"
+            (cd "$dir" && npm ci --no-audit --no-fund)
+            echo "::endgroup::"
+          done
+
+      - name: Build plugins
+        run: |
+          for dir in plugins/*/; do
+            [ -f "$dir/package.json" ] || continue
+            if node -e "process.exit(require('./$dir/package.json').scripts?.build ? 0 : 1)"; then
+              echo "::group::npm run build $dir"
+              (cd "$dir" && npm run build)
+              echo "::endgroup::"
+            fi
+          done
+
+      - name: Build market index
+        run: node scripts/build-market.mjs --skip-state --out market-dist
+
+      # 空市场的安装包看起来和正常的一样，只是用户装上后发现什么都没有。
+      - name: Assert the market is not empty
+        run: |
+          node -e "
+            const idx = require('./market-dist/index.json');
+            const plugins = idx.plugins ?? [];
+            console.log('market plugins:', plugins.map((p) => p.id + '@' + p.version).join(', ') || '(none)');
+            if (plugins.length === 0) {
+              console.error('::error::market index contains no plugins');
+              process.exit(1);
+            }
+          "
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: plugin-market
+          path: market-dist/
+          if-no-files-found: error
+          compression-level: 0
+
   # ── 打包：一个平台一个 runner，互不阻塞 ─────────────────────────────
   build:
     name: Package (${{ matrix.name }})
-    needs: verify
+    needs: [verify, market]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     # Windows 上也要用 bash：下面的脚本与 glob 都是 POSIX 写法。
@@ -117,23 +190,25 @@ jobs:
       - name: Build
         run: pnpm build
 
-      # 安装包会把插件市场打进 <resources>/market/。首方插件的 dist/ 未入库，
-      # 干净 clone 里 build-market 会失败 —— 那就不带插件出包，但不能因此
-      # 让 extraResources 指向一个不存在的目录。
+      # 安装包会把插件市场打进 <resources>/market/。市场由上面的 `market`
+      # job 统一构建，这里只取现成的 —— 不再有「构建不出来就空市场出包」
+      # 的兜底：拿不到就是流程出错，应当出包失败。
       # 注意 market-dist/ 必须落在 apps/desktop/ 下：electron-builder.yml 的
       # extraResources 是相对 app 目录解析的（与 pack:* 脚本一致）。
-      # TODO: 插件构建接入 CI 后，这里的兜底自然就不会再走到了。
-      - name: Build bundled plugin market
-        working-directory: apps/desktop
+      - name: Fetch the prebuilt plugin market
+        uses: actions/download-artifact@v8
+        with:
+          name: plugin-market
+          path: apps/desktop/market-dist
+
+      - name: Assert the market arrived
         run: |
-          if node ../../scripts/build-market.mjs --skip-state --out market-dist; then
-            echo "plugin market built"
-          else
-            echo "::warning::plugins are not buildable in a clean checkout yet — shipping an empty market index"
-            rm -rf market-dist
-            mkdir -p market-dist
-            node -e "require('node:fs').writeFileSync('market-dist/index.json', JSON.stringify({ version: 1, updated: new Date().toISOString(), plugins: [] }, null, 2))"
-          fi
+          node -e "
+            const idx = require('./apps/desktop/market-dist/index.json');
+            const n = (idx.plugins ?? []).length;
+            console.log('bundled market plugins:', n);
+            if (n === 0) { console.error('::error::the bundled market is empty'); process.exit(1); }
+          "
 
       # Windows 运行时依赖 bash（MinGit busybox），打包前必须下载到 bash-bundle/。
       - name: Download Windows shell bundle
