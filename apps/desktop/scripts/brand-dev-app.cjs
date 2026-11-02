@@ -77,7 +77,10 @@ function brand() {
     const bundleName = `${name}.app`;
     const bundle = path.join(OUT_DIR, bundleName);
     const execPath = path.join(bundle, 'Contents', 'MacOS', name);
-    const stamp = `${version} ${name} ${bundleId}`;
+    // The icon is baked into the clone, so a re-render has to invalidate it.
+    const iconPath = path.join(APP_ROOT, 'build', 'icon.icns');
+    const iconStamp = fs.existsSync(iconPath) ? fs.statSync(iconPath).mtimeMs : 0;
+    const stamp = `${version} ${name} ${bundleId} ${iconStamp}`;
     if (fs.existsSync(execPath) && fs.existsSync(STAMP) && fs.readFileSync(STAMP, 'utf8').trim() === stamp) {
       return execPath;
     }
@@ -106,9 +109,8 @@ function brand() {
 
     // The Dock icon is set at runtime too (app.dock.setIcon), but the bundle
     // should not advertise Electron's icon either.
-    const icon = path.join(APP_ROOT, 'build', 'icon.icns');
     const bundleIcon = path.join(bundle, 'Contents', 'Resources', 'electron.icns');
-    if (fs.existsSync(icon) && fs.existsSync(bundleIcon)) fs.copyFileSync(icon, bundleIcon);
+    if (fs.existsSync(iconPath) && fs.existsSync(bundleIcon)) fs.copyFileSync(iconPath, bundleIcon);
 
     // Drop whatever Launch Services cached for this path, then register the
     // bundle as it now stands.

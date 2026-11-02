@@ -152,37 +152,41 @@ function buildSvg() {
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${SIZE}" height="${SIZE}" viewBox="0 0 ${SIZE} ${SIZE}">
   <defs>
-    <linearGradient id="tile" x1="0.12" y1="0" x2="0.8" y2="1">
-      <stop offset="0" stop-color="#43308F"/>
-      <stop offset="0.5" stop-color="#291A63"/>
-      <stop offset="1" stop-color="#130C31"/>
+    <!-- Paper and ink, like the app itself: a near-white surface carrying
+         near-black content (globals.css: background 0 0% 100%, foreground
+         0 0% 5%). No hue anywhere. -->
+    <linearGradient id="tile" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0" stop-color="#FEFEFE"/>
+      <stop offset="0.55" stop-color="#F4F4F6"/>
+      <stop offset="1" stop-color="#D9D9DE"/>
     </linearGradient>
-    <radialGradient id="sheen" cx="0.34" cy="0.06" r="0.8">
-      <stop offset="0" stop-color="#9F7AFF" stop-opacity="0.42"/>
-      <stop offset="1" stop-color="#9F7AFF" stop-opacity="0"/>
-    </radialGradient>
-    <radialGradient id="ember" cx="0.92" cy="0.98" r="0.62">
-      <stop offset="0" stop-color="#EC4899" stop-opacity="0.22"/>
-      <stop offset="1" stop-color="#EC4899" stop-opacity="0"/>
-    </radialGradient>
-    <linearGradient id="mark" x1="0.05" y1="0" x2="0.95" y2="1">
-      <stop offset="0" stop-color="#99F6E4"/>
-      <stop offset="0.3" stop-color="#7DD3FC"/>
-      <stop offset="0.62" stop-color="#B39BFF"/>
-      <stop offset="0.86" stop-color="#F0ABFC"/>
-      <stop offset="1" stop-color="#FBCFE8"/>
+    <!-- The sheen is what keeps a white tile from dissolving into a white
+         desktop: a raised top edge and a faint bottom turn. -->
+    <linearGradient id="lip" x1="0.5" y1="0" x2="0.5" y2="0.42">
+      <stop offset="0" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1" stop-color="#000000" stop-opacity="0.07"/>
     </linearGradient>
-    <filter id="bloom" x="-30%" y="-30%" width="160%" height="160%">
-      <feGaussianBlur stdDeviation="30"/>
+    <linearGradient id="mark" x1="0.12" y1="0" x2="0.88" y2="1">
+      <stop offset="0" stop-color="#1B1B1F"/>
+      <stop offset="0.6" stop-color="#0B0B0D"/>
+      <stop offset="1" stop-color="#000000"/>
+    </linearGradient>
+    <!-- A shallow drop shadow, so the letter sits on the surface instead of
+         being printed flat onto it. -->
+    <filter id="lift" x="-20%" y="-20%" width="140%" height="150%">
+      <feDropShadow dx="0" dy="9" stdDeviation="11" flood-color="#000000" flood-opacity="0.16"/>
+    </filter>
+    <!-- A white tile on a white desktop has no edge of its own. -->
+    <filter id="seat" x="-15%" y="-15%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="10" stdDeviation="16" flood-color="#000000" flood-opacity="0.13"/>
     </filter>
   </defs>
 
-  <path d="${tile}" fill="url(#tile)"/>
-  <path d="${tile}" fill="url(#sheen)"/>
-  <path d="${tile}" fill="url(#ember)"/>
+  <path d="${tile}" fill="url(#tile)" filter="url(#seat)"/>
+  <path d="${tile}" fill="none" stroke="#000000" stroke-opacity="0.08" stroke-width="2"/>
+  <path d="${tile}" fill="url(#lip)"/>
 
-  <path d="${w}" fill="url(#mark)" filter="url(#bloom)" opacity="0.38"/>
-  <path d="${w}" fill="url(#mark)"/>
+  <path d="${w}" fill="url(#mark)" filter="url(#lift)"/>
 </svg>
 `;
 }
