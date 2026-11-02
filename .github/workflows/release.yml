@@ -185,10 +185,30 @@ jobs:
 
       # Windows 不走 artifact：从 artifact 解出来的 zip 会被实时防护持有句柄，
       # electron-builder 把它复制进 resources/market/ 时稳定 EBUSY（重试也过不去，
-      # 而且只有 com.pi.files 那个 21 MB 的包会中招）。就地构建绕开这条路径。
+      # 而且只有 com.pi.files 那个 21 MB 的包会中招）。
       - name: Build the plugin market in place (Windows)
         if: matrix.platform == 'win'
         run: node scripts/ci-build-market.mjs apps/desktop/market-dist
+
+      # 再把市场整体复制一遍。两个作用：
+      # 1) 读一遍源文件 —— 如果这一步就失败，说明锁在源文件上，日志会写清楚；
+      # 2) electron-builder 接下来读到的是我们刚用普通文件 API 写出来的副本，
+      #    而不是 build-market 里 adm-zip 产生的那些。
+      - name: 'Windows: re-materialise the market'
+        if: matrix.platform == 'win'
+        shell: pwsh
+        run: |
+          $src = "apps\desktop\market-dist"
+          $tmp = "apps\desktop\market-dist.tmp"
+          Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item $src $tmp -Recurse -Force
+          Get-ChildItem $tmp -Filter *.zip | ForEach-Object {
+            $null = Get-FileHash $_.FullName -Algorithm SHA256
+            Write-Host ("  {0}  {1:N1} MB  readable" -f $_.Name, ($_.Length / 1MB))
+          }
+          Remove-Item $src -Recurse -Force
+          Move-Item $tmp $src
+          Write-Host "market re-materialised:" (Get-ChildItem $src -Filter *.zip).Count "zips"
 
       - name: Assert the market arrived
         run: |
