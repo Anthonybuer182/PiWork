@@ -32,9 +32,11 @@ asarUnpack:
   - "out/main/voice-worker.mjs"
   - "out/main/chunks/**/*"
 
-# Strip sherpa packages for other platforms after packing, and fail the build
-# if the target platform's addon is missing.
-afterPack: "./scripts/prune-sherpa.cjs"
+# Strip sherpa packages for other platforms after packing, fail the build if
+# the target platform's addon is missing, and (on Windows) copy the bundled
+# plugin market ourselves — electron-builder's copy of the 21 MB
+# com.pi.files zip hits EBUSY there. See scripts/after-pack.cjs.
+afterPack: "./scripts/after-pack.cjs"
 
 # ── No built-in plugins, but a bundled offline market ──
 #
@@ -89,8 +91,11 @@ mac:
 win:
   # Bundle MinGit BusyBox (shell + git + coreutils) so Windows users
   # get bash-like command execution out of the box.
-  # Note: platform-level extraResources OVERRIDE the top-level list rather than
-  # extending it, so the bundled market must be listed here too.
+  #
+  # Platform-level extraResources OVERRIDE the top-level list rather than
+  # extending it — which is why the market is absent here: on Windows it is
+  # copied by afterPack instead (electron-builder's copy of the 21 MB
+  # com.pi.files zip fails with EBUSY on the runners). See scripts/after-pack.cjs.
   #
   # Build this target on Windows — macOS cross-builds are blocked twice:
   # rcedit needs wine and makensis ships x86_64-only, both unusable on
@@ -98,8 +103,6 @@ win:
   extraResources:
     - from: "bash-bundle/"
       to: "bash-bundle/"
-    - from: "market-dist/"
-      to: "market/"
   target:
     - target: nsis
       arch:
