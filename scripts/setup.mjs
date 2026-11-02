@@ -107,7 +107,7 @@ if (!existsSync(join(REPO, 'pnpm-workspace.yaml')) || !existsSync(join(REPO, 'ap
   process.exit(2);
 }
 
-console.log('[setup] Pi Coding Agent Desktop — dev setup');
+console.log('[setup] PiWork — dev setup');
 note(`repo     : ${REPO}`);
 note(`node     : ${process.versions.node}`);
 

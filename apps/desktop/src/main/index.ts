@@ -1,9 +1,10 @@
 import { app } from 'electron';
+import { APP_NAME } from '@main/branding';
 import { registerIpcHandlers } from '@main/ipc/index';
 import { registerNativeIpcHandlers } from '@main/ipc/native';
 import { registerWindowIpcHandlers } from '@main/ipc/windows';
 import { SettingsManager, ModelRegistry, AuthStorage } from '@earendil-works/pi-coding-agent';
-import { existsSync } from 'fs';
+import { copyFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { ENGINE_UA, VlmAnalyzer } from '@main/browser';
 import { persistBrowserSessionCookies } from '@main/browser/browser-session';
@@ -27,6 +28,46 @@ import { windows } from '@main/windows';
 import { WindowStateStore } from '@main/window-state';
 import { installApplicationMenu } from '@main/menu';
 import type { ToolCatalogEntry } from '@pi/types';
+
+/**
+ * Product name — one source of truth for what the OS calls this app.
+ *
+ * Must run before anything touches `app.getPath('userData')`, which is derived
+ * from the name. Without it a development run is literally "Electron" (that is
+ * the bundle being executed): Dock tooltip, app menu, userData folder.
+ */
+app.setName(APP_NAME);
+
+/**
+ * Electron derives userData from the app name, so renaming the product would
+ * silently move it — every setting, the window layout and the permission
+ * audit would look reset. Adopt the old directory once, before anything
+ * reads the new one.
+ *
+ * Runs only while the new directory is still absent, so it can never overwrite
+ * a live profile. Only the small config files come along: Chromium's caches
+ * rebuild themselves, and copying them would stall startup for no gain.
+ */
+const LEGACY_USER_DATA_DIRS = ['Pi Coding Agent', '@pi/desktop'];
+function adoptLegacySettings(): void {
+  const appData = app.getPath('appData');
+  const target = join(appData, APP_NAME);
+  if (existsSync(target)) return;
+  for (const legacy of LEGACY_USER_DATA_DIRS) {
+    const source = join(appData, legacy);
+    if (!existsSync(source)) continue;
+    mkdirSync(target, { recursive: true });
+    let adopted = 0;
+    for (const name of readdirSync(source)) {
+      if (!/\.(json|jsonl)$/.test(name)) continue;
+      copyFileSync(join(source, name), join(target, name));
+      adopted += 1;
+    }
+    console.log(`[userData] adopted ${adopted} file(s) from ${source}`);
+    return;
+  }
+}
+adoptLegacySettings();
 
 // Enable Chrome DevTools Protocol so external tooling (Playwright, DevTools)
 // can connect to the app's own webContents (including the embedded browser
@@ -78,6 +119,13 @@ if (!gotLock) {
   });
 
   app.whenReady().then(async () => {
+    // A dev run has no app bundle, so the Dock shows Electron's own icon.
+    // Packaged builds get theirs from the bundle — nothing to do there.
+    if (!app.isPackaged) {
+      const icon = join(app.getAppPath(), 'build/icon.png');
+      if (existsSync(icon)) app.dock?.setIcon(icon);
+    }
+
     const settingsManager = SettingsManager.create(app.getPath('home'));
 
     // Shared ModelRegistry — used by the chat service and the browser walk

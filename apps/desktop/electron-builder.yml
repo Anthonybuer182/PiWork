@@ -1,5 +1,5 @@
-appId: com.pi.coding-agent
-productName: Pi Coding Agent
+appId: com.pi.work
+productName: PiWork
 # Skip native module rebuild — pnpm workspace compat.
 npmRebuild: false
 
@@ -77,7 +77,7 @@ mac:
   category: public.app-category.developer-tools
   extendInfo:
     # Required by macOS before the app may open the microphone (语音转写).
-    NSMicrophoneUsageDescription: PI 需要访问麦克风，把语音转写成文字。
+    NSMicrophoneUsageDescription: PiWork 需要访问麦克风，把语音转写成文字。
   target:
     - dmg
     - zip
@@ -124,11 +124,11 @@ linux:
     - deb
   category: Development
   maintainer: pi@example.com
-  executableName: pi-coding-agent
+  executableName: piwork
   # deb 的文件名模板默认用 ${name}，scoped 包名 @pi/desktop 里的 / 会被当成
   # 目录分隔符（release/@pi/...），而该目录不会被创建，fpm 直接报
   # "Parent directory does not exist"。显式给出不带斜杠的产物名绕开它。
-  artifactName: pi-coding-agent-${version}-${arch}.${ext}
+  artifactName: PiWork-${version}-${arch}.${ext}
 
 deb:
-  packageName: pi-coding-agent
+  packageName: piwork

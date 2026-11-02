@@ -4,6 +4,8 @@ dist/
 dist-ssr/
 out/
 release/
+# Branded Electron.app clone used by dev runs (scripts/brand-dev-app.cjs).
+apps/desktop/.dev-app/
 .turbo/
 *.tsbuildinfo
 .DS_Store

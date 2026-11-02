@@ -2,6 +2,7 @@ import { BrowserWindow } from 'electron';
 import type { Rectangle, WebContents } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { basename } from 'path';
+import { APP_NAME } from './branding';
 import { createMainWindow } from './window-manager';
 import { WindowStateStore, type PersistedWindowState } from './window-state';
 import { BrowserManager } from '@main/browser/browser-manager';
@@ -187,7 +188,7 @@ export class WindowRegistry implements BrowserRouter {
   private updateTitle(ctx: WindowContext): void {
     if (ctx.win.isDestroyed()) return;
     const name = ctx.workspacePath ? basename(ctx.workspacePath) : null;
-    ctx.win.setTitle(name ? `${name} — Pi Coding Agent` : 'Pi Coding Agent');
+    ctx.win.setTitle(name ? `${name} — ${APP_NAME}` : APP_NAME);
   }
 
   setHooks(hooks: WindowHooks): void {
@@ -219,7 +220,7 @@ export class WindowRegistry implements BrowserRouter {
       layoutId,
       workspaceId: opts.workspaceId ?? null,
       sessionId: opts.sessionId ?? null,
-      title: opts.workspacePath ? `${basename(opts.workspacePath)} — Pi Coding Agent` : undefined,
+      title: opts.workspacePath ? `${basename(opts.workspacePath)} — ${APP_NAME}` : undefined,
       bounds: opts.bounds,
       maximized: opts.maximized,
     });

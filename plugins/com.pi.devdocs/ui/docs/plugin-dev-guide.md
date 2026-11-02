@@ -113,7 +113,7 @@ com.example.note/
   "private": true,
   "type": "module",
   "dependencies": {
-    "@pi/plugin-sdk": "file:/换成你的实际路径/pi-coding-agent-desktop/packages/plugin-sdk"
+    "@pi/plugin-sdk": "file:/换成你的实际路径/PiWork/packages/plugin-sdk"
   },
   "devDependencies": {
     "esbuild": "^0.24.0"

@@ -1,12 +1,12 @@
-# Pi Coding Agent Desktop
+# PiWork
 
 基于 Electron + React 的 AI 编程助手桌面应用，提供 Web 和桌面双端体验。
 
 ## 下载
 
-[![下载最新版本](https://img.shields.io/badge/下载-最新版本-2ea44f?style=for-the-badge)](https://github.com/Anthonybuer182/WeWork/releases/latest)
+[![下载最新版本](https://img.shields.io/badge/下载-最新版本-2ea44f?style=for-the-badge)](https://github.com/Anthonybuer182/PiWork/releases/latest)
 
-点上面按钮（或直接打开 [Releases](https://github.com/Anthonybuer182/WeWork/releases/latest)），按平台取安装包：
+点上面按钮（或直接打开 [Releases](https://github.com/Anthonybuer182/PiWork/releases/latest)），按平台取安装包：
 
 | 平台 | 安装包 |
 |------|--------|
@@ -62,7 +62,7 @@ Web 端:  Browser (React)   ──HTTP─▶ Vite API Proxy ──▶ SDK ──
 ```
 
 ```
-pi-coding-agent-desktop/
+PiWork/
 ├── apps/
 │   ├── desktop/          # Electron 桌面应用
 │   │   ├── src/main/     # 主进程 (窗口管理、IPC 处理)

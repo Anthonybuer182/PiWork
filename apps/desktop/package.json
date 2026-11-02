@@ -3,9 +3,9 @@
   "version": "0.2.0",
   "private": true,
   "main": "./out/main/index.mjs",
-  "description": "Pi Coding Agent - Desktop Application",
+  "description": "PiWork - Desktop Application",
   "scripts": {
-    "dev": "electron-vite dev",
+    "dev": "node scripts/dev.mjs",
     "build": "electron-vite build",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-transform-types --import ./tests/support/register.mjs --test tests/*.test.mjs",
@@ -41,6 +41,6 @@
     "tailwindcss": "^3.4.17",
     "vite": "^5.4.0"
   },
-  "author": "Pi Coding Agent <pi@example.com>",
-  "homepage": "https://github.com/Anthonybuer182/WeWork"
+  "author": "PiWork <pi@example.com>",
+  "homepage": "https://github.com/Anthonybuer182/PiWork"
 }

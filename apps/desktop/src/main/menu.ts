@@ -1,14 +1,16 @@
 import { Menu } from 'electron';
 import type { MenuItemConstructorOptions } from 'electron';
+import { APP_NAME } from './branding';
 import type { WindowRegistry } from './windows';
 
 /**
- * macOS app menu. Spelled out instead of `role: 'appMenu'` so dev builds show
- * the product name rather than the package name — and, more importantly, so
- * we never call `app.setName()`, which would move the userData directory.
+ * macOS app menu. Spelled out instead of `role: 'appMenu'` so it shows the
+ * product name rather than whatever the running bundle happens to be called
+ * (in development that is still Electron.app, even though `app.setName()` in
+ * index.ts has already fixed the userData directory and the window titles).
  */
 const APP_MENU: MenuItemConstructorOptions = {
-  label: 'Pi Coding Agent',
+  label: APP_NAME,
   submenu: [
     { role: 'about' },
     { type: 'separator' },
@@ -57,7 +59,7 @@ export function installApplicationMenu(windows: WindowRegistry): void {
           label: 'GitHub',
           click: () => {
             void import('electron').then(({ shell }) =>
-              shell.openExternal('https://github.com/Anthonybuer182/WeWork'),
+              shell.openExternal('https://github.com/Anthonybuer182/PiWork'),
             );
           },
         },

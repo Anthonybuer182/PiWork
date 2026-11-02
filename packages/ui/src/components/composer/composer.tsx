@@ -797,7 +797,7 @@ export function Composer() {
             ],
           },
         ];
-        setCommandDialog({ title: 'Pi Coding Agent', subtitle: t('你的 AI 编程助手'), sections: helpSections });
+        setCommandDialog({ title: 'PiWork', subtitle: t('你的 AI 编程助手'), sections: helpSections });
         return true;
       }
 

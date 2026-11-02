@@ -1,10 +1,20 @@
 import { BrowserWindow, screen } from 'electron';
 import type { Rectangle } from 'electron';
+import { existsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { APP_NAME } from './branding';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+/**
+ * Icon for a dev run: there is no app bundle to take one from, so point at
+ * build/ (electron-builder only reads it; it is not shipped inside the asar).
+ * In a packaged build this path lands inside the asar, resolves to nothing,
+ * and each platform falls back to the bundle icon.
+ */
+const DEV_ICON = path.join(__dirname, '../../build/icon.png');
 
 /** Height of the renderer-drawn title bar; must match TitleBar's h-11 (2.75rem). */
 export const TITLE_BAR_HEIGHT = 44;
@@ -42,7 +52,10 @@ export function createMainWindow(options: CreateWindowOptions = {}): BrowserWind
     y: placement.y,
     minWidth: 900,
     minHeight: 600,
-    title: options.title ?? 'Pi Coding Agent',
+    title: options.title ?? APP_NAME,
+    // No-op on macOS (the window takes the app's icon) and absent in packaged
+    // builds; this is what puts the mark on a Linux/Windows dev window.
+    icon: existsSync(DEV_ICON) ? DEV_ICON : undefined,
     // Render only once the first frame is ready — a black/white flash on
     // every new window looks like a crash in a multi-window workflow.
     show: false,
