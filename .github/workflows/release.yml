@@ -218,7 +218,7 @@ jobs:
       # Windows 的实时防护会扫刚从 artifact 解出来的 zip，扫描期间文件被占用，
       # electron-builder 复制进 resources/market/ 时会 EBUSY。装插件之后才会
       # 复制大 zip，所以这个失败是加了插件市场才暴露出来的。
-      - name: Windows: keep Defender out of the workspace
+      - name: 'Windows: keep Defender out of the workspace'
         if: matrix.platform == 'win'
         shell: pwsh
         run: |
