@@ -1,381 +1,344 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Maximize2, Minimize2, MoreHorizontal, X } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, Plus, Search, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { showPopupMenu } from '@/lib/native-menu';
-import { usePanelStore, type PanelEntry, type PanelRegion } from '@/stores/panel-store';
+import { usePanelStore, panelIdOfTab, type PanelEntry, type PanelRegion } from '@/stores/panel-store';
+import { useUIStore } from '@/stores/ui-store';
 import { useI18n } from '@/i18n';
 import { panelTitle } from './panel-title';
 import { RailIcon } from './panel-rail';
+import { installedPanels } from './panel-order';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 
 /**
- * Width reserved at the strip's right end for the "⋯" overflow button and
- * the paddings/gaps around it, subtracted from the space entries may occupy
- * before one falls into the overflow menu.
- */
-const CONTROLS_RESERVE = 44;
-
-/**
- * The header plugin list — a horizontal SWITCHER (2026-10-17 redesign; the
- * vertical icon rail turned sideways, nothing more):
+ * The right column's tab strip (2026-11 redesign).
  *
- *  - every installed + enabled panel of the region is an entry, always
- *    visible; unselected entries render muted;
- *  - click an unselected entry → it joins the work area (selected, focused);
- *  - click a selected entry → focus its pane (agent target);
- *  - hover a selected entry → [×] deselects it (its pane leaves the work
- *    area; state is kept warm for a while), [⛶] zooms its pane to the full
- *    column (double-click on the entry does the same — since the tiled panes
- *    draw no header of their own, the tab is the zoom control's home);
- *  - drag an entry onto another to reorder the list — the work-area pane
- *    order follows the list order.
+ * It is a TAB strip, not a plugin switcher: only open panels appear here, plus
+ * a trailing `+` that opens the searchable plugin picker. Discovery of panels
+ * that are not open lives in two places instead — the no-tabs welcome grid in
+ * the body and this picker.
  *
- * The list carries NO split state: which panes sit side by side and how wide
- * they are is the work area's business (see PanelHost). Overflow: when the
- * column is too narrow for every entry, the tail collapses into a "⋯" button
- * whose popup lists exactly what the measurement cut off. Entries that are
- * focused or carrying badge/pending activity mark the button with a dot.
+ *  - click a tab → activate it;
+ *  - `×` → close it (active falls to the next tab, then the previous);
+ *  - drag a tab onto another → reorder the strip;
+ *  - `+` → searchable list of installed panels; picking one opens (or, for a
+ *    panel that is already open, activates) its tab.
+ *
+ * The old `⋯` overflow button is gone: the strip scrolls horizontally and `+`
+ * stays pinned at its end. There is also no zoom button — hiding the left and
+ * centre columns already gives the panel the whole window.
  */
 export function PanelTabs({ region = 'right' }: { region?: PanelRegion }) {
   const { t } = useI18n();
   const panels = usePanelStore((s) => s.panels);
-  const panelOrder = usePanelStore((s) => s.panelOrder[region]);
-  const selectedIds = usePanelStore((s) => s.openPanelIds[region]);
-  const focusedId = usePanelStore((s) => s.focusedId[region]);
+  const openIds = usePanelStore((s) => s.openPanelIds[region]);
+  const activeId = usePanelStore((s) => s.focusedId[region]);
+  const panelOrder = usePanelStore((s) => s.panelOrder);
   const runtime = usePanelStore((s) => s.runtime);
+  const tabTitles = usePanelStore((s) => s.tabTitles);
   const openPanel = usePanelStore((s) => s.openPanel);
   const closeTab = usePanelStore((s) => s.closeTab);
   const setFocused = usePanelStore((s) => s.setFocused);
-  const setPanelOrder = usePanelStore((s) => s.setPanelOrder);
-  const zoomedId = usePanelStore((s) => s.zoomedId[region]);
-  const toggleZoom = usePanelStore((s) => s.toggleZoom);
+  const setTabOrder = usePanelStore((s) => s.setTabOrder);
+  const setPanelPickerOpen = useUIStore((s) => s.setPanelPickerOpen);
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const itemRefs = useRef(new Map<string, HTMLDivElement>());
-  const widthCache = useRef(new Map<string, number>());
-  // Index into the list where the overflow cut begins (null = all fit).
-  const [cut, setCut] = useState<number | null>(null);
 
-  // The list's display order: the user's `panelOrder` first, registry order
-  // (with its `order` tiebreak) for entries the user has never arranged.
-  // Hidden panels (openable only by the backend) are excluded — unless they
-  // are selected: a displayed panel must always be reachable as an entry.
-  // EXCEPT a hidden split-companion whose main panel is also selected: the
-  // strip reads as one entry per plugin, and the companion is present as the
-  // pane beside its main (unsplit lives in the tab / in-panel menus).
-  const selectedSet = new Set(selectedIds);
-  const sorted = (() => {
-    const orderIndex = new Map(panelOrder.map((id, i) => [id, i]));
-    return panels
-      .filter((p) => p.region === region && (!p.hidden || selectedSet.has(p.id)))
-      .filter((p) => {
-        if (!p.hidden || !p.panelId) return true;
-        const main = panels.find((q) => q.source === p.source && q.companion === p.panelId);
-        return !(main && selectedSet.has(main.id));
-      })
-      .sort((a, b) => {
-        const ia = orderIndex.get(a.id) ?? Number.MAX_SAFE_INTEGER;
-        const ib = orderIndex.get(b.id) ?? Number.MAX_SAFE_INTEGER;
-        return ia === ib ? (a.order ?? 0) - (b.order ?? 0) : ia - ib;
-      });
-  })();
+  // Native panel views sit above the DOM; the picker is a DOM popover that
+  // extends below the header band, so the views must be silenced while it is
+  // open or they would paint over it and swallow the search field's clicks.
+  useEffect(() => {
+    setPanelPickerOpen(pickerOpen);
+    return () => setPanelPickerOpen(false);
+  }, [pickerOpen, setPanelPickerOpen]);
 
-  const visualRef = useRef(sorted);
-  visualRef.current = sorted;
-  const overflowIds = cut == null ? [] : sorted.slice(cut).map((p) => p.id);
-  const overflowRef = useRef(overflowIds);
-  overflowRef.current = overflowIds;
-
-  // Overflow measurement. Rendered items are measured live; once an item is
-  // cut (display:none) its cached width stands in, so the computation cannot
-  // oscillate. Re-runs on column resizes and list changes.
-  useLayoutEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-    const compute = () => {
-      const available = container.clientWidth - CONTROLS_RESERVE;
-      let acc = 0;
-      let nextCut: number | null = null;
-      visualRef.current.forEach((p, i) => {
-        const el = itemRefs.current.get(p.id);
-        let w = widthCache.current.get(p.id) ?? 0;
-        // offsetWidth 0 = currently cut (Tailwind `hidden` sets a class, not
-        // an inline style) — its cached width stands in, keeping the
-        // computation stable across the hide/show cycle.
-        if (el && el.offsetWidth > 0) {
-          w = el.getBoundingClientRect().width;
-          if (w > 0) widthCache.current.set(p.id, w);
-        }
-        if (nextCut == null) {
-          acc += w + 2; // the flex gap
-          if (acc > available) nextCut = i;
-        }
-      });
-      setCut(nextCut);
-    };
-    compute();
-    const ro = new ResizeObserver(compute);
-    ro.observe(container);
-    return () => ro.disconnect();
-  }, [selectedIds, panelOrder, region, panels]);
+  const byId = useMemo(() => new Map(panels.map((p) => [p.id, p])), [panels]);
+  const tabs = useMemo(
+    () =>
+      openIds
+        .map((key) => {
+          const panel = byId.get(panelIdOfTab(key));
+          return panel ? { key, panel } : null;
+        })
+        .filter((entry): entry is { key: string; panel: PanelEntry } => Boolean(entry)),
+    [openIds, byId],
+  );
+  const pickerItems = useMemo(
+    () => installedPanels(panels, panelOrder, region),
+    [panels, panelOrder, region],
+  );
 
   const endDrag = () => {
     setDragId(null);
     setDropTargetId(null);
   };
 
-  // ── Split (向右拆分) ──
-  // A panel may declare a companion (manifest `companion`): a hidden second
-  // panel with independent state that opens BESIDE this one — the multi-tab
-  // counterpart of VS Code's split-editor gesture. The companion resolves
-  // from either side of the pair: the main panel names it, the companion is
-  // found by reverse lookup.
-  const splitPairOf = (panel: PanelEntry): { main: PanelEntry; companion: PanelEntry } | null => {
-    if (panel.companion) {
-      const companion = panels.find((p) => p.source === panel.source && p.panelId === panel.companion);
-      if (companion) return { main: panel, companion };
-    }
-    if (panel.panelId) {
-      const main = panels.find((p) => p.source === panel.source && p.companion === panel.panelId);
-      if (main) return { main, companion: panel };
-    }
-    return null;
+  const pick = (id: string) => {
+    openPanel(id, { focus: true });
+    setPickerOpen(false);
   };
 
-  const openTabMenu = (panel: PanelEntry, at: { x: number; y: number }) => {
-    const pair = splitPairOf(panel);
-    if (!pair) return;
-    // No unsplit item — closing the pane's tabs (their ×) collapses the split,
-    // so a menu while the pane is open would only ever offer nothing.
-    if (selectedSet.has(pair.companion.id)) return;
-    void showPopupMenu([{ id: 'split-right', label: t('向右拆分') }], at).then((picked) => {
-      if (picked === 'split-right') openPanel(pair.companion.id, { focus: true });
-    });
-  };
-
-  const renderItem = (panel: PanelEntry) => {
-    const id = panel.id;
-    const title = panelTitle(panel, t);
-    const selected = selectedSet.has(id);
-    const focused = focusedId === id;
-    const zoomed = zoomedId === id;
-    const rt = runtime[id];
+  const renderTab = ({ key, panel }: { key: string; panel: PanelEntry }) => {
+    const title = tabTitles[key] ?? panelTitle(panel, t);
+    const active = activeId === key;
+    const rt = runtime[panel.id];
     const badge = rt?.badge;
-    const visualIndex = sorted.findIndex((p) => p.id === id);
-    const overflowed = cut != null && visualIndex >= cut;
+    const pending = rt?.pending;
 
     return (
       <div
-        key={id}
-        ref={(el) => {
-          if (el) itemRefs.current.set(id, el);
-          else itemRefs.current.delete(id);
-        }}
+        key={key}
+        role="tab"
+        aria-selected={active}
         tabIndex={0}
-        aria-pressed={selected}
-        data-panel-tab={id}
-        data-state={focused ? 'focused' : selected ? 'selected' : 'unselected'}
-        draggable
         title={title}
-        onClick={() => {
-          if (selected) setFocused(region, id);
-          else openPanel(id, { focus: true });
-        }}
-        onDoubleClick={() => {
-          // The tab is the tiled pane's zoom control (tiled panes draw no
-          // header of their own — see PaneView).
-          if (selected) toggleZoom(region, id);
-        }}
-        onContextMenu={(e) => {
-          e.preventDefault();
-          openTabMenu(panel, { x: e.clientX, y: e.clientY });
+        data-panel-tab={key}
+        data-panel-id={panel.id}
+        data-state={active ? 'active' : 'inactive'}
+        draggable
+        onClick={() => setFocused(region, key)}
+        onAuxClick={(e) => {
+          // Middle-click closes, as in every tabbed editor.
+          if (e.button === 1) {
+            e.preventDefault();
+            closeTab(region, key);
+          }
         }}
         onKeyDown={(e) => {
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
-            if (selected) setFocused(region, id);
-            else openPanel(id, { focus: true });
+            setFocused(region, key);
+          } else if (e.key === 'Delete' || e.key === 'Backspace') {
+            e.preventDefault();
+            closeTab(region, key);
           } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-            const delta = e.key === 'ArrowLeft' ? -1 : 1;
-            const i = sorted.findIndex((p) => p.id === id);
-            const next = sorted[i + delta];
-            if (next) itemRefs.current.get(next.id)?.focus();
-          } else if (e.key === 'Home' || e.key === 'End') {
-            const next = e.key === 'Home' ? sorted[0] : sorted[sorted.length - 1];
-            if (next) itemRefs.current.get(next.id)?.focus();
+            e.preventDefault();
+            const i = tabs.findIndex((p) => p.key === key);
+            const next = tabs[i + (e.key === 'ArrowLeft' ? -1 : 1)];
+            if (next) {
+              const el = document.querySelector(
+                `[data-panel-tab="${CSS.escape(next.key)}"]`,
+              ) as HTMLElement | null;
+              el?.focus();
+            }
           }
         }}
         onDragStart={(e) => {
-          setDragId(id);
+          setDragId(key);
           e.dataTransfer.effectAllowed = 'move';
-          // Firefox refuses drags without payload; the id doubles as the
+          // Firefox refuses drags without payload; the key doubles as the
           // reorder source so the drop never depends on React state.
-          e.dataTransfer.setData('text/plain', id);
+          e.dataTransfer.setData('text/plain', key);
         }}
         onDragOver={(e) => {
           e.preventDefault();
-          setDropTargetId(id);
+          setDropTargetId(key);
         }}
         onDrop={(e) => {
           e.preventDefault();
           e.stopPropagation();
           const from = e.dataTransfer.getData('text/plain');
-          if (from && from !== id) {
-            // Reorder: `from` re-seats before `id` in the user's arrangement.
-            const ids = visualRef.current.map((p) => p.id).filter((x) => x !== from);
-            const at = ids.indexOf(id);
-            if (at === -1) ids.push(from);
-            else ids.splice(at, 0, from);
-            setPanelOrder(region, ids);
+          if (from && from !== key) {
+            // `from` re-seats before `key`; the store filters to open tabs.
+            const keys = tabs.map((p) => p.key).filter((x) => x !== from);
+            const at = keys.indexOf(key);
+            if (at === -1) keys.push(from);
+            else keys.splice(at, 0, from);
+            setTabOrder(region, keys);
           }
           endDrag();
         }}
         onDragEnd={endDrag}
         className={cn(
-          // Pill style: vertically centered in the band, comfortable hit
-          // area, 13px label. Selected pills are SOLID (all highlighted at
-          // once, per design); the focused one adds a primary ring — it is
-          // the pane the agent acts on.
-          'group/entry relative flex h-8 shrink-0 cursor-default items-center gap-2 rounded-lg px-2.5 text-[13px] transition-colors',
-          'max-w-[176px]',
-          selected
-            ? cn(
-                'bg-accent text-accent-foreground',
-                focused && 'ring-1 ring-foreground/25',
-              )
+          'group/tab relative flex h-8 max-w-[176px] shrink-0 items-center gap-2 rounded-lg px-2.5 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+          active
+            ? 'bg-accent text-accent-foreground'
             : 'text-muted-foreground hover:bg-accent/40 hover:text-foreground/80',
-          dropTargetId === id && dragId !== null && dragId !== id && 'bg-muted-foreground/20 ring-1 ring-muted-foreground/40',
-          dragId === id && 'opacity-50',
-          overflowed && 'hidden',
+          dropTargetId === key &&
+            dragId !== null &&
+            dragId !== key &&
+            'ring-1 ring-muted-foreground/40',
+          dragId === key && 'opacity-50',
         )}
       >
         <RailIcon panel={panel} size={16} className="h-4 w-4 shrink-0" />
-        <span className={cn('min-w-0 truncate', focused && 'font-medium')}>{title}</span>
-        {/* Badge/pending mirror the work area so the entry carries the same
-            signal even when its pane is not the one on display. */}
+        <span className="min-w-0 truncate">{title}</span>
         {badge !== undefined && badge !== null && badge !== '' && (
           <span
-            data-panel-tab-badge={id}
+            data-panel-tab-badge={key}
             className="min-w-[16px] shrink-0 rounded-full bg-primary px-1 text-center text-[10px] font-medium leading-4 text-primary-foreground"
           >
             {badge}
           </span>
         )}
-        {rt?.pending && !badge && (
+        {pending && !badge && (
           <span
-            data-panel-tab-pending={id}
+            data-panel-tab-pending={key}
             className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-primary"
           />
         )}
-        {/* Session-scoped entries carry a marker — what they display swaps
-            with the conversation while global entries never move. */}
-        {panel.scope === 'session' && (
-          <span
-            data-panel-tab-scope={id}
-            title={t('跟会话走的面板（切换会话时随会话切换）')}
-            className={cn('h-1.5 w-1.5 shrink-0 rounded-full', 'bg-primary/70')}
-          />
-        )}
-        {/* Zoom: lives here because the tiled pane below draws no header
-            (its title would duplicate this entry). Hover reveals ⛶; a zoomed
-            pane keeps the restore button always visible. */}
-        {selected && (
-          <button
-            type="button"
-            aria-label={zoomed ? t('还原窗格') : t('放大窗格')}
-            title={
-              zoomed
-                ? t('还原（其他窗格回到工作区；Esc 同效）')
-                : t('放大占满（其他窗格收成侧条）')
-            }
-            data-panel-tab-zoom={id}
-            onClick={(e) => {
-              e.stopPropagation();
-              toggleZoom(region, id);
-            }}
-            onDoubleClick={(e) => e.stopPropagation()}
-            className={cn(
-              'shrink-0 rounded-sm p-0.5 transition-opacity hover:bg-accent-foreground/15',
-              zoomed ? 'opacity-80' : 'opacity-0',
-              'group-hover/entry:opacity-70',
-            )}
-          >
-            {zoomed ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
-          </button>
-        )}
-        {/* Deselect: only on selected entries, only on hover — an explicit,
-            hard-to-hit-by-accident gesture. */}
-        {selected && (
-          <button
-            type="button"
-            aria-label={t('收起 {title}', { title })}
-            data-panel-tab-close={id}
-            onClick={(e) => {
-              e.stopPropagation();
-              closeTab(region, id);
-            }}
-            className={cn(
-              'shrink-0 rounded-sm p-0.5 transition-opacity hover:bg-accent-foreground/15',
-              focused ? 'opacity-80' : 'opacity-0',
-              'group-hover/entry:opacity-70',
-            )}
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        )}
+        <button
+          type="button"
+          aria-label={t('关闭 {title}', { title })}
+          data-panel-tab-close={key}
+          onClick={(e) => {
+            e.stopPropagation();
+            closeTab(region, key);
+          }}
+          className={cn(
+            'shrink-0 rounded-sm p-0.5 transition-opacity hover:bg-accent-foreground/15',
+            active ? 'opacity-70' : 'opacity-0 group-hover/tab:opacity-70',
+          )}
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
       </div>
     );
   };
 
-  if (sorted.length === 0) return null;
-
-  const overflowAttention = overflowIds.some((id) => {
-    const rt = runtime[id];
-    return (
-      focusedId === id ||
-      rt?.pending === true ||
-      (rt?.badge !== undefined && rt?.badge !== null && rt?.badge !== '')
-    );
-  });
+  const picker = (
+    <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          aria-label={t('打开插件')}
+          title={t('打开插件')}
+          data-panel-picker-trigger={region}
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
+        >
+          <Plus className="h-4 w-4" />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="start"
+        side="bottom"
+        sideOffset={6}
+        className="w-80 p-0"
+        data-panel-picker={region}
+      >
+        <PluginPickerList items={pickerItems} openIds={openIds} onPick={pick} />
+      </PopoverContent>
+    </Popover>
+  );
 
   return (
     <div
-      ref={containerRef}
       className="flex h-full w-full min-w-0 select-none items-center gap-1 px-1.5"
       role="toolbar"
-      aria-label={t('插件列表')}
+      aria-label={t('插件标签')}
       data-testid={`panel-tabs-${region}`}
     >
-      {sorted.map((p) => renderItem(p))}
-      {cut != null && (
-        <button
-          type="button"
-          aria-label={t('更多面板')}
-          title={t('更多面板')}
-          data-panel-plus-toggle={region}
-          onClick={(e) => {
-            const r = e.currentTarget.getBoundingClientRect();
-            void openOverflowMenu({ x: r.left, y: r.bottom + 4 });
-          }}
-          className="relative flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-        >
-          <MoreHorizontal className="h-4 w-4" />
-          {overflowAttention && (
-            <span className="absolute right-0.5 top-0.5 h-1.5 w-1.5 rounded-full bg-primary" />
-          )}
-        </button>
-      )}
+      {/* Tabs and `+` scroll together, with `+` immediately after the last
+          tab (not pinned to the strip's right edge). With no tabs it is the
+          first thing in the row — the cursor-style empty tab row — and the
+          body carries the plugin grid. */}
+      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+        <div role="tablist" aria-label={t('已打开的标签')} className="flex shrink-0 items-center gap-1">
+          {tabs.map(renderTab)}
+        </div>
+        {picker}
+      </div>
     </div>
   );
+}
 
-  /** The "⋯" popup: exactly the entries the width measurement cut off. */
-  async function openOverflowMenu(at: { x: number; y: number }) {
-    const items = overflowRef.current
-      .map((id) => sorted.find((p) => p.id === id))
-      .filter((p): p is PanelEntry => Boolean(p))
-      .map((p) => ({ id: p.id, label: panelTitle(p, t) }));
-    if (items.length === 0) return;
-    const picked = await import('@/lib/native-menu').then((m) => m.showPopupMenu(items, at));
-    if (picked) openPanel(picked, { focus: true });
-  }
+/**
+ * The `+` popover: a search box over the installed panels, in installed order.
+ * Picking a row opens its tab (the store activates an already-open panel
+ * instead of duplicating it). Keyboard: arrows move, Enter opens, Esc closes
+ * (Radix handles Esc and focus restoration).
+ */
+function PluginPickerList({
+  items,
+  openIds,
+  onPick,
+}: {
+  items: PanelEntry[];
+  openIds: string[];
+  onPick: (id: string) => void;
+}) {
+  const { t } = useI18n();
+  const [query, setQuery] = useState('');
+  const [activeIndex, setActiveIndex] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const q = query.trim().toLowerCase();
+
+  const filtered = useMemo(() => {
+    if (!q) return items;
+    return items.filter((panel) =>
+      [panelTitle(panel, t), panel.title, panel.id, panel.pluginId, panel.source].some((text) =>
+        (text ?? '').toLowerCase().includes(q),
+      ),
+    );
+  }, [items, q, t]);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [q]);
+
+  return (
+    <div className="flex flex-col" data-plugin-picker>
+      <div className="flex items-center gap-2 border-b px-3">
+        <Search className="h-4 w-4 shrink-0 text-muted-foreground" />
+        <input
+          ref={inputRef}
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={t('搜索插件…')}
+          aria-label={t('搜索插件')}
+          className="h-10 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+          onKeyDown={(e) => {
+            if (e.key === 'ArrowDown') {
+              e.preventDefault();
+              setActiveIndex((i) => Math.min(filtered.length - 1, i + 1));
+            } else if (e.key === 'ArrowUp') {
+              e.preventDefault();
+              setActiveIndex((i) => Math.max(0, i - 1));
+            } else if (e.key === 'Enter') {
+              e.preventDefault();
+              const panel = filtered[activeIndex];
+              if (panel) onPick(panel.id);
+            }
+          }}
+        />
+      </div>
+      <div className="max-h-80 overflow-y-auto p-1" role="listbox" aria-label={t('已安装的插件')}>
+        {filtered.length === 0 ? (
+          <div className="px-3 py-6 text-center text-xs text-muted-foreground">
+            {t('没有匹配的插件')}
+          </div>
+        ) : (
+          filtered.map((panel, index) => {
+            const title = panelTitle(panel, t);
+            const open = openIds.some((key) => panelIdOfTab(key) === panel.id);
+            return (
+              <button
+                key={panel.id}
+                type="button"
+                role="option"
+                aria-selected={index === activeIndex}
+                data-plugin-picker-item={panel.id}
+                onMouseEnter={() => setActiveIndex(index)}
+                onClick={() => onPick(panel.id)}
+                className={cn(
+                  'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[13px]',
+                  index === activeIndex
+                    ? 'bg-accent text-accent-foreground'
+                    : 'text-foreground hover:bg-accent/60',
+                )}
+              >
+                <RailIcon panel={panel} size={16} className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 flex-1 truncate">{title}</span>
+                {open && <Check className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
+              </button>
+            );
+          })
+        )}
+      </div>
+    </div>
+  );
 }

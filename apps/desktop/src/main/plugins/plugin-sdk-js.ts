@@ -325,6 +325,10 @@ const PLUGIN_SDK_SOURCE = String.raw`
 
   window.piSDK = {
     pluginId: PLUGIN_ID,
+    // This panel instance's host tab key. Singleton panels use their panel
+    // entry id; multi-instance panels append an instance suffix. Use it when a
+    // backend needs to target ONE tab (ctx.send's 4th argument).
+    tabId: VIEW && VIEW.tabId ? VIEW.tabId : '',
     request: request,
     emit: emit,
     liveSlot: liveSlot,

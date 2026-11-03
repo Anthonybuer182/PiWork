@@ -25,7 +25,6 @@ import './panel-fit.css';
 import { persistPendingPath, readPersistedPath } from '../shims/common';
 import { MEDIA_EXTS } from '../media/exts';
 import { mountEmptyState } from './empty-state';
-import { mountTabsBar } from './tabs-bar';
 
 /** The last `ui.render` the backend pushed, kept so a late listener can replay it. */
 let lastPayload: unknown = null;
@@ -85,11 +84,6 @@ async function pullState(): Promise<unknown> {
 }
 
 void (async () => {
-  // The document tab strip mounts before anything else: it registers its
-  // `ui.render` listener synchronously, so the boot pull below (and every
-  // later bucket push) redraws it. Renderers own #root beneath it.
-  mountTabsBar();
-
   // A reload carries no `ui.render` — the host only sends one when the panel
   // MOUNTS, and this panel never unmounted. So the path the previous load
   // recorded is the only source, and we do not wait for a fresh one.

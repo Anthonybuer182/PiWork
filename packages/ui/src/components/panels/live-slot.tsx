@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { MonitorX } from 'lucide-react';
 import { useUIStore } from '@/stores/ui-store';
 import { t as translate } from '@/i18n';
+import { instanceIdOfTab } from '@/stores/panel-store';
 
 /**
  * Live slot: a native WebContentsView mount point. The component
@@ -11,6 +12,16 @@ import { t as translate } from '@/i18n';
 export function LiveSlot({
   pluginId,
   panelId,
+  /**
+   * The host tab this view belongs to. Multi-instance panels get one native
+   * view per tab, so the slot id carries the tab's instance suffix; a
+   * singleton's tab key is just the panel entry id.
+   */
+  tabKey,
+  /** The panel page's entry, relative to the plugin root (multi-instance view creation). */
+  entry,
+  /** Whether this tab is the active one (drives `panel.activated`). */
+  active = true,
   /**
    * Plugin web panels: tell the backend the panel mounted, and re-tell it when
    * the open params change (switching files in the same panel). The event has
@@ -26,11 +37,18 @@ export function LiveSlot({
 }: {
   pluginId: string;
   panelId: string;
+  tabKey: string;
+  entry?: string;
+  active?: boolean;
   notifyMounted?: boolean;
   params?: unknown;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
+  const instanceId = instanceIdOfTab(tabKey);
+  // Singleton: the historical `<pluginId>:<panelId>` slot. Multi-instance:
+  // one slot per host tab, keyed by its instance id.
+  const slotId = instanceId ? `${pluginId}:${panelId}:${instanceId}` : `${pluginId}:${panelId}`;
   // Latest measure-and-report callback, owned by the attach effect below but
   // reachable from layout-driven re-measures (a column swap moves this slot
   // without resizing it).
@@ -55,13 +73,15 @@ export function LiveSlot({
   // workspace, and the panel would keep that stale value until the next
   // session switch.
   const workspaceId = useUIStore((s) => s.activeWorkspaceId);
-  // Host overlays that must cover native views. Settings is currently the only
-  // one; a second overlay must be OR-ed in here (or this should become a
-  // suspension counter on the slot registry) or it will be covered by every
+  // Host overlays that must cover native views. Settings and the plugin picker
+  // are the current two; a third must be OR-ed in here (or this should become
+  // a suspension counter on the slot registry) or it will be covered by every
   // native panel and its clicks swallowed — exactly what this flag prevents.
   const settingsOpen = useUIStore((s) => s.settingsOpen);
-  const occludedRef = useRef(settingsOpen);
-  occludedRef.current = settingsOpen;
+  const panelPickerOpen = useUIStore((s) => s.panelPickerOpen);
+  const occluded = settingsOpen || panelPickerOpen;
+  const occludedRef = useRef(occluded);
+  occludedRef.current = occluded;
 
   useEffect(() => {
     if (!notifyMounted) return;
@@ -72,9 +92,40 @@ export function LiveSlot({
     // Re-fires whenever params change; the view's preload queues it if the
     // panel's page (and its port) are not up yet.
     api
-      .invoke('pi:plugin:panel-mounted', { pluginId, panelId, params, sessionId, workspaceId })
+      .invoke('pi:plugin:panel-mounted', {
+        pluginId,
+        panelId,
+        tabId: tabKey,
+        slotId,
+        params,
+        sessionId,
+        workspaceId,
+      })
       .catch(() => {});
-  }, [pluginId, panelId, params, sessionId, workspaceId, notifyMounted]);
+  }, [pluginId, panelId, tabKey, slotId, params, sessionId, workspaceId, notifyMounted]);
+
+  // Activation is a view fact (which tab the user is looking at), and the
+  // backend needs it to resolve "the current document" for multi-tab panels.
+  // It travels shell → main → the view's preload → the panel's port, the same
+  // path as panel.mounted.
+  useEffect(() => {
+    if (!notifyMounted || !active) return;
+    const api = (window as unknown as {
+      electronAPI?: { invoke: (channel: string, ...args: unknown[]) => Promise<unknown> };
+    }).electronAPI;
+    if (!api?.invoke) return;
+    api
+      .invoke('pi:plugin:panel-activated', {
+        pluginId,
+        panelId,
+        tabId: tabKey,
+        slotId,
+        params,
+        sessionId,
+        workspaceId,
+      })
+      .catch(() => {});
+  }, [active, pluginId, panelId, tabKey, slotId, params, sessionId, workspaceId, notifyMounted]);
 
   useEffect(() => {
     const api = (window as unknown as {
@@ -86,7 +137,6 @@ export function LiveSlot({
       return;
     }
 
-    const slotId = `${pluginId}:${panelId}`;
     let lastBounds = '';
 
     const reportBounds = () => {
@@ -122,7 +172,14 @@ export function LiveSlot({
     };
 
     api
-      .invoke('pi:liveview:attach', { slotId })
+      .invoke('pi:liveview:attach', {
+        slotId,
+        pluginId,
+        panelId,
+        entry,
+        tabKey,
+        instanceId,
+      })
       .then((res) => {
         // The host answers `{ok:false}` for a slot it has no handler for. That
         // resolves rather than rejects, so an unchecked call would leave the
@@ -158,22 +215,46 @@ export function LiveSlot({
       reportBoundsRef.current = () => {};
       api.invoke('pi:liveview:detach', { slotId }).catch(() => {});
     };
-  }, [pluginId, panelId]);
+  }, [pluginId, panelId, slotId, entry, tabKey, instanceId]);
 
   // A two-column swap moves this slot sideways without resizing it, so the
   // ResizeObserver above stays silent and the native view would be left
   // hovering over the chat. Re-measure in a layout effect: the DOM reorder is
-  // committed and the rect is final, but nothing has painted yet.
+  // committed and the rect is final, but nothing has painted yet. Same for an
+  // overlay that hides the view (settings / the plugin picker): closing it
+  // must re-show the view at its real bounds.
   useLayoutEffect(() => {
     reportBoundsRef.current();
-  }, [swapped, pluginId, panelId, settingsOpen]);
+  }, [swapped, slotId, settingsOpen, panelPickerOpen]);
+
+  // Tab switching: the inactive pane becomes display:none. Waiting for the
+  // ResizeObserver is not reliable enough — a native view left attached at its
+  // old bounds paints over the newly active tab and swallows its clicks. Hide
+  // it explicitly (0×0), and re-report the real rect when this pane becomes
+  // active again. This is what makes switching between two native panels
+  // (browser tabs, viewer tabs) visibly swap surfaces.
+  useLayoutEffect(() => {
+    const api = (
+      window as unknown as {
+        electronAPI?: { invoke?: (channel: string, ...args: unknown[]) => Promise<unknown> };
+      }
+    ).electronAPI;
+    if (!api?.invoke) return;
+    if (!active) {
+      void api
+        .invoke('pi:liveview:set-bounds', { slotId, x: 0, y: 0, width: 0, height: 0 })
+        .catch(() => {});
+      return;
+    }
+    reportBoundsRef.current();
+  }, [active, slotId]);
 
   if (error) {
     return (
       <div
         className="flex h-full w-full flex-col items-center justify-center gap-2 p-6 text-center"
         data-panel-kind="live-slot-error"
-        data-live-slot={`${pluginId}:${panelId}`}
+        data-live-slot={slotId}
       >
         <MonitorX className="h-6 w-6 text-muted-foreground/60" />
         <p className="text-sm text-muted-foreground">{translate('此面板需要原生视图支持')}</p>
@@ -186,7 +267,7 @@ export function LiveSlot({
     <div
       ref={containerRef}
       data-panel-kind="live-slot"
-      data-live-slot={`${pluginId}:${panelId}`}
+      data-live-slot={slotId}
       className="h-full w-full bg-background"
     />
   );

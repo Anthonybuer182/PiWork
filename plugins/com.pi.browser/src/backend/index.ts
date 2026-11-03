@@ -795,6 +795,172 @@ function bucketFor(key: string): TabBucket {
   return b;
 }
 
+// ── Host tabs (one native view + engine tab per host tab) ─────────────
+//
+// The HOST owns the tab strip now. Each host tab mounts its own panel page
+// and is bound to exactly one engine tab; `hostToEngine` is that identity.
+// Engine tabs remain grouped per conversation in `tabBuckets`, so the agent
+// tools and the "current tab" rules are unchanged.
+
+const hostToEngine = new Map<string, string>();
+const engineToHost = new Map<string, string>();
+/** The conversation each host tab serves. */
+const hostSession = new Map<string, string | null>();
+/** The host tab the user is looking at (set by panel.activated). */
+let activeHostTab: string | null = null;
+/** Engine tabs created by showEngine whose new host tab should be focused on mount. */
+const pendingHostFocus = new Map<string, boolean>();
+/**
+ * Host tabs that were opened for a PAGE (params carried an engineTabId/url),
+ * as opposed to a favorites tab. Kept separate from the URL mirror because a
+ * loaded page whose row has not arrived yet must keep `{ engineTabId }` in its
+ * host params — flipping to `{}` would remount it as a favorites tab.
+ */
+const loadedHosts = new Set<string>();
+
+function bindHostTab(
+  hostTabId: string,
+  engineTabId: string,
+  sessionId?: string | null,
+): void {
+  const oldEngine = hostToEngine.get(hostTabId);
+  if (oldEngine && engineToHost.get(oldEngine) === hostTabId) engineToHost.delete(oldEngine);
+  const oldHost = engineToHost.get(engineTabId);
+  if (oldHost && hostToEngine.get(oldHost) === engineTabId) hostToEngine.delete(oldHost);
+  hostToEngine.set(hostTabId, engineTabId);
+  engineToHost.set(engineTabId, hostTabId);
+  hostSession.set(hostTabId, sessionId ?? panelSession ?? null);
+}
+
+function unbindHostTab(hostTabId: string): void {
+  const engine = hostToEngine.get(hostTabId);
+  if (engine && engineToHost.get(engine) === hostTabId) engineToHost.delete(engine);
+  hostToEngine.delete(hostTabId);
+  hostSession.delete(hostTabId);
+  loadedHosts.delete(hostTabId);
+  pendingHostFocus.delete(engine ?? '');
+  if (activeHostTab === hostTabId) activeHostTab = null;
+}
+
+function engineOfHost(hostTabId?: string | null): string | undefined {
+  return hostTabId ? hostToEngine.get(hostTabId) : undefined;
+}
+
+function hostOfEngine(engineTabId?: string | null): string | undefined {
+  return engineTabId ? engineToHost.get(engineTabId) : undefined;
+}
+
+/**
+ * Surface an engine tab in the host strip. If it already has a host tab,
+ * focus THAT tab (params are not a reliable identity here: a favorites tab
+ * keeps `{}` until its first navigation); otherwise let the host create one
+ * with `{ engineTabId }`.
+ */
+async function showEngine(
+  ctx: PluginContext,
+  engineTabId: string,
+  focus: boolean,
+  sessionId?: string | null,
+): Promise<void> {
+  if (!engineTabId) return;
+  const hostTab = hostOfEngine(engineTabId);
+  // Host↔engine mappings outlive a session switch (stashed tabs keep their
+  // views). An engine tab adopted by ANOTHER conversation must not focus a
+  // stale host tab from the previous one — treat it as "no host tab".
+  const sameSession = hostTab
+    ? sessionOfHost(hostTab) === (sessionId ?? panelSession)
+    : false;
+  if (hostTab && sameSession) {
+    await ctx
+      .call('panel.focusTab', { panelId: 'browser', tabId: hostTab, focus })
+      .catch(() => {});
+    return;
+  }
+  // The host tab does not exist yet; the mount is asynchronous. Remember the
+  // focus intent so the freshly mounted tab can honor it even if another
+  // store update (a session stash restore, a background activation) moved the
+  // active tab in between.
+  pendingHostFocus.set(engineTabId, focus);
+  await ctx
+    .call('panel.open', {
+      panelId: 'browser',
+      focus,
+      params: { engineTabId },
+    })
+    .catch(() => {});
+}
+
+function sessionOfHost(hostTabId?: string | null): string | null {
+  return hostTabId ? (hostSession.get(hostTabId) ?? null) : null;
+}
+
+function rowOfEngine(engineTabId?: string | null): MirrorTab | undefined {
+  if (!engineTabId) return undefined;
+  for (const b of tabBuckets.values()) {
+    const row = b.tabs.find((t) => t.id === engineTabId);
+    if (row) return row;
+  }
+  return undefined;
+}
+
+/**
+ * Push the host tab's label/params. A tab showing a page is "loaded"
+ * (`{ engineTabId }` — stable across navigation, so the host's same-tab
+ * dedupe keeps working); a favorites tab has no params, which is what lets
+ * `panel.open` reuse it. Title is the page title, or '' to fall back to the
+ * panel title for favorites.
+ */
+function syncHostTab(ctx: PluginContext, hostTabId: string): void {
+  const engineId = engineOfHost(hostTabId);
+  const row = rowOfEngine(engineId);
+  const rawUrl = row?.url ?? '';
+  // `about:blank` is the engine's "no page" state — it is the favorites page,
+  // not a visit and not a label ("about:blank" as a tab title reads broken).
+  const blank = !rawUrl || /^about:blank/i.test(rawUrl);
+  const url = blank ? '' : rawUrl;
+  const title = blank ? '' : (row?.title ?? '');
+  // A page tab stays "loaded" even before its URL/title mirror arrives; only
+  // a favorites tab (never opened for a page) carries empty params.
+  const loaded = !!engineId && !blank && (loadedHosts.has(hostTabId) || !!url);
+  void ctx
+    .call('panel.updateTab', {
+      panelId: 'browser',
+      tabId: hostTabId,
+      title: title || '',
+      params: loaded ? { engineTabId: engineId } : {},
+    })
+    .catch(() => {});
+}
+
+/** Send one host tab the state its page needs to draw itself. */
+function pushHostState(ctx: PluginContext, hostTabId: string): void {
+  const engineId = engineOfHost(hostTabId) ?? '';
+  const row = rowOfEngine(engineId);
+  const rawUrl = row?.url ?? '';
+  const blank = !rawUrl || /^about:blank/i.test(rawUrl);
+  const url = blank ? '' : rawUrl;
+  const title = blank ? '' : (row?.title ?? '');
+  const b = bucketFor(bucketKey(sessionOfHost(hostTabId)));
+  ctx.send(
+    'browser',
+    'ui.tabs',
+    {
+      tabs: b.tabs,
+      activeTabId: engineId,
+      engineTabId: engineId,
+      split: null,
+      splitRatio: 0.5,
+    },
+    hostTabId,
+  );
+  ctx.send(
+    'browser',
+    'ui.urlChanged',
+    { url, title, favorited: isFavorite(url), private: privateMode },
+    hostTabId,
+  );
+}
+
 /**
  * The tab an agent tool acts on: the caller's explicit `tab` argument, else
  * the calling conversation's focused tab. `undefined` falls through to the
@@ -875,9 +1041,32 @@ async function syncBucket(ctx: PluginContext): Promise<void> {
   }
 }
 
-/** Push the tab strip state to the panel (dedup-free: the strip redraw is cheap). */
-function pushTabs(ctx: PluginContext): void {
-  const b = bucketFor(bucketKey());
+/**
+ * Push the tab picture. With host tabs the strip is the host's, and each
+ * host page needs ITS engine tab id (`engineTabId`) — broadcasting the
+ * conversation's active tab would make every host tab show the same page.
+ * `hostTabId` names one page; omitted = the active host tab, or every panel
+ * in the legacy singleton layout.
+ */
+function pushTabs(ctx: PluginContext, hostTabId?: string): void {
+  const b = bucketFor(bucketKey(sessionOfHost(hostTabId ?? activeHostTab)));
+  const target = hostTabId ?? activeHostTab ?? undefined;
+  if (target) {
+    const engineId = engineOfHost(target);
+    ctx.send(
+      'browser',
+      'ui.tabs',
+      {
+        tabs: b.tabs,
+        activeTabId: engineId ?? b.activeTabId ?? '',
+        engineTabId: engineId ?? '',
+        split: null,
+        splitRatio: 0.5,
+      },
+      target,
+    );
+    return;
+  }
   const data = { tabs: b.tabs, activeTabId: b.activeTabId ?? '', split: b.split, splitRatio: b.splitRatio };
   for (const panelId of panelTargets()) ctx.send(panelId, 'ui.tabs', data);
 }
@@ -1469,7 +1658,7 @@ function recordVisit(url: string, title: string): HistoryEntry | null {
  * Push the current page to every mounted panel, with the state the toolbar
  * needs to draw itself: the star's fill and the private-mode badge.
  */
-function pushUrl(ctx: PluginContext, url: string, title?: string): void {
+function pushUrl(ctx: PluginContext, url: string, title?: string, hostTabId?: string): void {
   lastUrl = url;
   const data = {
     url,
@@ -1477,6 +1666,11 @@ function pushUrl(ctx: PluginContext, url: string, title?: string): void {
     favorited: isFavorite(url),
     private: privateMode,
   };
+  const target = hostTabId ?? activeHostTab ?? undefined;
+  if (target) {
+    ctx.send('browser', 'ui.urlChanged', data, target);
+    return;
+  }
   for (const panelId of panelTargets()) ctx.send(panelId, 'ui.urlChanged', data);
 }
 
@@ -1509,7 +1703,7 @@ async function refreshTitle(ctx: PluginContext, tabId?: string): Promise<void> {
   }
   const url = String(state?.url ?? '');
   const title = String(state?.title ?? '');
-  if (!url || !title) return;
+  if (!url || !title || /^about:blank/i.test(url)) return;
 
   // Fill the mirror row (the strip) as well as the history entry.
   for (const b of tabBuckets.values()) {
@@ -1522,6 +1716,14 @@ async function refreshTitle(ctx: PluginContext, tabId?: string): Promise<void> {
     void save(ctx, HISTORY_KEY, history, 'history');
   }
   // The panel drew itself at did-navigate, when there was no title yet.
+  const hostTab = hostOfEngine(tabId);
+  if (hostTab && sessionOfHost(hostTab) === panelSession) {
+    syncHostTab(ctx, hostTab);
+    if (hostTab === activeHostTab && urlKey(url) === urlKey(lastUrl)) {
+      pushUrl(ctx, url, title, hostTab);
+    }
+    return;
+  }
   if (urlKey(url) === urlKey(lastUrl)) pushUrl(ctx, url, title);
 }
 
@@ -1849,48 +2051,142 @@ plugin({
     }
   },
 
-  async onPanelMounted(panelId, _params, ctx, meta) {
+  async onPanelMounted(panelId, params, ctx, meta) {
     mountedPanels.add(panelId);
-    panelSession = meta?.sessionId ?? panelSession;
+    const hostTabId = meta?.tabId ?? panelId ?? 'browser';
+    const sessionId = meta?.sessionId ?? panelSession;
+    panelSession = sessionId ?? panelSession;
+    activeHostTab = hostTabId;
     await ensureLoaded(ctx);
     // The popup only matters while someone can see the page — and the poll
     // that carries its clicks back is what "someone is looking" buys.
     syncPoll(ctx);
-    // Mirror the conversation's tabs, then tell the panel what to draw.
-    // An EMPTY bucket must stay empty here: the getUrl fallback would hit the
-    // manager's active tab — whatever ANOTHER conversation last showed — and
-    // re-push its URL into this conversation's toolbar. syncBucket's clear
-    // push above already emptied it.
-    await syncBucket(ctx);
-    scheduleInject(ctx);
-    const key = bucketKey();
-    const tabId = targetTabId(key);
-    if (tabId) {
+    const key = bucketKey(sessionId);
+    const p = (params ?? {}) as { engineTabId?: string; url?: string };
+    // A page mount knows its engine; pulling the session's whole tab list
+    // here would REPLACE the mirror and could drop that engine's row (the
+    // host list and the plugin's bucket do not have to enumerate the same
+    // instant). Only a favorites mount needs the mirror.
+    if (!p.engineTabId && !p.url) await syncBucketFor(ctx, key);
+    const b = bucketFor(key);
+    const wasLoaded = loadedHosts.has(hostTabId);
+    if (p.engineTabId || p.url || wasLoaded) loadedHosts.add(hostTabId);
+    else loadedHosts.delete(hostTabId);
+    let engineId = String(p.engineTabId ?? engineOfHost(hostTabId) ?? '');
+
+    // A restored host tab can name an engine tab that no longer exists after
+    // a restart. Validate, then fall back to a fresh tab (the host tab's
+    // params carry no URL, so there is nothing else to recover).
+    if (engineId) {
       try {
-        const state = await ctx.call<{ url?: string; title?: string }>('browser.getUrl', { tabId });
-        if (state?.url) {
-          pushUrl(ctx, state.url, state.title);
-        } else if (lastUrl) {
-          pushUrl(ctx, lastUrl);
-        }
+        await ctx.call('browser.getUrl', { tabId: engineId });
       } catch {
-        /* engine unreachable — fall back to whatever we last heard */
-        if (lastUrl) pushUrl(ctx, lastUrl);
+        // The engine tab did not survive a restart: this host tab can only
+        // come back as a favorites tab, and empty params are what let `+`
+        // reuse it. `p.url` (when present) re-loads the page below.
+        engineId = '';
+        loadedHosts.delete(hostTabId);
       }
     }
+    if (!engineId) {
+      const created = await ctx.call<{ tabId?: string }>('browser.newTab', { sessionId: key });
+      engineId = String(created?.tabId ?? '');
+    }
+
+    if (engineId) {
+      // A favorites host tab reused for an agent-opened page leaves its old
+      // blank engine tab behind; close it rather than orphaning a background
+      // tab that would still show up in browser_tab_list.
+      const previousEngine = engineOfHost(hostTabId);
+      if (previousEngine && previousEngine !== engineId) {
+        await ctx.call('browser.closeTab', { tabId: previousEngine }).catch(() => {});
+        for (const bucket of tabBuckets.values()) {
+          bucket.tabs = bucket.tabs.filter((t) => t.id !== previousEngine);
+        }
+      }
+      if (!b.tabs.some((t) => t.id === engineId)) {
+        b.tabs.push({ id: engineId, url: '', title: '' });
+      }
+      b.activeTabId = engineId;
+      bindHostTab(hostTabId, engineId, sessionId);
+      const pendingFocus = pendingHostFocus.get(engineId);
+      if (pendingFocus !== undefined) {
+        pendingHostFocus.delete(engineId);
+        if (pendingFocus) {
+          void ctx
+            .call('panel.focusTab', { panelId: 'browser', tabId: hostTabId, focus: true })
+            .catch(() => {});
+        }
+      }
+      try {
+        await ctx.call('browser.activateTab', { sessionId: key, tabId: engineId });
+      } catch {
+        /* engine not up yet */
+      }
+      if (p.url) {
+        loadedHosts.add(hostTabId);
+        try {
+          const result = await ctx.call<{ url?: string; title?: string }>(
+            'browser.navigate',
+            { url: normalizeUrl(p.url), tabId: engineId },
+            { timeoutMs: NAVIGATE_TIMEOUT_MS },
+          );
+          const row = b.tabs.find((t) => t.id === engineId);
+          if (row && result?.url) row.url = result.url;
+          if (row && result?.title) row.title = result.title;
+        } catch {
+          /* leave the tab as it is; the toolbar shows the engine's URL */
+        }
+      }
+    }
+
+    syncHostTab(ctx, hostTabId);
+    pushHostState(ctx, hostTabId);
+    scheduleInject(ctx);
   },
 
-  async onRequest(panelId, method, params, ctx) {
+  async onPanelActivated(panelId, _params, ctx, meta) {
+    const hostTabId = meta?.tabId ?? panelId ?? 'browser';
+    activeHostTab = hostTabId;
+    const sessionId = meta?.sessionId ?? panelSession;
+    if (sessionId) panelSession = sessionId;
+    const engineId = engineOfHost(hostTabId);
+    if (engineId) {
+      const key = bucketKey(sessionId);
+      const b = bucketFor(key);
+      b.activeTabId = engineId;
+      try {
+        await ctx.call('browser.activateTab', { sessionId: key, tabId: engineId });
+      } catch {
+        /* engine not up yet */
+      }
+    }
+    syncHostTab(ctx, hostTabId);
+    pushHostState(ctx, hostTabId);
+  },
+
+  async onRequest(panelId, method, params, ctx, meta) {
     void panelId;
     await ensureLoaded(ctx);
     // The panel serves the conversation on screen; its tab actions go to that
     // bucket. A nav with an empty bucket must CREATE the conversation's tab —
     // falling through to the manager's active tab would navigate whatever
     // another conversation last showed (the exact fight buckets exist to end).
-    const key = bucketKey();
+    const hostTabId = meta?.tabId ?? activeHostTab ?? panelId ?? 'browser';
+    const sessionId = meta?.sessionId ?? panelSession;
+    const key = bucketKey(sessionId);
+    const hostEngine = engineOfHost(hostTabId);
+    if (hostEngine) {
+      // Every request from a host page concerns ITS engine tab. The existing
+      // per-conversation logic below resolves "the focused tab" from this
+      // bucket, so point the bucket at this host tab before it runs.
+      bucketFor(key).activeTabId = hostEngine;
+    }
     switch (method) {
       case 'nav.open': {
         const t = await ensureTab(ctx, key);
+        bindHostTab(hostTabId, t.id, sessionId);
+        loadedHosts.add(hostTabId);
         const result = await ctx.call<{ url?: string; title?: string }>(
           'browser.navigate',
           { url: normalizeUrl(params.url), tabId: t.id },
@@ -1899,7 +2195,9 @@ plugin({
         if (result?.url) lastUrl = result.url;
         const row = bucketFor(key).tabs.find((x) => x.id === t.id);
         if (row && result?.url) row.url = result.url;
-        pushTabs(ctx);
+        if (row && result?.title) row.title = result.title;
+        await syncHostTab(ctx, hostTabId);
+        pushHostState(ctx, hostTabId);
         return { url: result?.url ?? '', title: result?.title ?? '' };
       }
       case 'nav.back': {
@@ -1935,35 +2233,39 @@ plugin({
           );
           tab.url = result?.url ?? '';
         }
-        await syncBucket(ctx);
+        // The internal strip is gone; a new engine tab becomes a NEW host
+        // tab. The page asks for one only if an old cached page still does.
+        await ctx.call('panel.open', {
+          panelId: 'browser',
+          focus: true,
+          params: { engineTabId: tab.id },
+        });
         return { tabId: tab.id };
       }
       case 'tabs.activate': {
         const tabId = String(params.tabId ?? '');
         if (!tabId) throw new Error('tabs.activate: missing tabId');
         await ctx.call('browser.activateTab', { sessionId: key, tabId });
-        await syncBucket(ctx);
+        await ctx.call('panel.open', {
+          panelId: 'browser',
+          focus: true,
+          params: { engineTabId: tabId },
+        });
         return { ok: true };
       }
       case 'tabs.close': {
         const tabId = String(params.tabId ?? '');
         if (!tabId) throw new Error('tabs.close: missing tabId');
+        const hostTab = hostOfEngine(tabId);
+        if (hostTab && sessionOfHost(hostTab) === (sessionId ?? panelSession)) {
+          unbindHostTab(hostTab);
+          await ctx.call('panel.close', { panelId: 'browser', tabId: hostTab }).catch(() => {});
+        }
         await ctx.call('browser.closeTab', { tabId });
         const b = bucketFor(key);
         b.tabs = b.tabs.filter((t) => t.id !== tabId);
         if (b.activeTabId === tabId) {
           b.activeTabId = b.tabs.find((t) => !t.evicted)?.id ?? null;
-        }
-        // A split pane died — collapse rather than show a ghost.
-        if (b.split && (b.split[0] === tabId || b.split[1] === tabId)) {
-          b.split = null;
-          await ctx.call('browser.setSplitTabs', { sessionId: key, tabId: null }).catch(() => {});
-        }
-        pushTabs(ctx);
-        const active = b.tabs.find((t) => t.id === b.activeTabId);
-        if (active?.url) {
-          lastUrl = active.url;
-          pushUrl(ctx, active.url, active.title);
         }
         return { ok: true };
       }
@@ -2037,9 +2339,10 @@ plugin({
           selPopup,
           clips: clips.length,
           tabs: b.tabs,
-          activeTabId: b.activeTabId ?? '',
-          split: b.split,
-          splitRatio: b.splitRatio,
+          activeTabId: hostEngine ?? b.activeTabId ?? '',
+          engineTabId: hostEngine ?? '',
+          split: null,
+          splitRatio: 0.5,
         };
       }
 
@@ -2288,7 +2591,7 @@ plugin({
     }
     if (event === 'browser.tabOpened') {
       // A popup became a tab — in the opener's conversation. The host already
-      // created it; record it here so the strip shows it.
+      // created the engine tab; give it a host tab of its own.
       await ensureLoaded(ctx);
       const tabId = String(d.tabId ?? '');
       if (!tabId) return;
@@ -2297,18 +2600,44 @@ plugin({
       if (!b.tabs.some((t) => t.id === tabId)) {
         b.tabs.push({ id: tabId, url: String(d.url ?? ''), title: '' });
       }
-      pushTabs(ctx);
+      const eventSession = (d as { sessionId?: string }).sessionId ?? panelSession;
+      if (!hostOfEngine(tabId) && eventSession === panelSession) {
+        await ctx
+          .call('panel.open', {
+            panelId: 'browser',
+            focus: true,
+            params: { engineTabId: tabId },
+          })
+          .catch(() => {});
+      }
       return;
     }
     if (event !== 'browser.urlChanged') return;
     await ensureLoaded(ctx);
     const tabId = String(d.tabId ?? '');
     const url = String(d.url ?? '');
-    if (!url) return;
+    if (!tabId || !url) return;
+    if (/^about:blank/i.test(url)) {
+      // Back to the favorites page: clear the mirror row and the host tab
+      // label, and do not record a visit.
+      for (const b of tabBuckets.values()) {
+        const row = b.tabs.find((t) => t.id === tabId);
+        if (row) {
+          row.url = '';
+          row.title = '';
+        }
+      }
+      const hostTab = hostOfEngine(tabId);
+      if (hostTab && sessionOfHost(hostTab) === panelSession) {
+        syncHostTab(ctx, hostTab);
+        if (hostTab === activeHostTab) pushHostState(ctx, hostTab);
+      }
+      return;
+    }
     // The engine keeps no history of its own — this event is the only record
     // that a navigation happened.
     if (recordVisit(url, '')) void save(ctx, HISTORY_KEY, history, 'history');
-    // Update the mirror row, then push state for the tab the user can SEE.
+    // Update the mirror row, then push state for the page that owns it.
     for (const b of tabBuckets.values()) {
       const row = b.tabs.find((t) => t.id === tabId);
       if (row) {
@@ -2316,19 +2645,38 @@ plugin({
         break;
       }
     }
-    const visible = bucketFor(bucketKey());
-    if (tabId && visible.activeTabId && tabId !== visible.activeTabId) {
-      // A background tab navigated (another conversation's agent, or a
-      // background tab of this one). The strip row updates; the toolbar does
-      // not — the user is looking at a different page.
-      pushTabs(ctx);
+    const hostTab = hostOfEngine(tabId);
+    if (hostTab && sessionOfHost(hostTab) === panelSession) {
+      syncHostTab(ctx, hostTab);
+      if (hostTab === activeHostTab) {
+        lastUrl = url;
+        pushUrl(ctx, url, undefined, hostTab);
+      }
+      scheduleTitleRefresh(ctx, tabId);
+      scheduleInject(ctx);
       return;
     }
-    lastUrl = url;
-    pushUrl(ctx, url);
-    scheduleTitleRefresh(ctx, tabId || undefined);
-    // A new document: the popup (if the user wants it) must be installed in it.
-    scheduleInject(ctx);
+    // An engine tab whose host tab has not mounted yet (a tool may have just
+    // created it). The mount will read the mirror and push the toolbar state.
+    scheduleTitleRefresh(ctx, tabId);
+  },
+
+  /** The host closed a browser tab: drop its engine tab too, so it stops
+   *  appearing in tab lists and does not keep running in the background. */
+  async onEvent(_panelId, event, data, ctx, meta) {
+    if (event !== 'panel.closed') return;
+    const hostTabId = String((data as { tabId?: string })?.tabId ?? meta?.tabId ?? '');
+    if (!hostTabId) return;
+    const engineId = hostOfEngine(hostTabId);
+    unbindHostTab(hostTabId);
+    if (!engineId) return;
+    await ctx.call('browser.closeTab', { tabId: engineId }).catch(() => {});
+    for (const b of tabBuckets.values()) {
+      b.tabs = b.tabs.filter((t) => t.id !== engineId);
+      if (b.activeTabId === engineId) {
+        b.activeTabId = b.tabs.find((t) => !t.evicted)?.id ?? null;
+      }
+    }
   },
 
   async onTool(name, params, ctx, call) {
@@ -2351,7 +2699,14 @@ plugin({
       name === 'browser_show' ||
       name === 'browser_tab_open' ||
       name === 'browser_tab_switch';
-    void ctx.openPanel('browser', { focus: reveal }).catch(() => {});
+    // Focus the page this tool will act on, if it already has a host tab.
+    // A page-creating tool (navigate / tab open) calls showEngine after it
+    // has the new engine tab id; opening a host tab here first would mount a
+    // favorites tab and race a different engine tab into existence.
+    if (!['browser_navigate', 'browser_tab_open', 'browser_tab_switch'].includes(name)) {
+      const current = engineOfHost(activeHostTab) ?? tid;
+      if (current) void showEngine(ctx, current, reveal, sessionKey ?? panelSession);
+    }
     switch (name) {
       case 'browser_navigate': {
         const url = normalizeUrl(params.url);
@@ -2368,7 +2723,9 @@ plugin({
         // the direct answer is here now).
         const row = bucketFor(bucketKey(sessionKey)).tabs.find((t) => t.id === tab.id);
         if (row) row.url = finalUrl;
-        pushTabs(ctx);
+        await showEngine(ctx, tab.id, true, sessionKey ?? panelSession);
+        const viaHost = hostOfEngine(tab.id);
+        if (viaHost) syncHostTab(ctx, viaHost);
         const head = `已打开 ${finalUrl}${result?.title ? ` — ${result.title}` : ''}`;
         if (result?.page?.authKind === 'captcha') {
           return `${head}\n\n⚠️ 这个页面需要人工完成人机验证。请在右侧浏览器面板里由用户完成；不要尝试点击或绕过。用户完成后再继续。`;
@@ -2416,7 +2773,7 @@ plugin({
         const b = bucketFor(bucketKey(sessionKey));
         b.tabs.push(tab);
         b.activeTabId = tab.id;
-        pushTabs(ctx);
+        await showEngine(ctx, tab.id, true, sessionKey ?? panelSession);
         return `已新建标签页 [${tab.id}]${tab.url ? ` — ${tab.url}` : ''}`;
       }
 
@@ -2426,7 +2783,7 @@ plugin({
         await ctx.call('browser.activateTab', { sessionId: bucketKey(sessionKey), tabId });
         const b = bucketFor(bucketKey(sessionKey));
         b.activeTabId = tabId;
-        pushTabs(ctx);
+        await showEngine(ctx, tabId, true, sessionKey ?? panelSession);
         const row = b.tabs.find((t) => t.id === tabId);
         return `已切换到标签页 [${tabId}]${row?.title ? ` — ${row.title}` : ''}`;
       }
@@ -2434,6 +2791,11 @@ plugin({
       case 'browser_tab_close': {
         const tabId = String(params.tabId ?? '').trim();
         if (!tabId) throw new Error('browser_tab_close: missing tabId');
+        const hostTab = hostOfEngine(tabId);
+        if (hostTab && sessionOfHost(hostTab) === (sessionKey ?? panelSession)) {
+          unbindHostTab(hostTab);
+          await ctx.call('panel.close', { panelId: 'browser', tabId: hostTab }).catch(() => {});
+        }
         await ctx.call('browser.closeTab', { tabId });
         const b = bucketFor(bucketKey(sessionKey));
         b.tabs = b.tabs.filter((t) => t.id !== tabId);

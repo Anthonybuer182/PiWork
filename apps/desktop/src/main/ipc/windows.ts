@@ -90,6 +90,8 @@ export function registerWindowIpcHandlers(windows: WindowRegistry): void {
       msg: {
         pluginId?: string;
         panelId?: string;
+        tabId?: string;
+        slotId?: string;
         params?: unknown;
         sessionId?: string;
         workspaceId?: string;
@@ -98,6 +100,29 @@ export function registerWindowIpcHandlers(windows: WindowRegistry): void {
       const ctx = windows.byWebContents(event.sender);
       if (!ctx?.pluginWebViews) return { ok: false, error: 'unknown window' };
       return ctx.pluginWebViews.handlePanelMounted(msg);
+    },
+  );
+
+  // Which tab the user is looking at. The backend keeps "current document /
+  // current page" per conversation; with several tabs of one panel open, this
+  // is the signal that moves it.
+  ipcMain.handle(
+    'pi:plugin:panel-activated',
+    (
+      event,
+      msg: {
+        pluginId?: string;
+        panelId?: string;
+        tabId?: string;
+        slotId?: string;
+        params?: unknown;
+        sessionId?: string;
+        workspaceId?: string;
+      },
+    ) => {
+      const ctx = windows.byWebContents(event.sender);
+      if (!ctx?.pluginWebViews) return { ok: false, error: 'unknown window' };
+      return ctx.pluginWebViews.handlePanelActivated(msg);
     },
   );
 }

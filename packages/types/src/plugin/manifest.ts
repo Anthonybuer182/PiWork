@@ -58,6 +58,16 @@ export interface PanelContribution {
   /** Whether the panel's tabs follow the session. Defaults to 'global'. */
   scope?: PanelScope;
   /**
+   * Allow several host tabs of this panel at once.
+   *
+   * A panel is one page; the host mounts one native view per tab. Multi-instance
+   * is for panels whose subject is a single document/page (the file viewer, the
+   * browser) — each tab carries its own open `params`, title and backend
+   * `tabId`. Singleton panels (plugin center, task list) leave this unset: a
+   * second open focuses the existing tab instead of creating another.
+   */
+  multiInstance?: boolean;
+  /**
    * Which sidebar column the panel lives in. Defaults to 'right'.
    *
    * The left column is the global-view column (all files, all sessions), so a

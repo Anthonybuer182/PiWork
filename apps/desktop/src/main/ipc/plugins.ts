@@ -164,11 +164,14 @@ export function registerPluginIpcHandlers(system: PluginSystem, windows?: Window
     return system.aggregateTools().map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
   });
 
-  ipcMain.handle('pi:plugin:execute-tool', async (_event, payload: { pluginId?: string; name?: string; params?: Record<string, unknown> }) => {
-    const { pluginId, name, params } = payload ?? {};
+  ipcMain.handle('pi:plugin:execute-tool', async (_event, payload: { pluginId?: string; name?: string; params?: Record<string, unknown>; sessionId?: string; workspaceId?: string }) => {
+    const { pluginId, name, params, sessionId, workspaceId } = payload ?? {};
     if (!pluginId || !name) return { ok: false, error: 'missing pluginId or name' };
     try {
-      const result = await system.executeTool(pluginId, name, params ?? {});
+      // The agent path always supplies the calling conversation; this IPC is
+      // also used by tests and devtools, which need to name it explicitly or
+      // session-scoped tools fall back to whatever panel mounted last.
+      const result = await system.executeTool(pluginId, name, params ?? {}, sessionId, workspaceId);
       return { ok: true, content: result.content ?? [], details: result.details ?? null, card: result.card ?? null };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };

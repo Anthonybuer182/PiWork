@@ -55,6 +55,8 @@ interface IncomingMessage {
   sessionId?: string;
   /** The calling conversation's workspace id (protocol 7). */
   workspaceId?: string;
+  /** The host tab this panel message came from (multi-instance panels). */
+  tabId?: string;
   actionId?: string;
   text?: string;
   providerId?: string;
@@ -80,6 +82,14 @@ export interface ToolResult {
   details?: unknown;
   /** Declarative card shown alongside the result. */
   card?: unknown;
+}
+
+/** Per-panel-instance context handed to panel callbacks. */
+export interface PanelMeta {
+  /** The host tab (multi-instance panels append an instance suffix). */
+  tabId?: string;
+  sessionId?: string;
+  workspaceId?: string;
 }
 
 /** Everything a handler needs from the host. */
@@ -111,7 +121,7 @@ export interface PluginContext {
    * notification the user must see) should ask `panelAlive` first and record
    * what did not get through.
    */
-  send(panelId: string, event: string, data?: unknown): boolean;
+  send(panelId: string, event: string, data?: unknown, tabId?: string): boolean;
   /**
    * Ask whether a panel is there to receive a message. Best-effort, and the
    * only signal that exists: the host never reports a panel closing, and a
@@ -148,10 +158,17 @@ export interface PluginHandlers {
     method: string,
     params: Record<string, unknown>,
     ctx: PluginContext,
+    meta?: PanelMeta,
   ): unknown | Promise<unknown>;
 
   /** A panel reported something. Fire-and-forget — there is no reply. */
-  onEvent?(panelId: string, event: string, data: unknown, ctx: PluginContext): void | Promise<void>;
+  onEvent?(
+    panelId: string,
+    event: string,
+    data: unknown,
+    ctx: PluginContext,
+    meta?: PanelMeta,
+  ): void | Promise<void>;
 
   /**
    * A panel finished loading and is ready to be drawn into.
@@ -179,7 +196,19 @@ export interface PluginHandlers {
     panelId: string,
     params: unknown,
     ctx: PluginContext,
-    meta?: { sessionId?: string; workspaceId?: string },
+    meta?: PanelMeta,
+  ): void | Promise<void>;
+
+  /**
+   * The user switched to this tab. Multi-instance panels share one backend
+   * process; this is how it learns which tab's file/page is "current" for the
+   * conversation. Fires after mount and on every activation.
+   */
+  onPanelActivated?(
+    panelId: string,
+    params: unknown,
+    ctx: PluginContext,
+    meta?: PanelMeta,
   ): void | Promise<void>;
 
   /**
@@ -274,6 +303,10 @@ export function plugin(handlers: PluginHandlers): void {
    */
   const panelPorts = new Map<string, Set<PanelPort>>();
   const portPanel = new Map<PanelPort, string>();
+  /** Which host tab each port last spoke for (multi-instance routing). */
+  const portTab = new Map<PanelPort, string | undefined>();
+  /** Session/workspace of each tab, learned from panel.mounted/activated. */
+  const tabMeta = new Map<string, { sessionId?: string; workspaceId?: string }>();
   let pluginId = '';
   let dataDir = '';
   /** False until the host's `init` arrives; handlers must not run before it. */
@@ -287,11 +320,20 @@ export function plugin(handlers: PluginHandlers): void {
   let probeSeq = 0;
   const pendingProbes = new Map<string, () => void>();
 
-  /** Every port a panel's traffic should reach (one per mounted view). */
-  function routeFor(panelId?: string): PanelPort[] {
+  /** Every port a panel's traffic should reach (one per mounted view).
+   *  With `tabId`, only the ports known to belong to that tab are targeted;
+   *  falling back to the panel-wide set keeps a backend that sends before the
+   *  tab has spoken once working. */
+  function routeFor(panelId?: string, tabId?: string): PanelPort[] {
     if (panelId) {
       const ports = panelPorts.get(panelId);
-      if (ports && ports.size > 0) return [...ports];
+      if (ports && ports.size > 0) {
+        if (tabId) {
+          const matched = [...ports].filter((port) => portTab.get(port) === tabId);
+          if (matched.length > 0) return matched;
+        }
+        return [...ports];
+      }
     }
     return panelPort ? [panelPort] : [];
   }
@@ -320,16 +362,16 @@ export function plugin(handlers: PluginHandlers): void {
         }, options?.timeoutMs ?? CALL_TIMEOUT_MS);
       });
     },
-    send(panelId: string, event: string, data?: unknown): boolean {
+    send(panelId: string, event: string, data?: unknown, tabId?: string): boolean {
       // No port, or every port has closed: the message goes nowhere.
       // Deliberately not logged — see the interface comment. Returning false
       // is how a caller finds out.
-      const ports = routeFor(panelId);
+      const ports = routeFor(panelId, tabId);
       if (ports.length === 0) return false;
       let delivered = false;
       for (const port of ports) {
         try {
-          port.postMessage({ kind: 'event', event, panelId, data });
+          port.postMessage({ kind: 'event', event, panelId, tabId, data });
           delivered = true;
         } catch {
           /* this view went away between the lookup and the send */
@@ -429,6 +471,7 @@ export function plugin(handlers: PluginHandlers): void {
       kind?: string;
       id?: string;
       panelId?: string;
+      tabId?: string;
       method?: string;
       params?: Record<string, unknown>;
       event?: string;
@@ -436,10 +479,15 @@ export function plugin(handlers: PluginHandlers): void {
     } | null;
     if (!msg || typeof msg !== 'object') return;
 
+    // Learn which tab this port speaks for. Replies go back on the same port,
+    // so targeted `ctx.send(panelId, …, tabId)` can find it later.
+    if (sourcePort && msg.tabId !== undefined) portTab.set(sourcePort, msg.tabId);
+
     if (msg.kind === 'request') {
       const id = String(msg.id ?? '');
       const method = String(msg.method ?? '');
       const panelId = msg.panelId ?? '';
+      const tabId = msg.tabId;
       // Replies go back on the port the request CAME from — with several
       // panels (or windows) alive there is no single "the panel port".
       const replyPort = sourcePort ?? routeFor(panelId)[0];
@@ -458,7 +506,12 @@ export function plugin(handlers: PluginHandlers): void {
         return;
       }
       try {
-        const result = await handlers.onRequest(panelId, method, msg.params ?? {}, ctx);
+        const known = tabId ? tabMeta.get(tabId) : undefined;
+        const result = await handlers.onRequest(panelId, method, msg.params ?? {}, ctx, {
+          tabId,
+          sessionId: known?.sessionId,
+          workspaceId: known?.workspaceId,
+        });
         // A request must ANSWER. Returning nothing is either a forgotten
         // `return` or an unhandled method name, and both used to look like
         // success on the panel side — it would resolve with undefined and the
@@ -481,6 +534,7 @@ export function plugin(handlers: PluginHandlers): void {
     if (msg.kind === 'event') {
       const event = String(msg.event ?? '');
       const panelId = msg.panelId ?? '';
+      const tabId = msg.tabId;
 
       // The pong for ctx.panelAlive — SDK-level, like panel.mounted. An author
       // asking "is the panel there" should not have to also write the reply.
@@ -500,6 +554,18 @@ export function plugin(handlers: PluginHandlers): void {
       // intercept it so an author cannot accidentally swallow it in onEvent and
       // leave a permanently blank panel.
       if (event === 'panel.mounted') {
+        const data = (msg.data ?? {}) as {
+          tabId?: string;
+          params?: unknown;
+          sessionId?: string;
+          workspaceId?: string;
+        };
+        if (data.tabId) {
+          tabMeta.set(data.tabId, {
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId,
+          });
+        }
         if (!handlers.onPanelMounted) {
           if (!mountWarned.has(panelId)) {
             mountWarned.add(panelId);
@@ -512,12 +578,8 @@ export function plugin(handlers: PluginHandlers): void {
           return;
         }
         try {
-          const data = (msg.data ?? {}) as {
-            params?: unknown;
-            sessionId?: string;
-            workspaceId?: string;
-          };
           await handlers.onPanelMounted(panelId, data.params, ctx, {
+            tabId: data.tabId ?? tabId,
             sessionId: data.sessionId,
             workspaceId: data.workspaceId,
           });
@@ -527,12 +589,44 @@ export function plugin(handlers: PluginHandlers): void {
         return;
       }
 
+      // Activation is a lifecycle signal too: it is what keeps a multi-tab
+      // backend's "current document/page" on the tab the user is looking at.
+      if (event === 'panel.activated' && handlers.onPanelActivated) {
+        const data = (msg.data ?? {}) as {
+          tabId?: string;
+          params?: unknown;
+          sessionId?: string;
+          workspaceId?: string;
+        };
+        if (data.tabId) {
+          tabMeta.set(data.tabId, {
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId,
+          });
+        }
+        try {
+          await handlers.onPanelActivated(panelId, data.params, ctx, {
+            tabId: data.tabId ?? tabId,
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId,
+          });
+        } catch (err) {
+          log('error', `onPanelActivated for "${panelId}" threw: ${describe(err)}`);
+        }
+        return;
+      }
+
       if (!handlers.onEvent) {
         log('warn', `panel event "${event}" ignored: this plugin handles no events.`);
         return;
       }
       try {
-        await handlers.onEvent(panelId, event, msg.data, ctx);
+        const known = tabId ? tabMeta.get(tabId) : undefined;
+        await handlers.onEvent(panelId, event, msg.data, ctx, {
+          tabId,
+          sessionId: known?.sessionId,
+          workspaceId: known?.workspaceId,
+        });
       } catch (err) {
         log('error', `panel event "${event}" handler threw: ${describe(err)}`);
       }

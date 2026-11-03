@@ -244,7 +244,7 @@ cp -R ui dist ~/.pi/agent/plugins/com.example.note/
 
 逐条检查，每条都应成立：
 
-1. 打开插件中心：已安装列表里出现「便签」，开关打开，状态"运行中"（此刻它还没有面板，右侧栏没有按钮——那是阶段②的事）。
+1. 打开插件中心：已安装列表里出现「便签」，开关打开，状态"运行中"（此刻它还没有面板，右侧栏的插件列表里也没有它——那是阶段②的事）。
 2. 在对话里说「帮我在便签里记一句：周五交报告」→ agent 调用 `note_write`，回复"已保存"。
 3. 说「便签里写了什么」→ agent 调用 `note_read`，复述内容。
 
@@ -364,7 +364,7 @@ if (name === 'note_write') {
 
 **验收（阶段②）**
 
-1. 右侧栏图标列出现「便签」面板，打开后能输入文字、点保存出现"已保存 ✓"。
+1. 右侧栏的插件网格或加号弹层里出现「便签」，点开是一个标签页，能输入文字、点保存出现"已保存 ✓"。
 2. 完全退出应用再打开：便签内容还在（说明 `storage` 真的落盘了）。
 3. 对 agent 说「把便签改成：XXX」→ 开着的面板自动刷新成新内容（`note.changed` 那行推送）。
 
@@ -583,7 +583,22 @@ await piSDK.request('storage.get', { key: 'x' });
 
 ### 多块面板
 
-一个插件可以有多块面板，各自在图标列里有一个按钮（`hidden: true` 的除外，它只能被 `panel.open` 打开）。`panelId` 由宿主注入，你只要在 `ctx.send` 时选对收件人。`keepAlive` 决定切走时面板保不保活（`always` / `lru` 默认 / `never`）。左侧栏的面板建议 `keepAlive: "always"`——左右两侧共享一个只保留 2 个的 LRU 池，左侧面板用 `lru` 会被右侧面板挤掉、状态全丢。
+一个插件可以有多块面板，每块在右侧栏的插件网格/加号弹层里各有一个入口，打开后各是一个标签页（`hidden: true` 的除外，它只能被 `panel.open` 打开）。`panelId` 由宿主注入，你只要在 `ctx.send` 时选对收件人。`keepAlive` 决定切走时面板保不保活（`always` / `lru` 默认 / `never`）。左侧栏的面板建议 `keepAlive: "always"`——左右两侧共享一个只保留 2 个的 LRU 池，左侧面板用 `lru` 会被右侧面板挤掉、状态全丢。
+
+#### 多标签面板：`multiInstance`
+
+一块面板默认只有一个宿主标签：再次打开只聚焦已有那个。声明 `multiInstance: true` 后，同一块面板可以同时开多个宿主标签——每个标签有独立原生视图、独立 `params` 和独立 `tabId`。文件查看器和浏览器就是这么做的（一个标签一个文件/网页）。
+
+多实例面板要处理四件事：
+
+- `onPanelMounted(panelId, params, ctx, meta)` 的 `meta.tabId` 是当前标签；`onRequest` / `onEvent` 的第五个参数 `meta.tabId` 相同。
+- `ctx.send(panelId, event, data, tabId)` 只推给那个标签；不传 `tabId` 时推给该面板的所有标签（向后兼容）。
+- 实现 `onPanelActivated(panelId, params, ctx, meta)`：用户切到某个标签时触发，用来更新"当前文档 / 当前页面"。
+- 标签关闭时后端会收到 `panel.closed` 事件（`data.tabId`），用它清理这个实例的状态。
+
+宿主标签的标题和打开参数可以用 `ctx.call('panel.updateTab', { panelId, tabId, title, params })` 更新——查看器打开文件后就是把标签名改成文件名。
+
+打开面板时宿主会自己决定：同一个 `params` 的标签直接聚焦，**没有 `params` 的空标签优先复用**，都没有才新建。所以不要自己维护"第几个标签"，用 `meta.tabId` 认人。
 
 `scope` 决定面板的标签跟不跟会话走（`global` 默认 / `session`）。展示"这个会话的产物"的面板（agent 开的网页、正在讨论的文档）声明 `session`：切会话时它的标签连同打开参数一起收进那个会话，切回来原样恢复——并发会话之间不会互相抢"当前文档"。跨会话的工作台面板（待办）保持默认。注意：`session` 只是标签归属和参数恢复；引擎/文档本身仍是单实例（当前会话可见的那份），多实例是后续版本的事。
 
@@ -628,16 +643,17 @@ const slotB = piSDK.liveSlot('page-b', document.getElementById('second-pane'), (
 | 回调 | 什么时候被调 |
 |------|------|
 | `onInit(ctx)` | 后端起来了。**此时面板还没开**，别在这儿画界面 |
-| `onPanelMounted(panelId, params, ctx, meta?)` | 某块面板加载完了 —— 首次绘制放这儿。`meta.sessionId` 是它当前服务的会话；`scope: session` 的面板切会话会重新触发 |
-| `onRequest(panelId, method, params, ctx)` | 面板在等一个答复（`return` 它） |
-| `onEvent(panelId, event, data, ctx)` | 面板报了一件事（单向，无回复） |
+| `onPanelMounted(panelId, params, ctx, meta?)` | 某块面板加载完了 —— 首次绘制放这儿。`meta.sessionId` 是它当前服务的会话；`meta.tabId` 是多实例面板的宿主标签；`scope: session` 的面板切会话会重新触发 |
+| `onPanelActivated(panelId, params, ctx, meta?)` | 用户切到了这个标签（多实例面板用来更新"当前文档/当前页面"） |
+| `onRequest(panelId, method, params, ctx, meta?)` | 面板在等一个答复（`return` 它）。`meta.tabId` 是发起请求的标签 |
+| `onEvent(panelId, event, data, ctx, meta?)` | 面板报了一件事（单向，无回复）。`meta.tabId` 是发起事件的标签；标签关闭时收到 `panel.closed` |
 | `onTool(name, params, ctx, call)` | agent 调了你的工具（`return` 字符串或 `{ content, details, card }`）。`call.sessionId` 是调用方会话 |
 | `onCommand(name, args, ctx)` | 斜杠命令跑了 |
 | `onContextRequest(providerId, message, ctx)` | 宿主发消息前要上下文，返回要注入的文字 |
 | `onHostEvent(event, data, ctx)` | 宿主推了个事件：`session.changed`（`{ sessionId }`，所有后端）、`browser.urlChanged` / `browser.tabOpened`（`{ tabId, url }`，仅 `browser` 权限） |
 | `onCardEvent(toolName, eventId, kind, payload, ctx)` | 用户点了你返回到对话里的卡片按钮（`kind:'click'`）或在其中输入框回车（`kind:'submit'`）。事件是单向的；想让卡片反映后续状态，靠下一次工具结果返回新卡片 |
 
-`onPanelMounted` 的 `meta.sessionId` 和 `onTool` 的 `call.sessionId` 用来把"当前文档 / 当前页面"解析到对应会话——并发会话共用一个全局 current 会串台。
+`onPanelMounted` 的 `meta.sessionId`、`meta.tabId` 和 `onTool` 的 `call.sessionId` 用来把"当前文档 / 当前页面"解析到对应会话和标签——并发会话或同会话多标签共用一个全局 current 会串台。
 
 一个都不实现也行——那是一个没有后端的插件（清单里去掉 `backend` 字段）。
 
@@ -648,7 +664,7 @@ const slotB = piSDK.liveSlot('page-b', document.getElementById('second-pane'), (
 | `ctx.pluginId` | 插件 id |
 | `ctx.dataDir` | 这个插件的私有目录（启动前就建好了），随便写文件 |
 | `ctx.call(method, params, { timeoutMs? })` | 调宿主能力，返回 Promise；默认 30 秒超时，可单次覆盖 |
-| `ctx.send(panelId, event, data)` | 往某块面板推事件；返回 `false` 表示没送出去（面板没开），不是错误 |
+| `ctx.send(panelId, event, data, tabId?)` | 往某块面板推事件；`tabId` 只推给那个多实例标签；返回 `false` 表示没送出去（面板没开），不是错误 |
 | `ctx.panelAlive(panelId, timeoutMs?)` | 问某块面板还活着吗（尽力而为的探测） |
 | `ctx.openPanel(panelId, { focus })` | 打开自己的面板；`focus: false` 只亮角标不抢焦点。要带打开参数时直接用 `ctx.call('panel.open', { panelId, focus, params })`——SDK 的封装只传 focus |
 | `ctx.setBadge(panelId, n)` | 面板图标上的角标，传 `null` 清掉 |
@@ -661,7 +677,7 @@ const slotB = piSDK.liveSlot('page-b', document.getElementById('second-pane'), (
 | 应用 | `app.info` | 无 | 返回 `{ pluginId, apiVersion, appVersion, platform }` |
 | 存储 | `storage.get` / `storage.set` / `storage.delete` | `storage` | 插件私有键值对，落盘持久 |
 | 通知 | `notify.show` | `notify` | 系统通知 |
-| 面板 | `panel.open` / `panel.close` / `panel.setStatus` | 无 | 只能操作**自己的**面板（`ctx.openPanel` / `ctx.setBadge` 是它们的封装）。`panel.open` 可带 `params`，原样交给面板的 `onPanelMounted` |
+| 面板 | `panel.open` / `panel.close` / `panel.focusTab` / `panel.updateTab` / `panel.setStatus` | 无 | 只能操作**自己的**面板（`ctx.openPanel` / `ctx.setBadge` 是它们的封装）。`panel.open` 可带 `params`，原样交给面板的 `onPanelMounted`；`panel.focusTab` 聚焦一个已经打开的标签（不按参数匹配）；`panel.updateTab` 改宿主标签的标题/参数 |
 | 对话 | `chat.send` | 无 | 发消息进当前对话。消息会带来源标注（「插件消息 · 来自 你的插件名」），agent 和用户都看得出不是用户亲手打的——插件够得着对话，但拿不到用户的声音 |
 | 对话框 | `dialog.openFile` / `dialog.saveFile` | 无 | 系统文件对话框。用户亲手选就是授权。`openFile` 返回 `{ canceled, path, paths }`，`saveFile` 返回 `{ canceled, path }` |
 | 文件 | `filesystem.read` / `write` / `delete` | `filesystem` | 任意绝对路径。`read` 返回 UTF-8 文本（≤2MB；docx/xlsx/pptx 用 `office.read`）；`write` 支持 `content`（文本）或 `contentB64`（二进制），`expectedMtime` 冲突检测；`delete` 同样支持 `expectedMtime` |
@@ -941,11 +957,12 @@ node scripts/build-market.mjs --out ./dist-market
 | `entry` | ✅ 面板的 HTML 页面，相对插件根目录 |
 | `icon` | 写 `./assets/x.svg` 是自带文件，写 `calendar` 是系统图标。不写就继承插件品牌图标 |
 | `keepAlive` | `always` / `lru`（默认）/ `never` — 切走时保活策略 |
+| `multiInstance` | `true` 时同一面板可以开多个宿主标签（文件查看器、浏览器）；默认一个 |
 | `scope` | `global`（默认）/ `session` — 面板标签跟不跟会话走；`session` 的标签和打开参数随会话切换收起/恢复 |
 | `hidden` | `true` 不上图标栏，仅 `panel.open` 可达 |
 | `companion` | 同一插件的另一块面板 id：主面板打开时，这块面板作为分屏第二栏并排显示。通常把 companion 本身设为 `hidden: true`，只能通过分屏打开 |
 | `region` | `left` / `right`（默认） |
-| `anchor` | `top`（默认）/ `bottom` — 在所属栏图标列里的位置 |
+| `anchor` | `top`（默认）/ `bottom` — 在所属栏图标列里的位置（仅左侧栏使用；右侧栏的入口按 `order` / 用户排序排列） |
 | `order` | 同一 region + anchor 内的排序，默认 0 |
 
 > 没有"面板类型"这个字段。你不需要声明面板长什么样、宿主怎么装它——那是宿主的事，而且会变。你的面板在任何宿主上都是同一张网页、同一套 `piSDK`。

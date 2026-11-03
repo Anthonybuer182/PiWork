@@ -24,7 +24,7 @@
  * `ctx.send` like everything else now.
  */
 import { plugin, type PluginContext, type ToolResult } from '@pi/plugin-sdk';
-import { mkdir, readFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, extname, join, resolve as resolvePath } from 'node:path';
 import { createBlankPptx, openPptx, savePptx } from '@genoffice/pptx-engine';
@@ -63,137 +63,102 @@ function samePath(a: string, b: string): boolean {
 /** The one panel this plugin draws into. */
 const PANEL = 'viewer';
 
-/** Push a render to the viewer. Returns false when no panel is connected. */
-const renderViewer = (data: unknown): boolean => ctx.send(PANEL, 'ui.render', data);
+/** Push a render to one host tab's viewer (or to every viewer tab when omitted). */
+const renderViewer = (data: unknown, tabId?: string): boolean =>
+  tabId ? ctx.send(PANEL, 'ui.render', data, tabId) : ctx.send(PANEL, 'ui.render', data);
 
-// ── Document buckets (per-conversation viewer state) ─────────────────
+// ── Viewer tabs (one host tab = one document) ────────────────────────
 //
-// The viewer used to hold ONE module-global "current file", which made two
-// concurrent conversations fight over a single slot — session A's openFile
-// yanked session B's document off screen. Buckets key the tab strip by
-// conversation: each session (or 'default' when none) owns its own open
-// documents and its own focus. The panel shows the bucket of the conversation
-// it currently serves (`panelSession`); a tool call resolves its bucket from
-// `call.sessionId`, so an agent edits ITS conversation's document even while
-// another conversation is on screen.
+// The host owns the tab strip now. Every tab is a separate native view with
+// its own panel.mounted/panel.activated (and its own `tabId`), so this backend
+// keeps one document per tab:
+//
+//   tabFiles            tabId → absolute path ('' = the empty viewer tab)
+//   tabSessions         tabId → the conversation it serves (for scoping)
+//   activeTabBySession  sessionId → the tab the user is looking at
+//
+// The last map is what `office_*` means by "the current document" when a tool
+// omits `path`. The host re-fires panel.activated on every tab switch.
 
-/** How many conversations keep their document tabs — mirrors the host's SESSIONS_KEPT. */
-const MAX_BUCKETS = 8;
-
-interface DocBucket {
-  /** Open documents, in strip order. */
-  tabs: string[];
-  /** Which tab has focus ('' = nothing open). */
-  activePath: string;
-}
-
-const buckets = new Map<string, DocBucket>();
-/** The conversation the viewer panel currently serves (null = none heard yet). */
+const tabFiles = new Map<string, string>();
+const tabSessions = new Map<string, string | null>();
+const activeTabBySession = new Map<string, string>();
+/** The conversation the viewer last mounted for (fallback for unscoped tools). */
 let panelSession: string | null = null;
 
-function bucketKey(sessionId?: string | null, panelId?: string | null): string {
-  const s = sessionId ?? panelSession ?? 'default';
-  return panelId === PANE_PANEL ? `${s}::pane` : s;
+function tabTitle(path: string): string {
+  return path ? basename(path) : '';
 }
 
-function bucketFor(key: string): DocBucket {
-  let b = buckets.get(key);
-  if (!b) {
-    b = { tabs: [], activePath: '' };
-    buckets.set(key, b);
+/** Find a tab showing a path (first match). */
+function tabForPath(path: string): string | null {
+  for (const [tabId, file] of tabFiles) {
+    if (file && samePath(file, path)) return tabId;
   }
-  return b;
+  return null;
 }
 
-/** Drop the coldest buckets past the cap, never the current or default one. */
-function pruneBuckets(): void {
-  if (buckets.size <= MAX_BUCKETS + 1) return;
-  const current = bucketKey();
-  for (const key of buckets.keys()) {
-    if (buckets.size <= MAX_BUCKETS + 1) break;
-    if (key === current || key === 'default') continue;
-    buckets.delete(key);
-  }
+function isOpenInViewer(path: string): boolean {
+  return tabForPath(path) !== null;
 }
 
-/** Push a bucket to the panel. `path` stays for the renderers, tabs drive the strip. */
-function renderBucket(b: DocBucket, panelId: string = PANEL): boolean {
-  return ctx.send(
-    panelId,
-    'ui.render',
-    b.activePath ? { path: b.activePath, tabs: b.tabs, activePath: b.activePath } : { tabs: [], activePath: '' },
+function renderTabFile(tabId: string): void {
+  const file = tabFiles.get(tabId) ?? '';
+  renderViewer(
+    file ? { path: file, tabs: [file], activePath: file } : { tabs: [], activePath: '' },
+    tabId,
   );
 }
 
-/** The pane panel — a second, independent viewer beside the session's main one. */
-const PANE_PANEL = 'viewer-pane';
-
-/** Whether the pane is actually connected right now, probed over its port —
- *  stateless, so a host-side restore after a restart is seen correctly (a
- *  cached flag went stale exactly there). 'ui.ping' is ignored by the page. */
-function paneIsOpen(): boolean {
+/** Tell the host tab its label/params after a file change. */
+async function publishTab(tabId: string): Promise<void> {
+  const file = tabFiles.get(tabId) ?? '';
   try {
-    return ctx.send(PANE_PANEL, 'ui.ping', {}) === true;
-  } catch {
-    return false;
+    await ctx.call('panel.updateTab', {
+      panelId: PANEL,
+      tabId,
+      // '' clears the override, so an unchosen tab falls back to the panel
+      // title ("文件查看器") instead of an empty label.
+      title: tabTitle(file),
+      params: file ? { file } : {},
+    });
+  } catch (err) {
+    ctx.log.warn(`panel.updateTab failed: ${err instanceof Error ? err.message : String(err)}`);
   }
+}
+
+function setTabFile(tabId: string, path: string): void {
+  tabFiles.set(tabId, path);
+}
+
+function activeTabOf(sessionId?: string | null): string | null {
+  return activeTabBySession.get(sessionId ?? panelSession ?? 'default') ?? null;
+}
+
+/** The current document of a conversation ('' when none). */
+function activeFileOf(sessionId?: string | null): string {
+  const tabId = activeTabOf(sessionId);
+  return tabId ? (tabFiles.get(tabId) ?? '') : '';
 }
 
 /**
- * The bucket a UI request addresses. The main viewer serves the session's
- * bucket; the pane panel has its OWN bucket beside it, so the split view's
- * two sides keep independent documents.
+ * Open a file in the viewer through the HOST: a tab already showing the file
+ * is focused, an unloaded viewer tab is reused, otherwise a new tab is made.
+ * The host answers by mounting the tab and firing panel.mounted.
  */
-function uiBucketKey(panelId?: string | null): string {
-  return panelId === PANE_PANEL ? `${bucketKey()}::pane` : bucketKey();
+async function openInViewer(path: string, focus = true): Promise<void> {
+  await ctx.call('panel.open', { panelId: PANEL, focus, params: { file: path } });
 }
 
-/** Open (or focus) a document tab in the bucket named by `key`. */
-function openFileInBucket(key: string, path: string, renderTo?: string): void {
-  const p = String(path ?? '');
-  const b = bucketFor(key);
-  if (p) {
-    const existing = b.tabs.findIndex((t) => samePath(t, p));
-    if (existing >= 0) {
-      // Focus in place. Re-seating the tab to the end here (the old MRU
-      // behavior) made the strip reshuffle on every click of an inactive tab
-      // — with two docs that reads exactly as "the tabs swapped places".
-      // Strip order changes only through an explicit drag (file.reorderTab).
-      b.activePath = p;
-    } else {
-      b.tabs.push(p);
-      b.activePath = p;
-    }
-    // Leaving the docs renderer (a format switch reloads the panel) invalidates
-    // whatever the editor last announced. A docx target keeps the stale value —
-    // the fast path in ensureDocxActive compares it against the TARGET, so a
-    // stale non-matching value just means "wait for the next announcement".
-    const ext = p.toLowerCase().split('.').pop() ?? '';
-    if (ext !== 'docx' && ext !== 'docm') mcpReadyPath = null;
-  }
-  renderBucket(b, renderTo);
-}
-
-/** Open (or focus) a document tab in a conversation's bucket. */
-function openFile(path: string, sessionId?: string | null, renderTo?: string): void {
-  openFileInBucket(bucketKey(sessionId), path, renderTo);
-}
-
-/** Close a tab; closing the focused one falls focus to its left neighbour. */
-function closeTab(path: string, sessionId?: string | null, renderTo?: string): void {
-  const b = bucketFor(bucketKey(sessionId));
-  const idx = b.tabs.findIndex((t) => samePath(t, path));
-  if (idx === -1) return;
-  b.tabs.splice(idx, 1);
-  if (b.activePath && samePath(b.activePath, path)) {
-    b.activePath = b.tabs[Math.max(0, idx - 1)] ?? '';
-  }
-  renderBucket(b, renderTo);
-}
-
-/** The active document of a conversation's bucket ('' when nothing is open). */
-function activeFileOf(sessionId?: string | null): string {
-  return bucketFor(bucketKey(sessionId)).activePath;
+/**
+ * Open a file in a specific existing tab (the viewer's own empty-state tree).
+ * This is a same-tab navigation: the page reloads onto the new renderer and
+ * the host tab's label/params follow.
+ */
+async function openInTab(tabId: string, path: string): Promise<void> {
+  setTabFile(tabId, path);
+  renderTabFile(tabId);
+  await publishTab(tabId);
 }
 
 // ── GenOffice's external-agent bridge (docx) ─────────────────────────
@@ -286,12 +251,12 @@ function withMcpLock<T>(fn: () => Promise<T>): Promise<T> {
   return run;
 }
 
-function requireDocxOpen(path: string, sessionId?: string | null): void {
-  const b = bucketFor(bucketKey(sessionId));
-  if (b.tabs.some((t) => samePath(t, path))) return;
+function requireDocxOpen(path: string): void {
+  if (isOpenInViewer(path)) return;
+  const current = activeFileOf();
   throw new Error(
-    b.activePath
-      ? `the viewer is showing ${b.activePath}, not ${path} — open the document you want to edit in the viewer, then retry`
+    current
+      ? `the viewer is showing ${current}, not ${path} — open the document you want to edit in the viewer, then retry`
       : `no document is open in the viewer — open ${path} there, then retry`,
   );
 }
@@ -302,9 +267,11 @@ function requireDocxOpen(path: string, sessionId?: string | null): void {
  * switch reloads the panel onto the docs renderer) — GenOffice's model is that
  * the document being edited IS the one open in the viewer.
  */
-async function ensureDocxActive(path: string, sessionId?: string | null): Promise<void> {
+async function ensureDocxActive(path: string, _sessionId?: string | null): Promise<void> {
   if (mcpReadyPath !== null && samePath(mcpReadyPath, path)) return;
-  openFile(path, sessionId);
+  // Focus the tab already showing it, reuse an unloaded viewer tab, or open a
+  // new one — the host decides, then mounts it and the editor announces ready.
+  await openInViewer(path, true);
   await waitMcpReady(path, 60_000);
 }
 
@@ -312,6 +279,7 @@ function mcpCommand(
   command: string,
   payload: Record<string, unknown>,
   timeoutMs = 120_000,
+  tabId?: string,
 ): Promise<unknown> {
   const requestId = 'm' + ++mcpSeq;
   return new Promise((resolve, reject) => {
@@ -325,7 +293,7 @@ function mcpCommand(
       );
     }, timeoutMs);
     mcpPending.set(requestId, { resolve, reject, timer });
-    const delivered = ctx.send(PANEL, 'mcp-command', { requestId, command, payload });
+    const delivered = ctx.send(PANEL, 'mcp-command', { requestId, command, payload }, tabId);
     if (!delivered) {
       // Nothing is listening. Waiting out the full timeout would only delay a
       // failure the caller can act on right now — and this is the case the old
@@ -564,10 +532,10 @@ async function toolRead(p: Record<string, unknown>, sessionId?: string | null): 
     // against the CURRENT editor state — only exists there. Reading the bytes
     // instead would produce indexes that go stale the moment anything else
     // touches the document.
-    requireDocxOpen(path, sessionId);
+    requireDocxOpen(path);
     const result = (await withMcpLock(async () => {
       await ensureDocxActive(path, sessionId);
-      return mcpCommand('read_document', {});
+      return mcpCommand('read_document', {}, undefined, tabForPath(path) ?? undefined);
     })) as { text?: string } | undefined;
     return text(String(result?.text ?? ''), { path, via: 'viewer' });
   }
@@ -640,7 +608,7 @@ async function toolEdit(p: Record<string, unknown>, sessionId?: string | null): 
     // spans activate → apply → save: one panel, one live editor, so another
     // call switching documents mid-sequence would land the rest of THIS
     // sequence on the wrong file.
-    requireDocxOpen(path, sessionId);
+    requireDocxOpen(path);
     const commands = planDocxCommands(ops as unknown as DocxOp[], dryRun);
     const steps: unknown[] = [];
     const saved = await withMcpLock(async () => {
@@ -649,7 +617,7 @@ async function toolEdit(p: Record<string, unknown>, sessionId?: string | null): 
         // mid-sequence, and the next command must re-point it rather than land
         // on the user's document. Unchanged target = fast path, no switch.
         await ensureDocxActive(path, sessionId);
-        steps.push(await mcpCommand(step.command, step.payload));
+        steps.push(await mcpCommand(step.command, step.payload, undefined, tabForPath(path) ?? undefined));
       }
       if (dryRun) return undefined;
       // The edits so far are in the LIVE editor; the file on disk still holds
@@ -657,7 +625,7 @@ async function toolEdit(p: Record<string, unknown>, sessionId?: string | null): 
       // deliberately" — the real guard is `filesystem.write`'s mtime
       // compare-and-swap, which refuses if the file changed since the viewer
       // opened it.
-      return (await mcpCommand('save_document', { path, overwrite: true })) as
+      return (await mcpCommand('save_document', { path, overwrite: true }, undefined, tabForPath(path) ?? undefined)) as
         | { ok?: boolean; path?: string }
         | undefined;
     });
@@ -760,8 +728,7 @@ async function runTool(name: string, p: Record<string, unknown>, call: { session
       }
       const target = typeof p.path === 'string' && p.path ? String(p.path) : activeFileOf(sessionId);
       if (!target) throw new Error('no file to open (pass path or click a file first)');
-      await ctx.call('panel.open', { panelId: 'viewer', focus: true });
-      openFile(target, sessionId);
+      await openInViewer(target);
       return text(`已在查看器中打开 ${target}`);
     }
     default:
@@ -779,7 +746,9 @@ async function onUiRequest(
   method: string,
   params: Record<string, unknown> = {},
   panelId?: string | null,
+  meta?: { tabId?: string; sessionId?: string; workspaceId?: string },
 ): Promise<unknown> {
+  const tabId = meta?.tabId ?? panelId ?? PANEL;
   switch (method) {
     case 'chat.send': {
       const t = String(params.text ?? '').trim();
@@ -796,65 +765,51 @@ async function onUiRequest(
       mcpReady = true;
       return { ok: true };
     }
+    case 'file.open': {
+      // The empty viewer's own workspace tree chose a document. It loads in
+      // THIS tab (not a new one), and the host tab's label/params follow.
+      const path = String(params.path ?? '');
+      if (!path) throw new Error('file.open: path is required');
+      await openInTab(tabId, path);
+      return { ok: true, path };
+    }
+    case 'file.listDir': {
+      // Lazy directory listing for the empty state's workspace tree. The page
+      // sends the directory it wants to expand; this backend has Node fs and
+      // the plugin's filesystem permission, so no new host capability.
+      const dir = String(params.path ?? '');
+      if (!dir) throw new Error('file.listDir: path is required');
+      const entries = await readdir(dir, { withFileTypes: true });
+      return {
+        path: dir,
+        entries: entries
+          .filter((e) => !e.name.startsWith('.'))
+          .map((e) => ({ name: e.name, path: join(dir, e.name), dir: e.isDirectory() }))
+          .sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name)),
+      };
+    }
     case 'file.activateTab': {
-      // Strip click: focus one of the conversation's open documents. Same
-      // semantics as openFile for an already-open path (activate, never
-      // duplicate). The panel's own shims take it from here (in-place for
-      // docx→docx, a dispatcher reload for other formats).
+      // Legacy strip request (the internal strip is gone). Kept as a same-tab
+      // navigation so an old cached page cannot wedge.
       const path = String(params.path ?? '');
       if (!path) throw new Error('file.activateTab: path is required');
-      openFile(path, uiBucketKey(panelId), panelId ?? undefined);
+      await openInTab(tabId, path);
       return { ok: true };
     }
     case 'file.closeTab': {
       const path = String(params.path ?? '');
       if (!path) throw new Error('file.closeTab: path is required');
-      closeTab(path, uiBucketKey(panelId), panelId ?? undefined);
-      // The pane's × IS the unsplit gesture now: when its last document
-      // closes, collapse the split — an emptied pane must not linger as a
-      // blank column with no way to dismiss it (it has no strip entry).
-      if (panelId === PANE_PANEL && bucketFor(uiBucketKey(panelId)).tabs.length === 0 && paneIsOpen()) {
-        await ctx.call('panel.close', { panelId: PANE_PANEL });
+      if (tabFiles.get(tabId) && samePath(tabFiles.get(tabId)!, path)) {
+        setTabFile(tabId, '');
+        renderTabFile(tabId);
+        await publishTab(tabId);
       }
       return { ok: true };
     }
-    case 'file.reorderTab': {
-      // Strip drag: re-seat `path` before `beforePath` (end when omitted). A
-      // pure order change — focus and the loaded renderer are untouched.
-      const path = String(params.path ?? '');
-      const beforePath = params.beforePath ? String(params.beforePath) : '';
-      if (!path) throw new Error('file.reorderTab: path is required');
-      const b = bucketFor(uiBucketKey(panelId));
-      const from = b.tabs.findIndex((t) => samePath(t, path));
-      if (from === -1) return { ok: true };
-      b.tabs.splice(from, 1);
-      const at = beforePath ? b.tabs.findIndex((t) => samePath(t, beforePath)) : -1;
-      if (at === -1) b.tabs.push(path);
-      else b.tabs.splice(at, 0, path);
-      renderBucket(b, panelId ?? PANEL);
-      return { ok: true, tabs: b.tabs };
-    }
-    case 'file.splitRight': {
-      // The strip's 向右拆分: the clicked document goes INTO the pane beside
-      // the main view. The main view's document never moves — the two sides
-      // must not swap. Pane already open: it simply takes the clicked doc.
-      if (panelId === PANE_PANEL) return { ok: false, reason: 'already-pane' };
-      const path = String(params.path ?? '');
-      if (!path) throw new Error('file.splitRight: path is required');
-      if (paneIsOpen()) {
-        openFileInBucket(uiBucketKey(PANE_PANEL), path, PANE_PANEL);
-        // A deselected-but-warm pane (closed from the strip, page still alive)
-        // must come back to the work area, not load invisibly.
-        await ctx.call('panel.open', { panelId: PANE_PANEL, focus: true });
-        return { ok: true };
-      }
-      await ctx.call('panel.open', {
-        panelId: PANE_PANEL,
-        focus: true,
-        params: { file: path },
-      });
+    case 'file.reorderTab':
       return { ok: true };
-    }
+    case 'file.splitRight':
+      return { ok: false, reason: 'split removed' };
     case 'mcp.result': {
       const requestId = String(params.requestId ?? '');
       const entry = mcpPending.get(requestId);
@@ -883,7 +838,10 @@ async function onUiRequest(
       // stable name is the point.
       const dir = join(tmpdir(), 'pi-files-preview');
       await mkdir(dir, { recursive: true });
-      return { path: join(dir, `preview-${process.pid}.html`) };
+      // One preview file per HOST TAB: two html previews of different documents
+      // must not overwrite each other's content between iframe reloads.
+      const safeTab = tabId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(-48);
+      return { path: join(dir, `preview-${process.pid}-${safeTab}.html`) };
     }
     case 'file.pickOpenPath': {
       // The host owns the dialog; the panel shim has always asked for this
@@ -969,11 +927,10 @@ async function onUiRequest(
       return familyVerticalMetrics(family) ?? null;
     }
     case 'state.get': {
-      // The boot pull — the same payload openFile() pushes, so a panel that
-      // loads late still learns what it should be showing without waiting on
-      // the mounted push. Tabs ride along for the strip.
-      const b = bucketFor(uiBucketKey(panelId));
-      return b.activePath ? { path: b.activePath, tabs: b.tabs, activePath: b.activePath } : {};
+      // The boot pull — the same payload panel.mounted pushes, for THIS tab.
+      // A page that reloads (format switch, renderer crash) gets its file back.
+      const file = tabFiles.get(tabId) ?? '';
+      return file ? { path: file, tabs: [file], activePath: file } : { tabs: [], activePath: '' };
     }
     default:
       throw new Error(`unknown ui request: ${method}`);
@@ -985,8 +942,32 @@ async function onUiRequest(
 // Events are named for what happened (files.save / files.chat) rather than
 // routed through the host's ui.event envelope: the SDK stamps the panel id, so
 // a one-panel plugin never has to unwrap anything.
-async function onEvent(_panelId: string, event: string, data: unknown): Promise<void> {
+async function onEvent(
+  _panelId: string,
+  event: string,
+  data: unknown,
+  _ctx: unknown,
+  meta?: { tabId?: string },
+): Promise<void> {
   const d = (data ?? {}) as Record<string, unknown>;
+
+  // The host tab was closed. Drop the document and the "current tab" mapping
+  // so a tool with no `path` never resolves to a file nobody can see.
+  if (event === 'panel.closed') {
+    const tabId = String(d.tabId ?? meta?.tabId ?? '');
+    if (tabId) {
+      tabFiles.delete(tabId);
+      tabSessions.delete(tabId);
+      for (const [sessionId, active] of [...activeTabBySession]) {
+        if (active === tabId) activeTabBySession.delete(sessionId);
+      }
+      if (mcpReadyPath && !isOpenInViewer(mcpReadyPath)) {
+        mcpReadyPath = null;
+        mcpReady = false;
+      }
+    }
+    return;
+  }
 
   if (event === 'files.chat') {
     // The viewer's own selection box → the conversation. `chat.send` is the
@@ -1016,11 +997,11 @@ async function onEvent(_panelId: string, event: string, data: unknown): Promise<
   if (!path || typeof contentB64 !== 'string') return;
   try {
     const result = (await ctx.call('filesystem.write', { path, contentB64, expectedMtime })) as { mtime?: number } | undefined;
-    renderViewer({ saved: true, mtime: result?.mtime });
+    renderViewer({ saved: true, mtime: result?.mtime }, meta?.tabId);
   } catch (err) {
     const m = err instanceof Error ? err.message : String(err);
     ctx.log.error(`file-save failed: ${m}`);
-    renderViewer({ error: `保存失败: ${m}` });
+    renderViewer({ error: `保存失败: ${m}` }, meta?.tabId);
   }
 }
 
@@ -1047,35 +1028,40 @@ plugin({
    * applies params normally.
    */
   onPanelMounted(panelId, params, _ctx, meta) {
+    const tabId = meta?.tabId ?? panelId ?? PANEL;
     const sessionId = meta?.sessionId ?? null;
-    const boundary = panelSession !== null && sessionId !== null && sessionId !== panelSession;
     panelSession = sessionId ?? panelSession;
-    // The pane panel mounts into its OWN bucket — the split view's second
-    // side never shares the main viewer's document set.
-    const key = bucketKey(sessionId, panelId);
-    const b = bucketFor(key);
+    tabSessions.set(tabId, sessionId);
+    if (sessionId) activeTabBySession.set(sessionId, tabId);
     const file = String((params as { file?: string } | undefined)?.file ?? '');
-    const target = !boundary && file ? file : b.activePath;
-    if (target) openFile(target, key, panelId ?? undefined);
-    else renderBucket(b, panelId ?? PANEL);
-    pruneBuckets();
+    setTabFile(tabId, file);
+    renderTabFile(tabId);
+    void publishTab(tabId);
+  },
+
+  onPanelActivated(panelId, params, _ctx, meta) {
+    const tabId = meta?.tabId ?? panelId ?? PANEL;
+    const sessionId = meta?.sessionId ?? null;
+    panelSession = sessionId ?? panelSession;
+    tabSessions.set(tabId, sessionId);
+    if (sessionId) activeTabBySession.set(sessionId, tabId);
+    const file = String(
+      (params as { file?: string } | undefined)?.file ?? tabFiles.get(tabId) ?? '',
+    );
+    if (file) setTabFile(tabId, file);
   },
 
   onTool: (name, params, _ctx, call) => runTool(name, params, call),
 
-  /** The conversation on screen changed — show that conversation's bucket. */
+  /** The conversation on screen changed. The host swaps the session-scoped
+   *  tabs itself; this only keeps the unscoped-tool fallback pointed right. */
   onHostEvent(event, data) {
     if (event !== 'session.changed') return;
     panelSession = (data as { sessionId?: string | null } | null)?.sessionId ?? null;
-    renderBucket(bucketFor(bucketKey()));
-    // The pane (when open) follows with ITS bucket — fire-and-forget; send
-    // returning false just means the pane is not open.
-    renderBucket(bucketFor(`${bucketKey()}::pane`), PANE_PANEL);
-    pruneBuckets();
   },
 
-  onRequest(panelId, method, params) {
-    return onUiRequest(method, params, panelId);
+  onRequest(panelId, method, params, _ctx, meta) {
+    return onUiRequest(method, params, panelId, meta);
   },
 
   /**
@@ -1090,12 +1076,9 @@ plugin({
     if (kind !== 'click' || eventId !== 'open_viewer') return;
     const target = String((payload as { path?: string } | undefined)?.path ?? '') || activeFileOf();
     if (!target) return;
-    void ctx
-      .call('panel.open', { panelId: 'viewer', focus: true })
-      .then(() => openFile(target))
-      .catch((err: unknown) => {
-        ctx.log.error(`open_viewer failed: ${err instanceof Error ? err.message : String(err)}`);
-      });
+    void openInViewer(target).catch((err: unknown) => {
+      ctx.log.error(`open_viewer failed: ${err instanceof Error ? err.message : String(err)}`);
+    });
   },
 
   onEvent,

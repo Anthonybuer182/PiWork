@@ -46325,6 +46325,8 @@ function plugin(handlers) {
   let panelPort = null;
   const panelPorts = /* @__PURE__ */ new Map();
   const portPanel = /* @__PURE__ */ new Map();
+  const portTab = /* @__PURE__ */ new Map();
+  const tabMeta = /* @__PURE__ */ new Map();
   let pluginId = "";
   let dataDir = "";
   let booted = false;
@@ -46334,13 +46336,19 @@ function plugin(handlers) {
   let portClosed = false;
   let probeSeq = 0;
   const pendingProbes = /* @__PURE__ */ new Map();
-  function routeFor(panelId) {
+  function routeFor(panelId, tabId) {
     if (panelId) {
-      const p = panelPorts.get(panelId);
-      if (p)
-        return p;
+      const ports = panelPorts.get(panelId);
+      if (ports && ports.size > 0) {
+        if (tabId) {
+          const matched = [...ports].filter((port) => portTab.get(port) === tabId);
+          if (matched.length > 0)
+            return matched;
+        }
+        return [...ports];
+      }
     }
-    return panelPort;
+    return panelPort ? [panelPort] : [];
   }
   __name(routeFor, "routeFor");
   const post = /* @__PURE__ */ __name((message2) => host.postMessage(message2), "post");
@@ -46363,16 +46371,23 @@ function plugin(handlers) {
         }, options?.timeoutMs ?? CALL_TIMEOUT_MS);
       });
     },
-    send(panelId, event, data) {
-      const port = routeFor(panelId);
-      if (!port)
+    send(panelId, event, data, tabId) {
+      const ports = routeFor(panelId, tabId);
+      if (ports.length === 0)
         return false;
-      port.postMessage({ kind: "event", event, panelId, data });
-      return true;
+      let delivered = false;
+      for (const port of ports) {
+        try {
+          port.postMessage({ kind: "event", event, panelId, tabId, data });
+          delivered = true;
+        } catch {
+        }
+      }
+      return delivered;
     },
     panelAlive(panelId, timeoutMs = PROBE_TIMEOUT_MS) {
-      const port = routeFor(panelId);
-      if (!port)
+      const ports = routeFor(panelId);
+      if (ports.length === 0)
         return Promise.resolve(false);
       const id = "probe-" + ++probeSeq;
       return new Promise((resolve) => {
@@ -46384,7 +46399,12 @@ function plugin(handlers) {
           clearTimeout(timer);
           resolve(true);
         });
-        port.postMessage({ kind: "event", event: "pi.probe", panelId, data: { id } });
+        for (const port of ports) {
+          try {
+            port.postMessage({ kind: "event", event: "pi.probe", panelId, data: { id } });
+          } catch {
+          }
+        }
       });
     },
     async openPanel(panelId, options) {
@@ -46417,7 +46437,8 @@ function plugin(handlers) {
     }
     try {
       const result = await handlers.onTool(name, msg.params ?? {}, ctx2, {
-        sessionId: msg.sessionId
+        sessionId: msg.sessionId,
+        workspaceId: msg.workspaceId
       });
       if (result === void 0 || result === null) {
         post({
@@ -46441,11 +46462,14 @@ function plugin(handlers) {
     const msg = raw;
     if (!msg || typeof msg !== "object")
       return;
+    if (sourcePort && msg.tabId !== void 0)
+      portTab.set(sourcePort, msg.tabId);
     if (msg.kind === "request") {
       const id = String(msg.id ?? "");
       const method = String(msg.method ?? "");
       const panelId = msg.panelId ?? "";
-      const replyPort = sourcePort ?? routeFor(panelId);
+      const tabId = msg.tabId;
+      const replyPort = sourcePort ?? routeFor(panelId)[0];
       const reply = /* @__PURE__ */ __name((ok, error, result) => {
         replyPort?.postMessage({ kind: "response", id, ok, panelId, error, result });
       }, "reply");
@@ -46461,7 +46485,12 @@ function plugin(handlers) {
         return;
       }
       try {
-        const result = await handlers.onRequest(panelId, method, msg.params ?? {}, ctx2);
+        const known = tabId ? tabMeta.get(tabId) : void 0;
+        const result = await handlers.onRequest(panelId, method, msg.params ?? {}, ctx2, {
+          tabId,
+          sessionId: known?.sessionId,
+          workspaceId: known?.workspaceId
+        });
         if (result === void 0) {
           reply(false, `onRequest handled "${method}" without returning anything. Return the answer (a value, or true), or rethrow for a method you do not handle.`);
           return;
@@ -46475,6 +46504,7 @@ function plugin(handlers) {
     if (msg.kind === "event") {
       const event = String(msg.event ?? "");
       const panelId = msg.panelId ?? "";
+      const tabId = msg.tabId;
       if (event === "pi.probe.reply") {
         const probeId = String(msg.data?.id ?? "");
         const resolve = pendingProbes.get(probeId);
@@ -46487,6 +46517,13 @@ function plugin(handlers) {
       if (!panelId)
         log("warn", `panel event "${event}" arrived with no panel id.`);
       if (event === "panel.mounted") {
+        const data = msg.data ?? {};
+        if (data.tabId) {
+          tabMeta.set(data.tabId, {
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId
+          });
+        }
         if (!handlers.onPanelMounted) {
           if (!mountWarned.has(panelId)) {
             mountWarned.add(panelId);
@@ -46495,10 +46532,32 @@ function plugin(handlers) {
           return;
         }
         try {
-          const data = msg.data ?? {};
-          await handlers.onPanelMounted(panelId, data.params, ctx2, { sessionId: data.sessionId });
+          await handlers.onPanelMounted(panelId, data.params, ctx2, {
+            tabId: data.tabId ?? tabId,
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId
+          });
         } catch (err) {
           log("error", `onPanelMounted for "${panelId}" threw: ${describe(err)}`);
+        }
+        return;
+      }
+      if (event === "panel.activated" && handlers.onPanelActivated) {
+        const data = msg.data ?? {};
+        if (data.tabId) {
+          tabMeta.set(data.tabId, {
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId
+          });
+        }
+        try {
+          await handlers.onPanelActivated(panelId, data.params, ctx2, {
+            tabId: data.tabId ?? tabId,
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId
+          });
+        } catch (err) {
+          log("error", `onPanelActivated for "${panelId}" threw: ${describe(err)}`);
         }
         return;
       }
@@ -46507,7 +46566,12 @@ function plugin(handlers) {
         return;
       }
       try {
-        await handlers.onEvent(panelId, event, msg.data, ctx2);
+        const known = tabId ? tabMeta.get(tabId) : void 0;
+        await handlers.onEvent(panelId, event, msg.data, ctx2, {
+          tabId,
+          sessionId: known?.sessionId,
+          workspaceId: known?.workspaceId
+        });
       } catch (err) {
         log("error", `panel event "${event}" handler threw: ${describe(err)}`);
       }
@@ -46582,18 +46646,25 @@ function plugin(handlers) {
           const pid = e.data?.panelId;
           if (pid) {
             portPanel.set(port, pid);
-            panelPorts.set(pid, port);
+            const ports = panelPorts.get(pid) ?? /* @__PURE__ */ new Set();
+            ports.add(port);
+            panelPorts.set(pid, ports);
           }
           void onPanelMessage(e.data, port);
         });
         try {
           port.on("close", () => {
             const pid = portPanel.get(port);
-            if (pid && panelPorts.get(pid) === port)
-              panelPorts.delete(pid);
+            if (pid) {
+              const ports = panelPorts.get(pid);
+              ports?.delete(port);
+              if (ports && ports.size === 0)
+                panelPorts.delete(pid);
+            }
             portPanel.delete(port);
             if (panelPort === port) {
-              panelPort = panelPorts.size > 0 ? [...panelPorts.values()][panelPorts.size - 1] : null;
+              const last = [...panelPorts.values()].at(-1);
+              panelPort = last ? [...last].at(-1) ?? null : null;
               if (!panelPort)
                 portClosed = true;
             }
@@ -46612,7 +46683,7 @@ function plugin(handlers) {
 __name(plugin, "plugin");
 
 // src/backend/index.ts
-import { mkdir as mkdir2, readFile as readFile3, stat as stat2 } from "node:fs/promises";
+import { mkdir as mkdir2, readFile as readFile3, readdir as readdir2, stat as stat2 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename as basename2, extname, join as join5, resolve as resolvePath2 } from "node:path";
 
@@ -53337,7 +53408,7 @@ function parseCustGeom(shapeXml2, shapeW, shapeH) {
     if (!p.w) fw = Math.max(fw, maxCoord(absList[i], 0));
     if (!p.h) fh = Math.max(fh, maxCoord(absList[i], 1));
   });
-  const buckets2 = { path: [], fillPath: [], strokePath: [] };
+  const buckets = { path: [], fillPath: [], strokePath: [] };
   paths.forEach((p, i) => {
     const abs = absList[i];
     if (!abs.length) return;
@@ -53348,14 +53419,14 @@ function parseCustGeom(shapeXml2, shapeW, shapeH) {
     const fillNone = p.fill === "none";
     const strokeNone = p.stroke === "0" || p.stroke === "false" || p.stroke === "none";
     if (fillNone && strokeNone) return;
-    if (fillNone) buckets2.strokePath.push(d);
-    else if (strokeNone) buckets2.fillPath.push(d);
-    else buckets2.path.push(d);
+    if (fillNone) buckets.strokePath.push(d);
+    else if (strokeNone) buckets.fillPath.push(d);
+    else buckets.path.push(d);
   });
   const out = {};
-  if (buckets2.path.length) out.path = buckets2.path.join(" ");
-  if (buckets2.fillPath.length) out.fillPath = buckets2.fillPath.join(" ");
-  if (buckets2.strokePath.length) out.strokePath = buckets2.strokePath.join(" ");
+  if (buckets.path.length) out.path = buckets.path.join(" ");
+  if (buckets.fillPath.length) out.fillPath = buckets.fillPath.join(" ");
+  if (buckets.strokePath.length) out.strokePath = buckets.strokePath.join(" ");
   return out.path || out.fillPath || out.strokePath ? out : void 0;
 }
 __name(parseCustGeom, "parseCustGeom");
@@ -78485,22 +78556,22 @@ register({
   }
 });
 
-// raw-text:/Users/weiqun/AI/WeWork/plugins/com.pi.files/vendor/genoffice/packages/pptx-ops/src/prompts/ops/text.md
+// raw-text:/Users/simba/AI/PiWork/plugins/com.pi.files/vendor/genoffice/packages/pptx-ops/src/prompts/ops/text.md
 var text_default = '# Text ops\n\n> Replace or restyle the text of a text box, shape or table: whole-body rewrite (setText), run-level font patch (setFont), paragraph format patch (setParagraphFormat), typeset math (insertEquation).\n\nAll three take `target:{slide, el}`. `el` is an element id from the outline or\n`read_slide` (`e_*` ids are durable). For a direct child of a group put the\nchild id in `target.el` and add `group:"<group id>"`.\n\nFont sizes are points. Colors are `"#RRGGBB"`.\n\n### setText\n\n`{paragraphs:[{runs:[{text,bold?,italic?,fontSize?,color?}],align?}]} (group children: add group:"<group id>")`\n\nReplaces the element\'s entire text with the given paragraphs. Runs you do not\nrestyle inherit the formatting of the run they replace (position-wise), so a\nplain `{text}` run keeps the original size, color and font. A shape that has\nnever had text gets a text body created (autoshapes default to centered text).\n\n| Field                                                    | Type                                                                                          | Notes                                                                                                                                                                                                                  |\n| -------------------------------------------------------- | --------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |\n| paragraphs                                               | array                                                                                         | Required, one object per paragraph; an empty array clears the text                                                                                                                                                     |\n| paragraphs[].runs                                        | array of `{text, bold?, italic?, underline?, strike?, fontSize?, fontFamily?, color?, link?}` | `fontSize` in pt; `link` is `{kind:"url",url}`, `{kind:"slide",slideIndex}`, `{kind:"action",action}` (`nextslide` / `previousslide` / `firstslide` / `lastslide` / `lastslideviewed` / `endshow`) or `null` to remove |\n| paragraphs[].align                                       | `"left"` / `"center"` / `"right"` / `"justify"`                                               | Optional                                                                                                                                                                                                               |\n| paragraphs[].level                                       | 0..8                                                                                          | Indent level for multi-level lists                                                                                                                                                                                     |\n| paragraphs[].bullet                                      | `"char"` / `"number"` / `"none"`                                                              | Optional; `bulletChar` sets a custom glyph                                                                                                                                                                             |\n| paragraphs[].lineSpacingPct, spaceBeforePt, spaceAfterPt | number                                                                                        | Optional paragraph spacing                                                                                                                                                                                             |\n| paragraphs[].rtl                                         | boolean                                                                                       | Optional base direction                                                                                                                                                                                                |\n| group                                                    | string                                                                                        | Only for a direct child of a group: the group id                                                                                                                                                                       |\n\n```json\n{\n  "op": "setText",\n  "target": { "slide": 0, "el": "e_TEXT" },\n  "paragraphs": [\n    { "runs": [{ "text": "Quarterly Review", "bold": true, "fontSize": 36 }], "align": "left" },\n    { "runs": [{ "text": "Q3 highlights and outlook" }] }\n  ]\n}\n```\n\n```json\n{\n  "op": "setText",\n  "target": { "slide": 0, "el": "e_CHILD" },\n  "group": "e_GROUP",\n  "paragraphs": [{ "runs": [{ "text": "Step 1" }] }]\n}\n```\n\nCommon mistakes\n\n- Passing only the changed paragraph: the array replaces the whole body, so send every paragraph that should remain.\n- Targeting a picture, chart or connector: only text boxes, shapes and table cells (`setTableCell`) hold text.\n- Writing text into a group child without `group`: the child id alone does not resolve on the slide.\n\nRelated: `setFont` (restyle without changing the words), `setTableCell` (table cells), `findReplace` (deck-wide substitutions).\n\n### setFont\n\n`{font:{fontFamily?,fontSizePt?,bold?,italic?,underline?,strike?,color?}} \u2014 merges onto every run of the element`\n\nApplies the given properties to every run of the element (or every cell of a\ntable) and leaves everything else untouched. Use it for "make the title blue\nand bold" style requests; use `setText` when the words change.\n\n| Field                                | Type        | Notes                                          |\n| ------------------------------------ | ----------- | ---------------------------------------------- |\n| font.fontFamily                      | string      | Omit to keep the theme font (recommended)      |\n| font.fontSizePt                      | number > 0  | Points                                         |\n| font.bold, italic, underline, strike | boolean     | Only the keys you pass change                  |\n| font.color                           | `"#RRGGBB"` | Explicit color; clears theme-color inheritance |\n| group                                | string      | Only for a direct child of a group             |\n\n```json\n{\n  "op": "setFont",\n  "target": { "slide": 0, "el": "e_TEXT" },\n  "font": { "color": "#1A73E8", "bold": true }\n}\n```\n\n```json\n{ "op": "setFont", "target": { "slide": 0, "el": "e_TABLE" }, "font": { "fontSizePt": 12 } }\n```\n\nCommon mistakes\n\n- Color names such as `"blue"`: only hex `"#RRGGBB"` is accepted.\n- `fontSizePt` of 0 or negative: must be a positive number of points.\n- Expecting a partial-run change: the patch is element-wide; for one word use `setText` with per-run styling.\n\n### setParagraphFormat\n\n`{format:{align?,bullet?,lineSpacingPct?,spaceBeforePt?,spaceAfterPt?}}`\n\nParagraph-level formatting for every paragraph of the element: alignment,\nbullets, spacing, direction, indent level.\n\n| Field                                     | Type                                            | Notes                                        |\n| ----------------------------------------- | ----------------------------------------------- | -------------------------------------------- |\n| format.align                              | `"left"` / `"center"` / `"right"` / `"justify"` |                                              |\n| format.bullet                             | `"char"` / `"number"` / `"none"`                | `"char"` uses `bulletChar` or a round bullet |\n| format.bulletChar                         | string                                          | Custom glyph, with `bullet:"char"`           |\n| format.bulletSizePct                      | number >= 0                                     | Percent of text size (100 = same)            |\n| format.bulletColor                        | `"#RRGGBB"`                                     |                                              |\n| format.bulletHangEmu                      | number >= 0                                     | Hanging indent in EMU                        |\n| format.lineSpacingPct                     | number >= 0                                     | 100 = single spacing                         |\n| format.spaceBeforePt, format.spaceAfterPt | number >= 0                                     | Points                                       |\n| format.rtl                                | boolean                                         | Base direction                               |\n| format.indentDelta                        | 1 or -1                                         | Shift the list level (clamped 0..8)          |\n| group                                     | string                                          | Only for a direct child of a group           |\n\n```json\n{\n  "op": "setParagraphFormat",\n  "target": { "slide": 0, "el": "e_TEXT" },\n  "format": { "bullet": "char", "lineSpacingPct": 120, "spaceAfterPt": 6 }\n}\n```\n\nCommon mistakes\n\n- Negative spacing values: all `...Pct` / `...Pt` / `...Emu` fields must be >= 0.\n- Using `setParagraphFormat` to change font size: that is a run property, use `setFont`.\n\n### insertEquation\n\n`{latex,position?} \u2014 target:{slide, el}; or {latex,box:{x,y,cx,cy}} to create a text box for it`\n\nAdds a typeset equation (PowerPoint\'s own math format) as a centered paragraph\nat the `position` (`"end"`, default, or `"start"`) of a text or shape element,\nor in a new text box at `box` (EMU, unit suffixes allowed). Older readers and\nthe GenOffice preview show the linearized text (`E=mc\xB2`); PowerPoint 2010+\nrenders the formula. LaTeX subset: `\\frac`, `\\sqrt[n]`, `^`, `_`,\n`\\sum`/`\\int`/`\\prod` with limits, `\\left(` `\\right)`, matrices, Greek\nletters, accents, `\\text{}`.\n\n```json\n{\n  "op": "insertEquation",\n  "target": { "slide": 0, "el": "e_TEXT" },\n  "latex": "E = mc^2"\n}\n```\n\n```json\n{\n  "op": "insertEquation",\n  "target": { "slide": 0 },\n  "box": { "x": 914400, "y": 2743200, "cx": 4572000, "cy": 914400 },\n  "latex": "\\\\frac{a}{b} + \\\\sqrt{x^2 + y^2}"\n}\n```\n';
 
-// raw-text:/Users/weiqun/AI/WeWork/plugins/com.pi.files/vendor/genoffice/packages/pptx-ops/src/prompts/ops/element.md
+// raw-text:/Users/simba/AI/PiWork/plugins/com.pi.files/vendor/genoffice/packages/pptx-ops/src/prompts/ops/element.md
 var element_default = '# Element ops\n\n> Change one existing element: fill, stroke, position and size, crop, opacity, z-order, grouping, shape geometry, text-body properties, effects, hyperlinks, deletion.\n\nEvery op here takes `target:{slide, el}` unless its signature says otherwise\n(`flipElements` and `groupElements` take a list in `els`). Ops that say\n"group children" accept a direct child of a group when you add\n`group:"<group id>"` and put the child id in `target.el`.\n\nGeometry is document-space EMU: 1 pt = 12700 EMU, 1 px = 9525 EMU on a\nstandard 1280 px wide deck (`read_slide` reports the exact factor for the\ncurrent deck). Angles are degrees unless the field says otherwise.\n\n### deleteElement\n\n`{} \u2014 no fields besides target`\n\nRemoves a top-level element. To delete one member of a group, `ungroupElement`\nthe group first (its children become top-level and get fresh ids).\n\n```json\n{ "op": "deleteElement", "target": { "slide": 0, "el": "e_SHAPE" } }\n```\n\nCommon mistakes\n\n- Deleting a group child directly: the id does not resolve at top level; ungroup first or delete the whole group.\n\n### setFill\n\n`{fill:"#RRGGBB"|"none"|{stops:[{pos,color}],angle?}}`\n\nSolid, translucent or gradient fill of a text box or shape. Pictures, tables,\ncharts and connectors have no fill. Picture fills are `setImageFill` (UI only).\n\n| Field       | Type                                                                      | Notes                                                      |\n| ----------- | ------------------------------------------------------------------------- | ---------------------------------------------------------- |\n| fill        | `"none"`, `"#RRGGBB"`, `"#RRGGBBAA"` or `{stops, angle?, radial?, path?}` | Alpha byte `AA`: 00 transparent .. FF opaque               |\n| fill.stops  | array of `{pos, color}`                                                   | At least two; `pos` 0..1                                   |\n| fill.angle  | number                                                                    | Linear gradient angle in 1/60000 degree (90 deg = 5400000) |\n| fill.radial | boolean                                                                   | Radial gradient instead of linear                          |\n| group       | string                                                                    | Only for a direct child of a group                         |\n\n```json\n{ "op": "setFill", "target": { "slide": 0, "el": "e_SHAPE" }, "fill": "#1A73E8" }\n```\n\n```json\n{\n  "op": "setFill",\n  "target": { "slide": 0, "el": "e_SHAPE" },\n  "fill": {\n    "stops": [\n      { "pos": 0, "color": "#1A73E8" },\n      { "pos": 1, "color": "#FFFFFF" }\n    ],\n    "angle": 5400000\n  }\n}\n```\n\nCommon mistakes\n\n- `null` to remove a fill: use `"none"`.\n- Gradient with one stop: at least two stops are required.\n- Targeting a picture: use `setPictureOpacity` / `setImageFill` instead.\n\nRelated: `setStroke`, `setBackground` (page background, a slide op).\n\n### setStroke\n\n`{stroke:{color:"#RRGGBB",widthEmu}|null} \u2014 null removes the outline`\n\nOutline of a text box, shape or picture (picture border).\n\n| Field           | Type                                                        | Notes                                                          |\n| --------------- | ----------------------------------------------------------- | -------------------------------------------------------------- |\n| stroke          | object or `null`                                            | `null` removes the outline                                     |\n| stroke.color    | `"#RRGGBB"`                                                 | Required when stroke is an object                              |\n| stroke.widthEmu | number > 0                                                  | 12700 EMU = 1 pt                                               |\n| stroke.dash     | string                                                      | Preset dash name (`"dash"`, `"sysDot"`, ...); `"solid"` clears |\n| stroke.cap      | `"flat"` / `"rnd"` / `"sq"`                                 | Optional                                                       |\n| stroke.compound | `"sng"` / `"dbl"` / `"thickThin"` / `"thinThick"` / `"tri"` | Optional                                                       |\n| stroke.join     | `"round"` / `"bevel"` / `"miter"`                           | Optional                                                       |\n| stroke.gradient | `{stops:[{pos,color}], angle}`                              | Gradient line; angle in 1/60000 degree                         |\n| group           | string                                                      | Only for a direct child of a group                             |\n\n```json\n{\n  "op": "setStroke",\n  "target": { "slide": 0, "el": "e_SHAPE" },\n  "stroke": { "color": "#333333", "widthEmu": 19050 }\n}\n```\n\n```json\n{ "op": "setStroke", "target": { "slide": 0, "el": "e_PICTURE" }, "stroke": null }\n```\n\nCommon mistakes\n\n- Width in points: `widthEmu` is EMU; multiply points by 12700.\n- `remove:true` or `"none"`: the outline is removed by passing `stroke: null`.\n\n### setTransform\n\n`{box:{x,y,cx,cy},rotDeg?} (group children: absBox instead of box, plus group:"<group id>")`\n\nMoves, resizes and rotates an element. `box` is the full new frame in EMU; pass\nall four numbers even when only one changes (read the current values from\n`read_slide` or an `execute_slide_script` `els` entry).\n\n| Field           | Type                 | Notes                                                                      |\n| --------------- | -------------------- | -------------------------------------------------------------------------- |\n| box             | `{x, y, cx, cy}` EMU | Required for top-level elements                                            |\n| rotDeg          | number               | Degrees clockwise; omitted = 0                                             |\n| absBox          | `{x, y, cx, cy}` EMU | Group children only: document-space frame (the op converts to child space) |\n| group           | string               | Group children only                                                        |\n| resizeTableGrid | boolean              | Tables only: redistribute columns/rows to the new frame                    |\n\n```json\n{\n  "op": "setTransform",\n  "target": { "slide": 0, "el": "e_TEXT" },\n  "box": { "x": 914400, "y": 685800, "cx": 7315200, "cy": 1143000 }\n}\n```\n\n```json\n{\n  "op": "setTransform",\n  "target": { "slide": 0, "el": "e_CHILD" },\n  "group": "e_GROUP",\n  "absBox": { "x": 1828800, "y": 1828800, "cx": 1828800, "cy": 914400 },\n  "rotDeg": 15\n}\n```\n\nCommon mistakes\n\n- Pixel values in `box`: convert with the px-to-EMU factor from `read_slide`.\n- Sending only `cx`/`cy`: the rect must carry all of x, y, cx, cy.\n- For several elements with relative math (align, distribute) prefer `execute_slide_script`, which computes from live geometry.\n\n### setConnectorEndpoints\n\n`{p1:{x,y},p2:{x,y},start?:{targetId,idx}|null,end?:{targetId,idx}|null}`\n\nRe-routes a connector between two points and optionally attaches its ends to\nshapes so it follows later moves. The element must be a connector (line,\narrow, elbow or curved connector).\n\n| Field      | Type                                 | Notes                                                                                                 |\n| ---------- | ------------------------------------ | ----------------------------------------------------------------------------------------------------- |\n| p1, p2     | `{x, y}` EMU                         | Required; frame and flips are derived from them                                                       |\n| start, end | `{targetId, idx}`, `null` or omitted | Attach to connection point `idx` of an element; `null` detaches; omitted keeps the current attachment |\n\n```json\n{\n  "op": "setConnectorEndpoints",\n  "target": { "slide": 0, "el": "e_LINE" },\n  "p1": { "x": 914400, "y": 914400 },\n  "p2": { "x": 3657600, "y": 2743200 },\n  "start": { "targetId": "e_SHAPE", "idx": 3 },\n  "end": null\n}\n```\n\nCommon mistakes\n\n- Using it on a plain shape: only connectors are accepted; for shapes use `setTransform`.\n- A `targetId` that is not on the slide: the op fails instead of silently detaching; pass `null` to detach.\n\n### flipElements\n\n`{els:[id,\u2026],axis:"h"|"v"} \u2014 target.el unused`\n\nMirrors one or more elements horizontally or vertically around their own\ncenters. Any element with a frame flips (shapes, text boxes, pictures, groups).\n\n| Field | Type           | Notes                                             |\n| ----- | -------------- | ------------------------------------------------- |\n| els   | string[]       | Non-empty list of element ids on `target.slide`   |\n| axis  | `"h"` or `"v"` |                                                   |\n| group | string         | Optional: flip children inside that group instead |\n\n```json\n{ "op": "flipElements", "target": { "slide": 0 }, "els": ["e_SHAPE", "e_PICTURE"], "axis": "h" }\n```\n\n### setPictureSrcRect\n\n`{srcRect:{l,t,r,b}|null} \u2014 crop fractions 0..1, null removes the crop`\n\nNon-destructive crop of a picture: each side is the fraction of the source\nimage removed from that edge. The frame stays; the remaining image stretches to\nfill it. Optionally pass `box` to shrink the frame in the same op.\n\n| Field   | Type                         | Notes                                                                      |\n| ------- | ---------------------------- | -------------------------------------------------------------------------- |\n| srcRect | `{l?, t?, r?, b?}` or `null` | Each 0..1 (exclusive of 1); `l + r < 1` and `t + b < 1`; missing sides = 0 |\n| box     | `{x, y, cx, cy}` EMU         | Optional new frame applied together with the crop                          |\n\n```json\n{\n  "op": "setPictureSrcRect",\n  "target": { "slide": 0, "el": "e_PICTURE" },\n  "srcRect": { "l": 0.1, "t": 0, "r": 0.1, "b": 0.2 }\n}\n```\n\n```json\n{ "op": "setPictureSrcRect", "target": { "slide": 0, "el": "e_PICTURE" }, "srcRect": null }\n```\n\nCommon mistakes\n\n- Percentages such as 10: fractions are 0..1, so 10 percent is 0.1.\n- Opposing crops summing to 1 or more: nothing would remain visible.\n\n### setPictureOpacity\n\n`{opacity:0..1}`\n\nWhole-image transparency of a picture. `1` is fully opaque and removes the effect.\n\n```json\n{ "op": "setPictureOpacity", "target": { "slide": 0, "el": "e_PICTURE" }, "opacity": 0.6 }\n```\n\nCommon mistakes\n\n- Percent values: 60 percent is `0.6`.\n- Non-picture targets: shapes take translucency through `setFill` with an `"#RRGGBBAA"` color.\n\n### reorderElement\n\n`{dir:"front"|"back"|"forward"|"backward"}`\n\nChanges the z-order (stacking) of an element on its slide.\n\n```json\n{ "op": "reorderElement", "target": { "slide": 0, "el": "e_SHAPE" }, "dir": "back" }\n```\n\nCommon mistakes\n\n- Repeating `front`/`back` on an element already at that extreme fails; check the outline order first.\n\n### groupElements\n\n`{els:[id,id,\u2026]} \u2014 at least two ids; target.el unused`\n\nGroups two or more top-level elements. The result reports the new group id in\n`created`; the children keep editable through `group:"<group id>"`.\n\n```json\n{ "op": "groupElements", "target": { "slide": 0 }, "els": ["e_SHAPE", "e_TEXT"] }\n```\n\n### ungroupElement\n\n`{} \u2014 target.el is the group`\n\nDissolves a group; its direct children become top-level elements with new ids\n(positions preserved). Read the slide again before editing them.\n\n```json\n{ "op": "ungroupElement", "target": { "slide": 0, "el": "e_GROUP" } }\n```\n\n### setShapeGeometry\n\n`{prst:"<OOXML preset geometry name>"}`\n\nSwaps the preset geometry of a shape (for example `rect` to `roundRect`,\n`ellipse`, `triangle`, `rightArrow`, `chevron`, `star5`, `hexagon`). Text,\nfill, stroke and frame stay.\n\n```json\n{ "op": "setShapeGeometry", "target": { "slide": 0, "el": "e_SHAPE" }, "prst": "hexagon" }\n```\n\nCommon mistakes\n\n- Applying it to a picture, table or chart: only shapes with a preset geometry qualify.\n\n### setShapeAdjust\n\n`{adjust:{<gdName>:number,\u2026}} \u2014 preset-geometry avLst values (group children: add group)`\n\nSets adjustment handles of a preset geometry, for example the corner radius of\na rounded rectangle (`adj`, 0..50000) or arrow head proportions (`adj1`,\n`adj2`).\n\n```json\n{ "op": "setShapeAdjust", "target": { "slide": 0, "el": "e_SHAPE" }, "adjust": { "adj": 16667 } }\n```\n\nCommon mistakes\n\n- Fractions like 0.25: adjustment values are the raw avLst numbers (25 percent of the range is 25000 for most presets).\n\n### setTextAnchor\n\n`{anchor:"top"|"middle"|"bottom"}`\n\nVertical alignment of the text inside its box.\n\n```json\n{ "op": "setTextAnchor", "target": { "slide": 0, "el": "e_TEXT" }, "anchor": "middle" }\n```\n\n### setTextBodyProps\n\n`{props:{vert?:"horz"|"eaVert"|"vert"|"vert270"|"wordArtVert",autofit?:"none"|"shrink"|"resize",insets?:{l?,t?,r?,b?} (EMU),wrap?:boolean}}`\n\nText-body properties: writing direction, autofit behavior, internal margins and\nword wrap. Pass at least one property.\n\n| Field         | Type                                                             | Notes                                                           |\n| ------------- | ---------------------------------------------------------------- | --------------------------------------------------------------- |\n| props.vert    | `"horz"` / `"eaVert"` / `"vert"` / `"vert270"` / `"wordArtVert"` | `"horz"` clears vertical text                                   |\n| props.autofit | `"none"` / `"shrink"` / `"resize"`                               | `shrink` scales text down on overflow, `resize` grows the shape |\n| props.insets  | `{l?, t?, r?, b?}` EMU                                           | Only the given sides change                                     |\n| props.wrap    | boolean                                                          | `false` lets a line overflow instead of wrapping                |\n\n```json\n{\n  "op": "setTextBodyProps",\n  "target": { "slide": 0, "el": "e_TEXT" },\n  "props": { "autofit": "shrink", "insets": { "l": 91440, "r": 91440 } }\n}\n```\n\n### setEffects\n\n`{effects:{shadow?:{color:"#RRGGBB(AA)",blurRad,dist,dirDeg,inner?,sx?,sy?,kxDeg?}|null,glow?:{color,radius}|null,reflection?:{blurRad,startA(0..1),endPos(0..1),dist}|null,softEdge?:EMU|null}} \u2014 null clears; EMU distances (12700/pt)`\n\nShadow, glow, reflection and soft-edge effects. Each key you pass is replaced;\n`null` clears that effect; keys you omit stay as they are. Pass at least one key.\n\n| Field              | Type                                                                         | Notes                                                                         |\n| ------------------ | ---------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |\n| effects.shadow     | `{color, blurRad, dist, dirDeg, inner?, sx?, sy?, kxDeg?, kyDeg?}` or `null` | `color` may carry alpha `"#RRGGBBAA"`; `blurRad`/`dist` EMU; `dirDeg` degrees |\n| effects.glow       | `{color, radius}` or `null`                                                  | `radius` EMU                                                                  |\n| effects.reflection | `{blurRad, startA, endPos, dist}` or `null`                                  | `startA`/`endPos` fractions 0..1                                              |\n| effects.softEdge   | number EMU or `null`                                                         | Feather radius                                                                |\n\n```json\n{\n  "op": "setEffects",\n  "target": { "slide": 0, "el": "e_SHAPE" },\n  "effects": { "shadow": { "color": "#00000066", "blurRad": 50800, "dist": 38100, "dirDeg": 90 } }\n}\n```\n\n```json\n{\n  "op": "setEffects",\n  "target": { "slide": 0, "el": "e_SHAPE" },\n  "effects": { "shadow": null, "glow": null }\n}\n```\n\nCommon mistakes\n\n- An empty `effects` object: at least one of shadow/glow/reflection/softEdge is required.\n- Points for `dist`/`blurRad`: these are EMU (12700 per point).\n\n### setLink\n\n`{link:{kind:"url",url}|{kind:"slide",slideIndex}|{kind:"action",action}|null}`\n\nHyperlink on a whole element (click action). `null` removes the link. Links on\nindividual runs are set through `setText` run `link` fields.\n\n| Field       | Type                                                                                                   | Notes                                                                                                                    |\n| ----------- | ------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |\n| link.kind   | `"url"` / `"slide"` / `"action"`                                                                       | `url` opens in the browser; `slide` jumps to `slideIndex` (0-based); `action` is a PowerPoint show action                |\n| link.action | `"nextslide"` / `"previousslide"` / `"firstslide"` / `"lastslide"` / `"lastslideviewed"` / `"endshow"` | Written as `ppaction://hlinkshowjump` with no relationship, exactly like PowerPoint\'s Action Settings navigation buttons |\n\n```json\n{\n  "op": "setLink",\n  "target": { "slide": 0, "el": "e_SHAPE" },\n  "link": { "kind": "url", "url": "https://example.com" }\n}\n```\n\n```json\n{\n  "op": "setLink",\n  "target": { "slide": 0, "el": "e_SHAPE" },\n  "link": { "kind": "slide", "slideIndex": 1 }\n}\n```\n\n```json\n{\n  "op": "setLink",\n  "target": { "slide": 0, "el": "e_SHAPE" },\n  "link": { "kind": "action", "action": "nextslide" }\n}\n```\n\n### alignElements\n\n`{els:[ids],mode:"left"|"centerH"|"right"|"top"|"centerV"|"bottom",to?:"selection"|"slide"}`\n\nLines up several top-level elements on one edge or center line. By default\nthe reference is the selection\'s bounding box (at least two elements);\n`to: "slide"` aligns to the slide edges and accepts a single element. Frames\nare the axis-aligned boxes `slides read` reports (rotation is ignored, as in\nPowerPoint\'s Align menu); attached connectors follow.\n\n| Field | Type                                 | Notes                                                                   |\n| ----- | ------------------------------------ | ----------------------------------------------------------------------- |\n| els   | array of element ids                 | Top-level elements only; group children are refused (arrange the group) |\n| mode  | see signature                        | `centerH` = same vertical center line, `centerV` = same horizontal one  |\n| to    | `"selection"` (default) or `"slide"` | Reference box                                                           |\n\n```json\n{\n  "op": "alignElements",\n  "target": { "slide": 0 },\n  "els": ["e_TEXT", "e_SHAPE"],\n  "mode": "left"\n}\n```\n\nCommon mistakes\n\n- One element without `to: "slide"`: aligning a single box to itself does nothing.\n- Expecting text inside the box to move: this moves frames; text alignment is `setParagraphFormat`.\n\n### distributeElements\n\n`{els:[ids],axis:"horizontal"|"vertical",to?:"selection"|"slide"}`\n\nSpaces elements evenly along one axis. `selection` (default, at least three\nelements) keeps the two outer elements and spreads the gaps between the rest;\n`to: "slide"` gives equal gaps between the slide edges and every element (one\nor more elements). Only the coordinate along `axis` changes.\n\n```json\n{\n  "op": "distributeElements",\n  "target": { "slide": 0 },\n  "els": ["e_TEXT", "e_SHAPE", "e_PICTURE"],\n  "axis": "horizontal"\n}\n```\n\nCommon mistakes\n\n- Two elements with the default `to`: there is no gap to even out; align them or pass `to: "slide"`.\n\n### setImageFill (not-ai-callable)\n\n`{source:{mediaPath}|{bytes:base64|dataURL,ext},tile?} \u2014 use the image tools instead`\n\nPicture or texture fill of a shape. The payload is image bytes or an existing\nmedia part path, which the model cannot produce; the UI\'s fill picker uses it.\n';
 
-// raw-text:/Users/weiqun/AI/WeWork/plugins/com.pi.files/vendor/genoffice/packages/pptx-ops/src/prompts/ops/insert.md
+// raw-text:/Users/simba/AI/PiWork/plugins/com.pi.files/vendor/genoffice/packages/pptx-ops/src/prompts/ops/insert.md
 var insert_default = '# Insert ops\n\n> Create new elements on a slide: text boxes, preset shapes and lines (addElement), connectors glued to shapes, tables, native charts, SmartArt-style diagrams.\n\nInsert ops take `target:{slide}` (no `el`) and an `offset:{x,y,cx,cy}` frame\nin document-space EMU. They report the new element id in `created`; later ops\nin the same transaction cannot reference it yet, so insert first and style in\nthe next call, or pass the style inline where the op supports it.\n\n### addElement\n\n`{kind:"textbox"|<preset geometry>,offset:{x,y,cx,cy},paragraphs?,fill?,stroke?,adjustments?:{<gd name>:val},bodyPr?:{autoFit?:"shrink"|"resize"}}`\n\nAdds a text box, a preset-geometry shape, or a line/connector.\n\n| Field       | Type                                                                                           | Notes                                                                                                                                                                                                                                              |\n| ----------- | ---------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |\n| kind        | string                                                                                         | `"textbox"`; a preset geometry (`rect`, `roundRect`, `ellipse`, `triangle`, `diamond`, `rightArrow`, `chevron`, `star5`, `hexagon`, `wedgeRoundRectCallout`, ...); or a line kind `line`, `lineArrow`, `lineArrowDouble`, `lineBent`, `lineCurved` |\n| offset      | `{x, y, cx, cy}` EMU                                                                           | Required                                                                                                                                                                                                                                           |\n| paragraphs  | array of `{runs:[{text, bold?, italic?, underline?, fontSize?, fontFamily?, color?}], align?}` | Optional text; `fontSize` in pt                                                                                                                                                                                                                    |\n| fill        | `"#RRGGBB"` or `"#RRGGBBAA"`                                                                   | Solid fill; text boxes have none by default                                                                                                                                                                                                        |\n| stroke      | `{color, widthEmu}`                                                                            | Outline; lines default to a 1 pt black stroke                                                                                                                                                                                                      |\n| adjustments | `{<gdName>: number}`                                                                           | Preset adjust values, e.g. `{"adj": 25000}` for a roundRect radius                                                                                                                                                                                 |\n| bodyPr      | `{autoFit?, wrap?, anchor?, insetsEmu?}`                                                       | `autoFit` `"shrink"` or `"resize"`; `wrap` `"square"`/`"none"`; `anchor` `"t"`/`"ctr"`/`"b"`                                                                                                                                                       |\n\n```json\n{\n  "op": "addElement",\n  "target": { "slide": 1 },\n  "kind": "textbox",\n  "offset": { "x": 914400, "y": 685800, "cx": 7315200, "cy": 914400 },\n  "paragraphs": [\n    { "runs": [{ "text": "Key Takeaways", "bold": true, "fontSize": 32 }], "align": "left" }\n  ],\n  "bodyPr": { "autoFit": "shrink" }\n}\n```\n\n```json\n{\n  "op": "addElement",\n  "target": { "slide": 1 },\n  "kind": "roundRect",\n  "offset": { "x": 914400, "y": 2286000, "cx": 3200400, "cy": 1600200 },\n  "fill": "#E8F0FE",\n  "stroke": { "color": "#1A73E8", "widthEmu": 12700 },\n  "adjustments": { "adj": 16667 },\n  "paragraphs": [\n    { "runs": [{ "text": "Card title", "bold": true, "color": "#1A73E8" }], "align": "center" }\n  ]\n}\n```\n\n```json\n{\n  "op": "addElement",\n  "target": { "slide": 1 },\n  "kind": "lineArrow",\n  "offset": { "x": 4572000, "y": 3048000, "cx": 1828800, "cy": 0 }\n}\n```\n\nCommon mistakes\n\n- Building whole pages element by element on an empty deck: use `generate_deck`; `addElement` is for adding to an already designed page.\n- Pixel frames: convert with the px-to-EMU factor from `read_slide`.\n- `autoFit` values other than `"shrink"`/`"resize"`.\n\n### addConnector\n\n`{from,to,kind?:"straight"|"elbow"|"curved",fromSide?,toSide?,arrow?:"none"|"end"|"both",line?:{color?,widthPt?,dash?}}`\n\nDraws a connector glued to two shapes (`a:stCxn`/`a:endCxn`), so PowerPoint\nand later `setTransform` moves keep it attached. When `fromSide`/`toSide`\n(`top`/`left`/`bottom`/`right`) are omitted, the pair of edge midpoints that\nare closest to each other is chosen. The frame is derived from the two\nconnection points; the new element id is in `created`.\n\n| Field            | Type                                    | Notes                                                                        |\n| ---------------- | --------------------------------------- | ---------------------------------------------------------------------------- |\n| from, to         | element ids                             | Two different top-level elements on `target.slide`                           |\n| kind             | `straight` (default), `elbow`, `curved` |                                                                              |\n| fromSide, toSide | side name                               | Pin one or both ends; omitted sides are chosen automatically                 |\n| arrow            | `none`, `end` (default), `both`         | Arrowhead at the `to` end, both ends, or none                                |\n| line             | `{color?, widthPt?, dash?}`             | Defaults 1 pt black solid; `dash` is an OOXML preset (`dash`, `sysDot`, ...) |\n\n```json\n{\n  "op": "addConnector",\n  "target": { "slide": 0 },\n  "from": "e_SHAPE",\n  "to": "e_PICTURE",\n  "kind": "elbow",\n  "line": { "color": "#1A73E8", "widthPt": 1.5 }\n}\n```\n\nCommon mistakes\n\n- Drawing a free line with `addElement` and hoping it follows the shapes: only `addConnector` (or `setConnectorEndpoints` with `start`/`end`) attaches.\n- Using it between a group child and a shape: connect to the group (top-level ids only).\n\n### addPicture (not-ai-callable)\n\n`{bytes:base64|dataURL,ext?,offset} \u2014 use insert_web_image instead`\n\nEmbeds image bytes as a new picture. The model inserts images through\n`insert_web_image` (URL) so the main process downloads and center-crops them.\n\n### replacePicture (not-ai-callable)\n\n`{bytes:base64|dataURL,ext?} \u2014 use replace_image instead`\n\nSwaps a picture\'s bytes in place. The model uses `replace_image` with a URL.\n\n### addTable\n\n`{rows,cols,offset:{x,y,cx,cy},colWidthsEmu?,rowHeightsEmu?,cellProps?:[[{gridSpan?,rowSpan?,hMerge?,vMerge?,anchor?}]]}`\n\nInserts a native table with PowerPoint\'s default style and empty cells. Fill\ncells afterwards with `setTableCell` (one op per cell, same transaction is\nfine once you know the table id from the first result).\n\n| Field         | Type                                                                | Notes                                                                    |\n| ------------- | ------------------------------------------------------------------- | ------------------------------------------------------------------------ |\n| rows, cols    | integer >= 1                                                        |                                                                          |\n| offset        | `{x, y, cx, cy}` EMU                                                | Columns and rows split the frame equally unless widths/heights are given |\n| colWidthsEmu  | number[]                                                            | Exactly `cols` positive values                                           |\n| rowHeightsEmu | number[]                                                            | Exactly `rows` positive values                                           |\n| cellProps     | array of rows of `{gridSpan?, rowSpan?, hMerge?, vMerge?, anchor?}` | Row-major; `anchor` `"t"`/`"ctr"`/`"b"`; use for pre-merged headers      |\n\n```json\n{\n  "op": "addTable",\n  "target": { "slide": 1 },\n  "rows": 3,\n  "cols": 3,\n  "offset": { "x": 914400, "y": 1371600, "cx": 7315200, "cy": 2286000 }\n}\n```\n\n```json\n{\n  "op": "addTable",\n  "target": { "slide": 1 },\n  "rows": 2,\n  "cols": 2,\n  "offset": { "x": 914400, "y": 1371600, "cx": 5486400, "cy": 1371600 },\n  "colWidthsEmu": [1828800, 3657600],\n  "cellProps": [\n    [{ "gridSpan": 2 }, { "hMerge": true }],\n    [{}, {}]\n  ]\n}\n```\n\nCommon mistakes\n\n- `colWidthsEmu` with the wrong count: it must list exactly one width per column.\n- Passing cell text here: the op creates empty cells; write text with `setTableCell`.\n\n### addChart\n\n`{kind:"bar"|"barStacked"|"line"|"area"|"pie"|"doughnut"|"scatter"|"radar"|"comboBarLine",categories:[\u2026],series:[{name,values:[\u2026]}],offset,title?,colorScheme?:["#RRGGBB"],holeSizePct?}`\n\nInserts a native, PowerPoint-editable chart.\n\n| Field       | Type                                              | Notes                                                                                                                                                                                                     |\n| ----------- | ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |\n| kind        | see signature                                     | `comboBarLine` draws the last series as a line on a secondary axis                                                                                                                                        |\n| categories  | string[]                                          | At least one; the x-axis labels                                                                                                                                                                           |\n| series      | array of `{name, values:number[]}`                | At least one; each `values` length should equal `categories` length                                                                                                                                       |\n| offset      | `{x, y, cx, cy}` EMU                              |                                                                                                                                                                                                           |\n| title       | string                                            | Optional chart title                                                                                                                                                                                      |\n| colorScheme | `"#RRGGBB"[]`                                     | Optional series colors, cycled; omit to follow the theme                                                                                                                                                  |\n| holeSizePct | number                                            | Doughnut hole size (10..90)                                                                                                                                                                               |\n| barDir      | `"bar"`                                           | Optional: horizontal bars instead of columns                                                                                                                                                              |\n| dataSource  | `"user"` / `"document"` / `"search"` / `"sample"` | Where the numbers came from; checked by apply_ops before the batch runs (not part of the op itself). `"search"` needs a web_search in this conversation; `"sample"` figures must be disclosed to the user |\n\n```json\n{\n  "op": "addChart",\n  "target": { "slide": 1 },\n  "kind": "bar",\n  "title": "Revenue by quarter",\n  "categories": ["Q1", "Q2", "Q3", "Q4"],\n  "series": [{ "name": "Revenue", "values": [120, 135, 150, 170] }],\n  "offset": { "x": 914400, "y": 1371600, "cx": 7315200, "cy": 3657600 },\n  "dataSource": "user"\n}\n```\n\n```json\n{\n  "op": "addChart",\n  "target": { "slide": 1 },\n  "kind": "doughnut",\n  "holeSizePct": 55,\n  "categories": ["Direct", "Partner", "Online"],\n  "series": [{ "name": "Share", "values": [45, 30, 25] }],\n  "offset": { "x": 2743200, "y": 1371600, "cx": 3657600, "cy": 3657600 },\n  "colorScheme": ["#1A73E8", "#34A853", "#FBBC04"]\n}\n```\n\nCommon mistakes\n\n- Inventing numbers: every value needs a source (user, deck, or a search in this conversation); with none, use illustrative values and say so to the user.\n- `values` shorter or longer than `categories`.\n- Editing an existing chart with `addChart`: use the `edit_chart` tool, which keeps position and z-order.\n\n### addSmartArt\n\n`{layout,items:[\u2026],offset}`\n\nInserts a SmartArt-style diagram built from grouped shapes.\n\n| Field  | Type                                                                                     | Notes                     |\n| ------ | ---------------------------------------------------------------------------------------- | ------------------------- |\n| layout | `"list"` / `"process"` / `"cycle"` / `"hierarchy"` / `"pyramid"` / `"matrix"` / `"venn"` |                           |\n| items  | string[]                                                                                 | 1..8 node texts, in order |\n| offset | `{x, y, cx, cy}` EMU                                                                     |                           |\n\n```json\n{\n  "op": "addSmartArt",\n  "target": { "slide": 1 },\n  "layout": "process",\n  "items": ["Discover", "Design", "Deliver"],\n  "offset": { "x": 914400, "y": 1828800, "cx": 7315200, "cy": 1828800 }\n}\n```\n\n### addMedia (not-ai-callable)\n\n`{kind:"video"|"audio",bytes:base64|dataURL,ext,offset}`\n\nEmbeds a video or audio file; bytes payload from the UI file picker.\n\n### addModel3d (not-ai-callable)\n\n`{bytes,ext,offset} \u2014 bytes payload`\n\nEmbeds a 3D model; bytes payload from the UI file picker.\n\n### pasteElements (not-ai-callable)\n\n`{items,dx,dy} \u2014 clipboard payload`\n\nPastes copied elements; the payload comes from the internal clipboard.\n';
 
-// raw-text:/Users/weiqun/AI/WeWork/plugins/com.pi.files/vendor/genoffice/packages/pptx-ops/src/prompts/ops/table.md
+// raw-text:/Users/simba/AI/PiWork/plugins/com.pi.files/vendor/genoffice/packages/pptx-ops/src/prompts/ops/table.md
 var table_default = '# Table ops\n\n> Edit an existing table element: cell text, merges, row/column structure, row heights, column widths, cell anchors, style presets and borders.\n\nAll ops take `target:{slide, el}` where `el` is the table\'s id (type `table` in\nthe outline). `row` and `col` are 0-based. Chart edits (`setChart`) live in the\n`edit_chart` tool.\n\n### setTableCell\n\n`{row,col,paragraphs}`\n\nReplaces one cell\'s text. Runs you do not restyle inherit the cell\'s current\nformatting, so plain `{text}` runs keep size, color and bold.\n\n| Field      | Type                                                                                            | Notes                   |\n| ---------- | ----------------------------------------------------------------------------------------------- | ----------------------- |\n| row, col   | integer                                                                                         | 0-based                 |\n| paragraphs | array of `{runs:[{text, bold?, italic?, fontSize?, color?}], align?, bullet?, lineSpacingPct?}` | Same shape as `setText` |\n\n```json\n{\n  "op": "setTableCell",\n  "target": { "slide": 0, "el": "e_TABLE" },\n  "row": 0,\n  "col": 0,\n  "paragraphs": [{ "runs": [{ "text": "Metric", "bold": true }], "align": "center" }]\n}\n```\n\nCommon mistakes\n\n- Passing the cell text as a string: it must be a paragraph array.\n- Row or column outside the grid: the op reports the failing (row, col).\n\n### tableMerge\n\n`{kind:"merge-right"|"merge-down"|"split",row,col}`\n\nMerges the cell at (row, col) with its right or lower neighbor, or splits a\nmerged cell back into its grid cells.\n\n```json\n{\n  "op": "tableMerge",\n  "target": { "slide": 0, "el": "e_TABLE" },\n  "kind": "merge-right",\n  "row": 0,\n  "col": 0\n}\n```\n\nCommon mistakes\n\n- Merging across an existing merge boundary: the op refuses; split first.\n\n### tableStructure\n\n`{kind:"insert-row"|"delete-row"|"insert-col"|"delete-col",index,before?}`\n\nInserts or deletes a row or column. Insert goes after `index` unless\n`before:true`.\n\n```json\n{\n  "op": "tableStructure",\n  "target": { "slide": 0, "el": "e_TABLE" },\n  "kind": "insert-row",\n  "index": 1\n}\n```\n\n```json\n{\n  "op": "tableStructure",\n  "target": { "slide": 0, "el": "e_TABLE" },\n  "kind": "delete-col",\n  "index": 0\n}\n```\n\nCommon mistakes\n\n- Tables with merged cells refuse row/column surgery: split the merges first (`tableMerge` with `kind:"split"`).\n\n### setTableRowHeight\n\n`{row,hEmu}`\n\nSets one row\'s height in EMU (the table frame grows or shrinks accordingly).\n\n```json\n{ "op": "setTableRowHeight", "target": { "slide": 0, "el": "e_TABLE" }, "row": 0, "hEmu": 457200 }\n```\n\n### setTableCellAnchor\n\n`{row,col,anchor:"top"|"middle"|"bottom"}`\n\nVertical alignment of the text inside one cell.\n\n```json\n{\n  "op": "setTableCellAnchor",\n  "target": { "slide": 0, "el": "e_TABLE" },\n  "row": 0,\n  "col": 1,\n  "anchor": "middle"\n}\n```\n\n### setTableColWidth\n\n`{col,wEmu}`\n\nSets one column\'s width in EMU.\n\n```json\n{ "op": "setTableColWidth", "target": { "slide": 0, "el": "e_TABLE" }, "col": 0, "wEmu": 2743200 }\n```\n\n### setTableStyle\n\n`{styleName} | {styleId?,firstRow?,lastRow?,firstCol?,lastCol?,bandRow?,bandCol?,keepFormatting?,shadingColor?,borderColor?,borderWidthPt?,borderPreset?}`\n\nRestyles the whole table: apply one fixed-color preset by `styleName`, pick one\nof PowerPoint\'s 74 built-in styles by `styleId` (gallery name such as\n`"Medium Style 2 - Accent 1"` or its GUID; they follow the deck\'s theme\ncolors), or change individual region flags, cell shading and border lines. A\npreset wins over the other fields; a preset or `styleId` clears direct cell\nfills and borders like PowerPoint\'s style gallery (`keepFormatting: true`\nkeeps them). `slides read` shows a table\'s current `style`.\n\n| Field                               | Type                  | Notes                                                                                                                                                                                                                                          |\n| ----------------------------------- | --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |\n| styleName                           | string                | `none`, `lightGrid`, `zebraBlue`, `zebraGray`, `headerDarkBlue`, `headerOrange`, `noBorder`, `fullBorder`                                                                                                                                      |\n| styleId                             | string                | Built-in gallery name or `{GUID}`: `No Style, No Grid`, `No Style, Table Grid`, `Themed Style 1/2 - Accent N`, `Light Style 1/2/3 [- Accent N]`, `Medium Style 1/2/3/4 [- Accent N]`, `Dark Style 1 [- Accent N]`, `Dark Style 2 [- Accent N]` |\n| firstRow                            | boolean               | Header-row emphasis                                                                                                                                                                                                                            |\n| lastRow, firstCol, lastCol, bandCol | boolean               | Total row, first/last column emphasis, banded columns                                                                                                                                                                                          |\n| bandRow                             | boolean               | Banded rows                                                                                                                                                                                                                                    |\n| keepFormatting                      | boolean               | With `styleId`: keep direct cell fills/borders instead of clearing them                                                                                                                                                                        |\n| shadingColor                        | `#RRGGBB` or `"none"` | Cell fill for every cell                                                                                                                                                                                                                       |\n| borderColor                         | `#RRGGBB`             | Border line color                                                                                                                                                                                                                              |\n| borderWidthPt                       | number (pt)           | Border line width; > 0                                                                                                                                                                                                                         |\n| borderPreset                        | `"all"` or `"none"`   | Draw all border lines, or clear them                                                                                                                                                                                                           |\n\n```json\n{ "op": "setTableStyle", "target": { "slide": 0, "el": "e_TABLE" }, "styleName": "zebraBlue" }\n```\n\n```json\n{\n  "op": "setTableStyle",\n  "target": { "slide": 0, "el": "e_TABLE" },\n  "styleId": "Medium Style 2 - Accent 1",\n  "firstRow": true,\n  "bandRow": true\n}\n```\n\n```json\n{\n  "op": "setTableStyle",\n  "target": { "slide": 0, "el": "e_TABLE" },\n  "firstRow": true,\n  "borderPreset": "all",\n  "borderColor": "#BFBFBF",\n  "borderWidthPt": 1\n}\n```\n\nCommon mistakes\n\n- Passing a color name (`"blue"`): colors are `#RRGGBB`.\n- Mixing `styleName` with the other fields: the preset is applied and the rest is ignored.\n- A built-in name in `styleName`: gallery names and GUIDs go in `styleId`.\n- Restyling one cell\'s text: that is `setTableCell` with styled runs, not this op.\n\n### setChart (not-ai-callable)\n\n`{patch:ChartEdit} \u2014 use the edit_chart tool instead`\n\nChanges a chart\'s type, data, colors or elements. The `edit_chart` tool exposes\nthis with a validated schema.\n';
 
-// raw-text:/Users/weiqun/AI/WeWork/plugins/com.pi.files/vendor/genoffice/packages/pptx-ops/src/prompts/ops/slide.md
+// raw-text:/Users/simba/AI/PiWork/plugins/com.pi.files/vendor/genoffice/packages/pptx-ops/src/prompts/ops/slide.md
 var slide_default = '# Slide ops\n\n> Whole-page operations: delete, duplicate, insert blank or by layout, move, background, hide, transition, auto-advance, animations, speaker notes, comments.\n\nSlide ops take `target:{slide}` only. `slide` is a 0-based index or a durable\n`"s_<n>"` id from the outline. Structural ops (delete, duplicate, insert, move)\nshift later indices; when you batch several in one transaction, later ops are\nstill resolved against the live deck, so prefer durable ids or order the batch\nfrom the last page to the first.\n\n### deleteSlide\n\n`{}`\n\nRemoves the page. A deck must keep at least one slide.\n\n```json\n{ "op": "deleteSlide", "target": { "slide": 1 } }\n```\n\n### duplicateSlide\n\n`{}`\n\nInserts a copy right after the page. `clearText:true` empties the text boxes\nso the copy serves as a layout-preserving blank.\nThe copy lands at the source index + 1; the result echoes only the source\ntarget, so address the new page by that index when you fill it.\n\n```json\n{ "op": "duplicateSlide", "target": { "slide": 0 } }\n```\n\n```json\n{ "op": "duplicateSlide", "target": { "slide": 0 }, "clearText": true }\n```\n\n### addBlankSlide\n\n`{} \u2014 inserts after target.slide`\n\nInserts a new blank page (same layout and background as `target.slide`) right\nafter it.\n\n```json\n{ "op": "addBlankSlide", "target": { "slide": "s_1" } }\n```\n\n### addSlideWithLayout\n\n`{layout:<name>|<index>} \u2014 inserts after target.slide (default: after the last slide)`\n\nInserts a page bound to one of the deck\'s layouts, with that layout\'s\nplaceholders as empty prompt boxes. `layout` is the layout\'s gallery name or\nits 0-based index as listed by `slides read --layouts`; the error names every\nlayout when the reference misses. The new slide\'s id is reported in `created`.\n\n```json\n{ "op": "addSlideWithLayout", "target": { "slide": "s_1" }, "layout": "Blank" }\n```\n\nCommon mistakes\n\n- Guessing layout names from another deck: list them with `slides read --layouts` first.\n- Filling the new placeholders in the same batch: they get ids only after the insert; `slides read` the new slide, then `setText`.\n\n### pasteSlide (not-ai-callable)\n\n`{afterIndex,bundle|png,mode?} \u2014 clipboard payload`\n\nPastes a copied slide bundle from the internal clipboard.\n\n### insertSlidePptx (not-ai-callable)\n\n`{source,at?,replace?} \u2014 generated-page landing payload (use generate_deck/regenerate_slide)`\n\nLands a generated one-slide pptx into the deck; the generation tools call it.\n\n### moveSlide\n\n`{to} \u2014 0-based destination index`\n\nMoves the page to a new position.\n\n```json\n{ "op": "moveSlide", "target": { "slide": 1 }, "to": 0 }\n```\n\n### setSlideLayout\n\n`{layout?:<name>|<index>} \u2014 omitted: snap placeholders back to the current layout`\n\nRe-links the page to another layout (existing shapes stay where they are;\nmissing layout placeholders are added as empty prompt boxes). Without `layout`\nthe current layout is re-applied, moving placeholders back to their layout\npositions.\n\n```json\n{ "op": "setSlideLayout", "target": { "slide": 0 }, "layout": 0 }\n```\n\n### setBackground\n\n`{kind:"solid"|"gradient"|"reset"|"graphics"|"image",color?,from?,to?,angleDeg?,radial?,hidden?} \u2014 image kind needs a bytes source (use set_slide_background)`\n\nPage background. Full-bleed decorative rectangles that act as a backdrop are\nrecolored along with it. One slide per op; for "all pages" send one op per\nslide in the same transaction.\n\n| Kind         | Fields                               | Notes                                                                                 |\n| ------------ | ------------------------------------ | ------------------------------------------------------------------------------------- |\n| `"solid"`    | `color`                              | `"#RRGGBB"`                                                                           |\n| `"gradient"` | `from`, `to`, `angleDeg?`, `radial?` | Two-stop gradient; `angleDeg` in degrees (default 0); `radial:true` ignores the angle |\n| `"reset"`    | none                                 | Remove the page override and inherit the layout/master background                     |\n| `"graphics"` | `hidden`                             | `true` hides the master\'s background graphics on this page                            |\n| `"image"`    | `source`                             | Bytes or media-part payload; not usable from `apply_ops`                              |\n\n```json\n{ "op": "setBackground", "target": { "slide": 0 }, "kind": "solid", "color": "#0B1F3A" }\n```\n\n```json\n{\n  "op": "setBackground",\n  "target": { "slide": 1 },\n  "kind": "gradient",\n  "from": "#0B1F3A",\n  "to": "#1A73E8",\n  "angleDeg": 90\n}\n```\n\n```json\n{ "op": "setBackground", "target": { "slide": 1 }, "kind": "reset" }\n```\n\nCommon mistakes\n\n- Dark backgrounds without lightening the text: follow up with `setFont` color changes on the page\'s text.\n- `kind:"image"` from the model: use the picture tools; the op needs bytes.\n\n### setHidden\n\n`{hidden:boolean}`\n\nHides or shows the page in the slide show (it stays in the deck).\n\n```json\n{ "op": "setHidden", "target": { "slide": 1 }, "hidden": true }\n```\n\n### setTransition\n\n`{kind:"none"|"fade"|"push"|"wipe"|\u2026}`\n\nSlide transition. Accepted kinds: `none`, `morph`, `fade`, `push`, `wipe`,\n`split`, `circle`, `cover`, `pull`, `dissolve`, `zoom`, `random`.\n\n```json\n{ "op": "setTransition", "target": { "slide": 0 }, "kind": "fade" }\n```\n\nCommon mistakes\n\n- Names from other tools such as `"slide"` or `"cut"`: only the kinds listed above are accepted; the error lists them.\n\n### setAdvanceTime\n\n`{ms:number|null} \u2014 auto-advance; null clears`\n\nAutomatic advance after the given milliseconds; `null` returns to click-to-advance.\n\n```json\n{ "op": "setAdvanceTime", "target": { "slide": 0 }, "ms": 5000 }\n```\n\n### setAnimations (not-ai-callable)\n\n`{items:[{spid,effect,trigger,durationMs,delayMs,\u2026}]} \u2014 spid-addressed (cNvPr id), no id translation yet`\n\nRewrites the page\'s animation timeline; addressed by raw shape ids, so the UI\nanimation pane owns it for now.\n\n### addAnimation\n\n`{effect,kind?,trigger?,duration?,delay?,direction?,paragraph?,motionPath?,presetXml?,after?} \u2014 target:{slide, el}; one effect appended to the page timeline`\n\nAdds one animation for the element at the end of the page\'s timeline (or right\nafter position `after`). The timeline is read back as `animations[]` in\n`slides read`, each item with its `seq` (0-based position), `el`, `effect`,\n`kind`, `trigger`, `durationMs`, `delayMs`.\n\n| Field      | Type                                                                                                                                                                                                           | Notes                                                                                                                                             |\n| ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |\n| effect     | entrance `appear` `fade` `flyIn` `wipe` `wipeDown` `splitIn` `bounce` `flipIn` `zoom`; emphasis `pulse` `spin` `grow` `teeter`; exit `disappear` `fadeOut` `flyOut` `wipeOut` `shrink` `zoomOut`; `motionPath` | Required unless `presetXml` is given                                                                                                              |\n| kind       | `"entrance"` / `"emphasis"` / `"exit"` / `"path"`                                                                                                                                                              | Optional cross-check; rejected when it does not match the effect                                                                                  |\n| trigger    | `"onClick"` (default) / `"withPrev"` / `"afterPrev"`                                                                                                                                                           | `withPrev` starts with the previous effect, `afterPrev` after it ends                                                                             |\n| duration   | ms >= 0                                                                                                                                                                                                        | Default per effect (appear 0, fade 500, spin 2000, \u2026); `durationMs` also accepted                                                                 |\n| delay      | ms >= 0                                                                                                                                                                                                        | Default 0; `delayMs` also accepted                                                                                                                |\n| direction  | `"top"` / `"bottom"` / `"left"` / `"right"`                                                                                                                                                                    | Only for `flyIn`, `flyOut`, `wipe`, `wipeOut` (default bottom)                                                                                    |\n| paragraph  | 0-based index                                                                                                                                                                                                  | Animate one paragraph of a text body instead of the whole shape                                                                                   |\n| motionPath | `"M 0 0 L 0.25 0"`                                                                                                                                                                                             | With `effect:"motionPath"`; coordinates are fractions of the slide size                                                                           |\n| presetXml  | one `<p:par>\u2026</p:par>` block                                                                                                                                                                                   | Verbatim effect exported from PowerPoint for presets outside the list; every `<p:spTgt spid>` must be this element\'s shape id; kept byte-for-byte |\n| after      | seq                                                                                                                                                                                                            | Insert right after that timeline position instead of appending                                                                                    |\n\n```json\n{\n  "op": "addAnimation",\n  "target": { "slide": 0, "el": "e_TEXT" },\n  "effect": "flyIn",\n  "direction": "left",\n  "trigger": "afterPrev",\n  "duration": 600\n}\n```\n\n### removeAnimation\n\n`{seq} \u2014 target:{slide}; or target:{slide, el} to drop every animation of that element`\n\nRemoves one timeline item by `seq`, or all items targeting an element. Later\nitems renumber; read the page again before the next batch.\n\n```json\n{ "op": "removeAnimation", "target": { "slide": 0, "el": "e_TEXT" } }\n```\n\n### reorderAnimation\n\n`{seq,to} \u2014 target:{slide}; move a timeline item`\n\nMoves the item at `seq` to position `to` (both 0-based, inside the timeline).\n\n```json\n{ "op": "reorderAnimation", "target": { "slide": 0 }, "seq": 2, "to": 0 }\n```\n\n### setNotes\n\n`{text} \u2014 speaker notes`\n\nReplaces the page\'s speaker notes (paragraphs separated by newlines). An empty\nstring clears them. Notes never affect the canvas.\n\n```json\n{\n  "op": "setNotes",\n  "target": { "slide": 0 },\n  "text": "Open with the headline number.\\nPause for questions before the next section."\n}\n```\n\n### addComment\n\n`{text,author}`\n\nAdds a review comment to the page.\n\n```json\n{\n  "op": "addComment",\n  "target": { "slide": 0 },\n  "text": "Consider a stronger verb in the title.",\n  "author": "AI Assistant"\n}\n```\n\n### deleteComment\n\n`{authorId,idx}`\n\nRemoves a comment identified by its author id and index within that author\'s\ncomments on the page (both come from the comments pane data).\n\n```json\n{ "op": "deleteComment", "target": { "slide": 0 }, "authorId": 0, "idx": 0 }\n```\n';
 
-// raw-text:/Users/weiqun/AI/WeWork/plugins/com.pi.files/vendor/genoffice/packages/pptx-ops/src/prompts/ops/deck.md
+// raw-text:/Users/simba/AI/PiWork/plugins/com.pi.files/vendor/genoffice/packages/pptx-ops/src/prompts/ops/deck.md
 var deck_default = '# Deck ops\n\n> Presentation-wide operations with no target: page size, find and replace, header/footer, theme, sections.\n\nDeck ops carry no `target`. They affect every slide (or the presentation\'s\nmetadata), so read the deck outline first and confirm the scope with the user\nwhen the request is ambiguous.\n\n### setSlideSize\n\n`{cx,cy} \u2014 EMU page size, whole deck`\n\nChanges the page size of the whole deck. Element positions are not rescaled;\nfollow up with `execute_slide_script` when content must be re-laid out.\nCommon sizes: 16:9 is 12192000 x 6858000, 4:3 is 9144000 x 6858000.\n\n```json\n{ "op": "setSlideSize", "cx": 12192000, "cy": 6858000 }\n```\n\n### findReplace\n\n`{find,replace,matchCase?,slideIndex?} \u2014 whole deck unless slideIndex`\n\nText substitution inside runs across text boxes, shapes, table cells and direct\ngroup children. Matches that span two differently formatted runs are not\nreplaced.\n\n| Field      | Type             | Notes                                       |\n| ---------- | ---------------- | ------------------------------------------- |\n| find       | non-empty string |                                             |\n| replace    | string           | May be empty to delete the text             |\n| matchCase  | boolean          | Default false                               |\n| slideIndex | integer          | Restrict to one page                        |\n| elementId  | string           | Restrict to one element (with `slideIndex`) |\n| firstOnly  | boolean          | Replace only the first match                |\n\n```json\n{ "op": "findReplace", "find": "2023", "replace": "2024" }\n```\n\n```json\n{\n  "op": "findReplace",\n  "find": "Acme Corp",\n  "replace": "Acme Corporation",\n  "matchCase": true,\n  "slideIndex": 0\n}\n```\n\nCommon mistakes\n\n- Expecting a report of zero changes: the op fails when nothing matched, so a "not found" error is normal feedback, not a fault.\n\n### applyHeaderFooter\n\n`{settings:{footer?,slideNum?,date?,dateAuto?}} \u2014 every slide`\n\nFooter text, slide numbers and date on every page (through the master\'s\nplaceholders).\n\n| Field             | Type             | Notes                                         |\n| ----------------- | ---------------- | --------------------------------------------- |\n| settings.footer   | string or `null` | `null` or empty hides the footer              |\n| settings.slideNum | boolean          | Show page numbers                             |\n| settings.date     | string or `null` | Fixed date text; `null` or empty hides it     |\n| settings.dateAuto | boolean          | Dynamic date field that updates in PowerPoint |\n\n```json\n{\n  "op": "applyHeaderFooter",\n  "settings": { "footer": "Acme Corporation - Confidential", "slideNum": true }\n}\n```\n\nCommon mistakes\n\n- Re-sending identical settings: the op reports "nothing changed" as an error; skip it when the values are already in place.\n\n### setSections\n\n`{sections:[{id,name,slideIndices},\u2026]} \u2014 full replace`\n\nReplaces the whole section list. Each section lists the 0-based indices of its\nslides in order; every slide should belong to exactly one section. Ids are\nGUIDs in braces; reuse existing ids to keep a section\'s identity, mint a new\nGUID for a new one.\n\n```json\n{\n  "op": "setSections",\n  "sections": [\n    { "id": "SECTION_ID", "name": "Introduction", "slideIndices": [0] },\n    { "id": "{6F1D2B0A-4C3E-4F58-9A21-0D7E5B3C9A11}", "name": "Details", "slideIndices": [1] }\n  ]\n}\n```\n\nRelated: `addSection`, `renameSection`, `removeSection`, `moveSection` for single changes.\n\n### applyTheme\n\n`{name,colors:{dk1?,lt1?,dk2?,lt2?,accent1?..accent6?,hlink?,folHlink?},majorFont?,minorFont?} \u2014 "#RRGGBB" slots, whole deck`\n\nRewrites the theme color scheme (and optionally the heading/body fonts) of the\nwhole deck, remapping explicit colors that matched the old scheme. Pages\nwithout their own background get the new `lt1` color.\n\n| Field     | Type                                  | Notes                                                                                                  |\n| --------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------ |\n| name      | non-empty string                      | Theme name written into the file                                                                       |\n| colors    | object of scheme slots to `"#RRGGBB"` | Slots: `dk1`, `lt1`, `dk2`, `lt2`, `accent1`..`accent6`, `hlink`, `folHlink`; six hex digits, no alpha |\n| majorFont | string                                | Heading font                                                                                           |\n| minorFont | string                                | Body font                                                                                              |\n\n```json\n{\n  "op": "applyTheme",\n  "name": "Ocean",\n  "colors": {\n    "dk1": "#0B1F3A",\n    "lt1": "#FFFFFF",\n    "dk2": "#1F3B5C",\n    "lt2": "#E8F0FE",\n    "accent1": "#1A73E8",\n    "accent2": "#34A853",\n    "accent3": "#FBBC04",\n    "accent4": "#EA4335",\n    "accent5": "#9AA0A6",\n    "accent6": "#5F6368",\n    "hlink": "#1A73E8",\n    "folHlink": "#7B1FA2"\n  },\n  "majorFont": "Georgia",\n  "minorFont": "Calibri"\n}\n```\n\nCommon mistakes\n\n- Alpha in scheme colors (`"#RRGGBBAA"`): theme slots take six hex digits only.\n- Passing `colors` as an array: it is a slot-to-color object.\n\n### addSection\n\n`{atSlideIndex,name}`\n\nStarts a new section at the given slide (that slide and the following ones up to\nthe next section move into it).\n\n```json\n{ "op": "addSection", "atSlideIndex": 1, "name": "Appendix" }\n```\n\n### renameSection\n\n`{id,name}`\n\n```json\n{ "op": "renameSection", "id": "SECTION_ID", "name": "Overview" }\n```\n\n### removeSection\n\n`{id} \u2014 keeps the slides`\n\nRemoves the section header; its slides join the previous section.\n\n```json\n{ "op": "removeSection", "id": "SECTION_ID" }\n```\n\n### moveSection\n\n`{id,dir:"up"|"down"}`\n\nSwaps the section (with all its slides) with its neighbor.\n\n```json\n{ "op": "moveSection", "id": "SECTION_ID", "dir": "down" }\n```\n';
 
 // vendor/genoffice/packages/pptx-ops/src/op-docs.ts
@@ -78826,91 +78897,73 @@ function samePath(a, b) {
 }
 __name(samePath, "samePath");
 var PANEL = "viewer";
-var renderViewer = /* @__PURE__ */ __name((data) => ctx.send(PANEL, "ui.render", data), "renderViewer");
-var MAX_BUCKETS = 8;
-var buckets = /* @__PURE__ */ new Map();
+var renderViewer = /* @__PURE__ */ __name((data, tabId) => tabId ? ctx.send(PANEL, "ui.render", data, tabId) : ctx.send(PANEL, "ui.render", data), "renderViewer");
+var tabFiles = /* @__PURE__ */ new Map();
+var tabSessions = /* @__PURE__ */ new Map();
+var activeTabBySession = /* @__PURE__ */ new Map();
 var panelSession = null;
-function bucketKey(sessionId, panelId) {
-  const s = sessionId ?? panelSession ?? "default";
-  return panelId === PANE_PANEL ? `${s}::pane` : s;
+function tabTitle(path) {
+  return path ? basename2(path) : "";
 }
-__name(bucketKey, "bucketKey");
-function bucketFor(key) {
-  let b = buckets.get(key);
-  if (!b) {
-    b = { tabs: [], activePath: "" };
-    buckets.set(key, b);
+__name(tabTitle, "tabTitle");
+function tabForPath(path) {
+  for (const [tabId, file] of tabFiles) {
+    if (file && samePath(file, path)) return tabId;
   }
-  return b;
+  return null;
 }
-__name(bucketFor, "bucketFor");
-function pruneBuckets() {
-  if (buckets.size <= MAX_BUCKETS + 1) return;
-  const current = bucketKey();
-  for (const key of buckets.keys()) {
-    if (buckets.size <= MAX_BUCKETS + 1) break;
-    if (key === current || key === "default") continue;
-    buckets.delete(key);
-  }
+__name(tabForPath, "tabForPath");
+function isOpenInViewer(path) {
+  return tabForPath(path) !== null;
 }
-__name(pruneBuckets, "pruneBuckets");
-function renderBucket(b, panelId = PANEL) {
-  return ctx.send(
-    panelId,
-    "ui.render",
-    b.activePath ? { path: b.activePath, tabs: b.tabs, activePath: b.activePath } : { tabs: [], activePath: "" }
+__name(isOpenInViewer, "isOpenInViewer");
+function renderTabFile(tabId) {
+  const file = tabFiles.get(tabId) ?? "";
+  renderViewer(
+    file ? { path: file, tabs: [file], activePath: file } : { tabs: [], activePath: "" },
+    tabId
   );
 }
-__name(renderBucket, "renderBucket");
-var PANE_PANEL = "viewer-pane";
-function paneIsOpen() {
+__name(renderTabFile, "renderTabFile");
+async function publishTab(tabId) {
+  const file = tabFiles.get(tabId) ?? "";
   try {
-    return ctx.send(PANE_PANEL, "ui.ping", {}) === true;
-  } catch {
-    return false;
+    await ctx.call("panel.updateTab", {
+      panelId: PANEL,
+      tabId,
+      // '' clears the override, so an unchosen tab falls back to the panel
+      // title ("文件查看器") instead of an empty label.
+      title: tabTitle(file),
+      params: file ? { file } : {}
+    });
+  } catch (err) {
+    ctx.log.warn(`panel.updateTab failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
-__name(paneIsOpen, "paneIsOpen");
-function uiBucketKey(panelId) {
-  return panelId === PANE_PANEL ? `${bucketKey()}::pane` : bucketKey();
+__name(publishTab, "publishTab");
+function setTabFile(tabId, path) {
+  tabFiles.set(tabId, path);
 }
-__name(uiBucketKey, "uiBucketKey");
-function openFileInBucket(key, path, renderTo) {
-  const p = String(path ?? "");
-  const b = bucketFor(key);
-  if (p) {
-    const existing = b.tabs.findIndex((t) => samePath(t, p));
-    if (existing >= 0) {
-      b.activePath = p;
-    } else {
-      b.tabs.push(p);
-      b.activePath = p;
-    }
-    const ext = p.toLowerCase().split(".").pop() ?? "";
-    if (ext !== "docx" && ext !== "docm") mcpReadyPath = null;
-  }
-  renderBucket(b, renderTo);
+__name(setTabFile, "setTabFile");
+function activeTabOf(sessionId) {
+  return activeTabBySession.get(sessionId ?? panelSession ?? "default") ?? null;
 }
-__name(openFileInBucket, "openFileInBucket");
-function openFile(path, sessionId, renderTo) {
-  openFileInBucket(bucketKey(sessionId), path, renderTo);
-}
-__name(openFile, "openFile");
-function closeTab(path, sessionId, renderTo) {
-  const b = bucketFor(bucketKey(sessionId));
-  const idx = b.tabs.findIndex((t) => samePath(t, path));
-  if (idx === -1) return;
-  b.tabs.splice(idx, 1);
-  if (b.activePath && samePath(b.activePath, path)) {
-    b.activePath = b.tabs[Math.max(0, idx - 1)] ?? "";
-  }
-  renderBucket(b, renderTo);
-}
-__name(closeTab, "closeTab");
+__name(activeTabOf, "activeTabOf");
 function activeFileOf(sessionId) {
-  return bucketFor(bucketKey(sessionId)).activePath;
+  const tabId = activeTabOf(sessionId);
+  return tabId ? tabFiles.get(tabId) ?? "" : "";
 }
 __name(activeFileOf, "activeFileOf");
+async function openInViewer(path, focus = true) {
+  await ctx.call("panel.open", { panelId: PANEL, focus, params: { file: path } });
+}
+__name(openInViewer, "openInViewer");
+async function openInTab(tabId, path) {
+  setTabFile(tabId, path);
+  renderTabFile(tabId);
+  await publishTab(tabId);
+}
+__name(openInTab, "openInTab");
 var mcpPending = /* @__PURE__ */ new Map();
 var mcpSeq = 0;
 var mcpReady = false;
@@ -78960,21 +79013,21 @@ function withMcpLock(fn) {
   return run;
 }
 __name(withMcpLock, "withMcpLock");
-function requireDocxOpen(path, sessionId) {
-  const b = bucketFor(bucketKey(sessionId));
-  if (b.tabs.some((t) => samePath(t, path))) return;
+function requireDocxOpen(path) {
+  if (isOpenInViewer(path)) return;
+  const current = activeFileOf();
   throw new Error(
-    b.activePath ? `the viewer is showing ${b.activePath}, not ${path} \u2014 open the document you want to edit in the viewer, then retry` : `no document is open in the viewer \u2014 open ${path} there, then retry`
+    current ? `the viewer is showing ${current}, not ${path} \u2014 open the document you want to edit in the viewer, then retry` : `no document is open in the viewer \u2014 open ${path} there, then retry`
   );
 }
 __name(requireDocxOpen, "requireDocxOpen");
-async function ensureDocxActive(path, sessionId) {
+async function ensureDocxActive(path, _sessionId) {
   if (mcpReadyPath !== null && samePath(mcpReadyPath, path)) return;
-  openFile(path, sessionId);
+  await openInViewer(path, true);
   await waitMcpReady(path, 6e4);
 }
 __name(ensureDocxActive, "ensureDocxActive");
-function mcpCommand(command, payload, timeoutMs = 12e4) {
+function mcpCommand(command, payload, timeoutMs = 12e4, tabId) {
   const requestId = "m" + ++mcpSeq;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -78986,7 +79039,7 @@ function mcpCommand(command, payload, timeoutMs = 12e4) {
       );
     }, timeoutMs);
     mcpPending.set(requestId, { resolve, reject, timer });
-    const delivered = ctx.send(PANEL, "mcp-command", { requestId, command, payload });
+    const delivered = ctx.send(PANEL, "mcp-command", { requestId, command, payload }, tabId);
     if (!delivered) {
       clearTimeout(timer);
       mcpPending.delete(requestId);
@@ -79154,10 +79207,10 @@ async function toolRead(p, sessionId) {
     );
   }
   if (ext === "docx") {
-    requireDocxOpen(path, sessionId);
+    requireDocxOpen(path);
     const result = await withMcpLock(async () => {
       await ensureDocxActive(path, sessionId);
-      return mcpCommand("read_document", {});
+      return mcpCommand("read_document", {}, void 0, tabForPath(path) ?? void 0);
     });
     return text(String(result?.text ?? ""), { path, via: "viewer" });
   }
@@ -79218,16 +79271,16 @@ async function toolEdit(p, sessionId) {
     };
   }
   if (ext === "docx") {
-    requireDocxOpen(path, sessionId);
+    requireDocxOpen(path);
     const commands = planDocxCommands(ops, dryRun);
     const steps = [];
     const saved = await withMcpLock(async () => {
       for (const step of commands) {
         await ensureDocxActive(path, sessionId);
-        steps.push(await mcpCommand(step.command, step.payload));
+        steps.push(await mcpCommand(step.command, step.payload, void 0, tabForPath(path) ?? void 0));
       }
       if (dryRun) return void 0;
-      return await mcpCommand("save_document", { path, overwrite: true });
+      return await mcpCommand("save_document", { path, overwrite: true }, void 0, tabForPath(path) ?? void 0);
     });
     if (dryRun) {
       const plan = steps[0]?.output ?? "";
@@ -79314,8 +79367,7 @@ async function runTool(name, p, call = {}) {
       }
       const target = typeof p.path === "string" && p.path ? String(p.path) : activeFileOf(sessionId);
       if (!target) throw new Error("no file to open (pass path or click a file first)");
-      await ctx.call("panel.open", { panelId: "viewer", focus: true });
-      openFile(target, sessionId);
+      await openInViewer(target);
       return text(`\u5DF2\u5728\u67E5\u770B\u5668\u4E2D\u6253\u5F00 ${target}`);
     }
     default:
@@ -79323,7 +79375,8 @@ async function runTool(name, p, call = {}) {
   }
 }
 __name(runTool, "runTool");
-async function onUiRequest(method, params = {}, panelId) {
+async function onUiRequest(method, params = {}, panelId, meta) {
+  const tabId = meta?.tabId ?? panelId ?? PANEL;
   switch (method) {
     case "chat.send": {
       const t = String(params.text ?? "").trim();
@@ -79336,51 +79389,41 @@ async function onUiRequest(method, params = {}, panelId) {
       mcpReady = true;
       return { ok: true };
     }
+    case "file.open": {
+      const path = String(params.path ?? "");
+      if (!path) throw new Error("file.open: path is required");
+      await openInTab(tabId, path);
+      return { ok: true, path };
+    }
+    case "file.listDir": {
+      const dir = String(params.path ?? "");
+      if (!dir) throw new Error("file.listDir: path is required");
+      const entries = await readdir2(dir, { withFileTypes: true });
+      return {
+        path: dir,
+        entries: entries.filter((e) => !e.name.startsWith(".")).map((e) => ({ name: e.name, path: join5(dir, e.name), dir: e.isDirectory() })).sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name))
+      };
+    }
     case "file.activateTab": {
       const path = String(params.path ?? "");
       if (!path) throw new Error("file.activateTab: path is required");
-      openFile(path, uiBucketKey(panelId), panelId ?? void 0);
+      await openInTab(tabId, path);
       return { ok: true };
     }
     case "file.closeTab": {
       const path = String(params.path ?? "");
       if (!path) throw new Error("file.closeTab: path is required");
-      closeTab(path, uiBucketKey(panelId), panelId ?? void 0);
-      if (panelId === PANE_PANEL && bucketFor(uiBucketKey(panelId)).tabs.length === 0 && paneIsOpen()) {
-        await ctx.call("panel.close", { panelId: PANE_PANEL });
+      if (tabFiles.get(tabId) && samePath(tabFiles.get(tabId), path)) {
+        setTabFile(tabId, "");
+        renderTabFile(tabId);
+        await publishTab(tabId);
       }
       return { ok: true };
     }
-    case "file.reorderTab": {
-      const path = String(params.path ?? "");
-      const beforePath = params.beforePath ? String(params.beforePath) : "";
-      if (!path) throw new Error("file.reorderTab: path is required");
-      const b = bucketFor(uiBucketKey(panelId));
-      const from = b.tabs.findIndex((t) => samePath(t, path));
-      if (from === -1) return { ok: true };
-      b.tabs.splice(from, 1);
-      const at = beforePath ? b.tabs.findIndex((t) => samePath(t, beforePath)) : -1;
-      if (at === -1) b.tabs.push(path);
-      else b.tabs.splice(at, 0, path);
-      renderBucket(b, panelId ?? PANEL);
-      return { ok: true, tabs: b.tabs };
-    }
-    case "file.splitRight": {
-      if (panelId === PANE_PANEL) return { ok: false, reason: "already-pane" };
-      const path = String(params.path ?? "");
-      if (!path) throw new Error("file.splitRight: path is required");
-      if (paneIsOpen()) {
-        openFileInBucket(uiBucketKey(PANE_PANEL), path, PANE_PANEL);
-        await ctx.call("panel.open", { panelId: PANE_PANEL, focus: true });
-        return { ok: true };
-      }
-      await ctx.call("panel.open", {
-        panelId: PANE_PANEL,
-        focus: true,
-        params: { file: path }
-      });
+    case "file.reorderTab":
       return { ok: true };
-    }
+    case "file.splitRight":
+      return { ok: false, reason: "split removed" };
     case "mcp.result": {
       const requestId = String(params.requestId ?? "");
       const entry = mcpPending.get(requestId);
@@ -79397,7 +79440,8 @@ async function onUiRequest(method, params = {}, panelId) {
     case "file.scratchPath": {
       const dir = join5(tmpdir(), "pi-files-preview");
       await mkdir2(dir, { recursive: true });
-      return { path: join5(dir, `preview-${process.pid}.html`) };
+      const safeTab = tabId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(-48);
+      return { path: join5(dir, `preview-${process.pid}-${safeTab}.html`) };
     }
     case "file.pickOpenPath": {
       const opened = await ctx.call("dialog.openFile", {
@@ -79460,16 +79504,31 @@ async function onUiRequest(method, params = {}, panelId) {
       return familyVerticalMetrics2(family) ?? null;
     }
     case "state.get": {
-      const b = bucketFor(uiBucketKey(panelId));
-      return b.activePath ? { path: b.activePath, tabs: b.tabs, activePath: b.activePath } : {};
+      const file = tabFiles.get(tabId) ?? "";
+      return file ? { path: file, tabs: [file], activePath: file } : { tabs: [], activePath: "" };
     }
     default:
       throw new Error(`unknown ui request: ${method}`);
   }
 }
 __name(onUiRequest, "onUiRequest");
-async function onEvent(_panelId, event, data) {
+async function onEvent(_panelId, event, data, _ctx, meta) {
   const d = data ?? {};
+  if (event === "panel.closed") {
+    const tabId = String(d.tabId ?? meta?.tabId ?? "");
+    if (tabId) {
+      tabFiles.delete(tabId);
+      tabSessions.delete(tabId);
+      for (const [sessionId, active] of [...activeTabBySession]) {
+        if (active === tabId) activeTabBySession.delete(sessionId);
+      }
+      if (mcpReadyPath && !isOpenInViewer(mcpReadyPath)) {
+        mcpReadyPath = null;
+        mcpReady = false;
+      }
+    }
+    return;
+  }
   if (event === "files.chat") {
     const t = String(d.text ?? "").trim();
     if (!t) return;
@@ -79488,11 +79547,11 @@ async function onEvent(_panelId, event, data) {
   if (!path || typeof contentB64 !== "string") return;
   try {
     const result = await ctx.call("filesystem.write", { path, contentB64, expectedMtime });
-    renderViewer({ saved: true, mtime: result?.mtime });
+    renderViewer({ saved: true, mtime: result?.mtime }, meta?.tabId);
   } catch (err) {
     const m = err instanceof Error ? err.message : String(err);
     ctx.log.error(`file-save failed: ${m}`);
-    renderViewer({ error: `\u4FDD\u5B58\u5931\u8D25: ${m}` });
+    renderViewer({ error: `\u4FDD\u5B58\u5931\u8D25: ${m}` }, meta?.tabId);
   }
 }
 __name(onEvent, "onEvent");
@@ -79516,28 +79575,36 @@ plugin({
    * applies params normally.
    */
   onPanelMounted(panelId, params, _ctx, meta) {
+    const tabId = meta?.tabId ?? panelId ?? PANEL;
     const sessionId = meta?.sessionId ?? null;
-    const boundary = panelSession !== null && sessionId !== null && sessionId !== panelSession;
     panelSession = sessionId ?? panelSession;
-    const key = bucketKey(sessionId, panelId);
-    const b = bucketFor(key);
+    tabSessions.set(tabId, sessionId);
+    if (sessionId) activeTabBySession.set(sessionId, tabId);
     const file = String(params?.file ?? "");
-    const target = !boundary && file ? file : b.activePath;
-    if (target) openFile(target, key, panelId ?? void 0);
-    else renderBucket(b, panelId ?? PANEL);
-    pruneBuckets();
+    setTabFile(tabId, file);
+    renderTabFile(tabId);
+    void publishTab(tabId);
+  },
+  onPanelActivated(panelId, params, _ctx, meta) {
+    const tabId = meta?.tabId ?? panelId ?? PANEL;
+    const sessionId = meta?.sessionId ?? null;
+    panelSession = sessionId ?? panelSession;
+    tabSessions.set(tabId, sessionId);
+    if (sessionId) activeTabBySession.set(sessionId, tabId);
+    const file = String(
+      params?.file ?? tabFiles.get(tabId) ?? ""
+    );
+    if (file) setTabFile(tabId, file);
   },
   onTool: /* @__PURE__ */ __name((name, params, _ctx, call) => runTool(name, params, call), "onTool"),
-  /** The conversation on screen changed — show that conversation's bucket. */
+  /** The conversation on screen changed. The host swaps the session-scoped
+   *  tabs itself; this only keeps the unscoped-tool fallback pointed right. */
   onHostEvent(event, data) {
     if (event !== "session.changed") return;
     panelSession = data?.sessionId ?? null;
-    renderBucket(bucketFor(bucketKey()));
-    renderBucket(bucketFor(`${bucketKey()}::pane`), PANE_PANEL);
-    pruneBuckets();
   },
-  onRequest(panelId, method, params) {
-    return onUiRequest(method, params, panelId);
+  onRequest(panelId, method, params, _ctx, meta) {
+    return onUiRequest(method, params, panelId, meta);
   },
   /**
    * Card buttons from the office_edit result card (messageRenderer). The path
@@ -79551,7 +79618,7 @@ plugin({
     if (kind !== "click" || eventId !== "open_viewer") return;
     const target = String(payload?.path ?? "") || activeFileOf();
     if (!target) return;
-    void ctx.call("panel.open", { panelId: "viewer", focus: true }).then(() => openFile(target)).catch((err) => {
+    void openInViewer(target).catch((err) => {
       ctx.log.error(`open_viewer failed: ${err instanceof Error ? err.message : String(err)}`);
     });
   },

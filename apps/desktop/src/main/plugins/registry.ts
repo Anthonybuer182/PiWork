@@ -390,6 +390,7 @@ export class PluginRegistry {
         hidden: p.hidden === true,
         keepAlive: p.keepAlive,
         scope: p.scope,
+        multiInstance: p.multiInstance === true,
         region: p.region,
         anchor: p.anchor,
         order: p.order,

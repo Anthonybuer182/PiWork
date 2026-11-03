@@ -366,7 +366,7 @@ const panelPort = {
 hostListener?.({ data: { type: 'ui-port' }, ports: [panelPort] });
 
 function panelRequest(id, method, params) {
-  panelListener?.({ data: { kind: 'request', id, panelId: 'browser', method, params } });
+  panelListener?.({ data: { kind: 'request', id, panelId: 'browser', tabId: 'host1', method, params } });
   return new Promise((resolve) => {
     const timer = setInterval(() => {
       const hit = panelSent.find((m) => m.kind === 'response' && m.id === id);
@@ -377,8 +377,19 @@ function panelRequest(id, method, params) {
 }
 
 // panel.mounted is a lifecycle frame the host raises; the backend should
-// register the panel and push the current URL.
-panelListener?.({ data: { kind: 'event', panelId: 'browser', event: 'panel.mounted', data: { params: {} } } });
+// register the host tab, bind it to the engine tab the host opened it for,
+// and push that page's URL. A mount without params is a favorites tab now.
+panelListener?.({
+  data: {
+    kind: 'event',
+    panelId: 'browser',
+    // The preload stamps the host tab on every message; the page's own
+    // panel.mounted data repeats it for replay after a reload.
+    tabId: 'host1',
+    event: 'panel.mounted',
+    data: { tabId: 'host1', params: { engineTabId: smokeTab.id } },
+  },
+});
 await new Promise((r) => setTimeout(r, 60));
 check(
   'panel.mounted pushes the current URL to the panel',
@@ -419,7 +430,7 @@ check(
 
 // host-event: agent navigated somewhere → the address bar must hear about it.
 panelSent.length = 0;
-sendToBackend({ type: 'host-event', event: 'browser.urlChanged', data: { url: 'https://agent-opened.example' } });
+sendToBackend({ type: 'host-event', event: 'browser.urlChanged', data: { tabId: smokeTab.id, url: 'https://agent-opened.example' } });
 await new Promise((r) => setTimeout(r, 60));
 check(
   'browser.urlChanged host event is relayed to the mounted panel',
@@ -473,7 +484,7 @@ check(
 
 // Same page, different anchor: did-navigate-in-page fires for these, and none
 // of them is a new visit.
-sendToBackend({ type: 'host-event', event: 'browser.urlChanged', data: { url: 'https://agent-opened.example#section' } });
+sendToBackend({ type: 'host-event', event: 'browser.urlChanged', data: { tabId: smokeTab.id, url: 'https://agent-opened.example#section' } });
 await new Promise((r) => setTimeout(r, 60));
 const dedup = await callTool('browser_history_search', { query: 'agent-opened' });
 check(
@@ -485,7 +496,7 @@ check(
 // The title arrives after did-navigate; the backend asks the engine again and
 // backfills it instead of leaving every visit untitled.
 currentUrl = 'https://second.example/page';
-sendToBackend({ type: 'host-event', event: 'browser.urlChanged', data: { url: currentUrl } });
+sendToBackend({ type: 'host-event', event: 'browser.urlChanged', data: { tabId: smokeTab.id, url: currentUrl } });
 await new Promise((r) => setTimeout(r, 60));
 currentTitle = '第二页';
 await new Promise((r) => setTimeout(r, 1500));
@@ -499,7 +510,7 @@ check(
 const private_on = await panelRequest('f4', 'settings.setPrivate', { private: true });
 await new Promise((r) => setTimeout(r, 20));
 panelSent.length = 0;
-sendToBackend({ type: 'host-event', event: 'browser.urlChanged', data: { url: 'https://secret.example/x' } });
+sendToBackend({ type: 'host-event', event: 'browser.urlChanged', data: { tabId: smokeTab.id, url: 'https://secret.example/x' } });
 await new Promise((r) => setTimeout(r, 60));
 const secret = await callTool('browser_history_search', { query: 'secret.example' });
 check(

@@ -55,10 +55,28 @@ export interface LiveSlotHandler {
   show(bounds: LiveSlotBounds, tag?: LiveSlotTag): void | Promise<void>;
   /** Hide the view so it neither paints nor intercepts input. */
   hide(): void;
+  /**
+   * Tear the backing view down entirely — the host tab it belonged to was
+   * closed, not merely switched away from. Omit for slots whose view outlives
+   * its reporter (the browser engine).
+   */
+  destroy?(): void;
 }
+
+/**
+ * Lazy slot resolver. Multi-instance panels create a new native view per host
+ * tab, so their slot ids are not known at boot — the renderer's first attach
+ * carries enough identity (plugin, panel, tab) to build the handler. Returns
+ * undefined for a slot this host does not serve.
+ */
+export type LiveSlotFactory = (
+  slotId: string,
+  meta?: Record<string, unknown>,
+) => LiveSlotHandler | undefined;
 
 export class LiveSlotRegistry {
   private handlers = new Map<string, LiveSlotHandler>();
+  private factory: LiveSlotFactory | null = null;
   /**
    * The last non-degenerate bounds each slot was shown at, with the tag that
    * named the target engine view.
@@ -79,6 +97,20 @@ export class LiveSlotRegistry {
     this.handlers.set(slotId, handler);
   }
 
+  /** Install the lazy resolver used for slots not registered at boot. */
+  setFactory(factory: LiveSlotFactory | null): void {
+    this.factory = factory;
+  }
+
+  private resolve(slotId: string, meta?: Record<string, unknown>): LiveSlotHandler | undefined {
+    let handler = this.handlers.get(slotId);
+    if (!handler && this.factory) {
+      handler = this.factory(slotId, meta);
+      if (handler) this.handlers.set(slotId, handler);
+    }
+    return handler;
+  }
+
   unregister(slotId: string): void {
     this.handlers.get(slotId)?.hide();
     this.handlers.delete(slotId);
@@ -92,8 +124,8 @@ export class LiveSlotRegistry {
     return [...this.handlers.keys()];
   }
 
-  async attach(slotId: string): Promise<{ ok: boolean; error?: string }> {
-    const handler = this.handlers.get(slotId);
+  async attach(slotId: string, meta?: Record<string, unknown>): Promise<{ ok: boolean; error?: string }> {
+    const handler = this.resolve(slotId, meta);
     if (!handler) return { ok: false, error: `unknown live slot: ${slotId}` };
     await handler.attach?.();
     return { ok: true };
@@ -103,8 +135,9 @@ export class LiveSlotRegistry {
     slotId: string,
     bounds: LiveSlotBounds,
     tag?: LiveSlotTag,
+    meta?: Record<string, unknown>,
   ): Promise<{ ok: boolean; error?: string }> {
-    const handler = this.handlers.get(slotId);
+    const handler = this.resolve(slotId, meta);
     if (!handler) return { ok: false, error: `unknown live slot: ${slotId}` };
 
     const { x, y, width, height } = bounds;
@@ -149,6 +182,26 @@ export class LiveSlotRegistry {
   }
 
   /**
+   * Release a closed tab's view. Distinct from `detach` (hide, e.g. the column
+   * collapsed or the tab hibernated): a closed tab will never come back under
+   * this slot id, so keeping its renderer process alive is a leak.
+   */
+  release(slotId: string): { ok: boolean } {
+    const handler = this.handlers.get(slotId);
+    if (handler) {
+      try {
+        handler.destroy?.();
+        if (!handler.destroy) handler.hide();
+      } catch (err) {
+        console.error(`[slots] destroy "${slotId}" failed:`, err);
+      }
+      this.handlers.delete(slotId);
+      this.lastShown.delete(slotId);
+    }
+    return { ok: true };
+  }
+
+  /**
    * Hide every view. Called when the renderer navigates: a reload never runs
    * React cleanup, so slots would otherwise keep stale bounds and invisibly
    * occlude the UI, eating real mouse clicks.
@@ -178,8 +231,10 @@ export function registerLiveSlotIpcHandlers(host: LiveSlotIpcHost): void {
   ipcMain.handle('pi:liveview:attach', (event, payload: { slotId?: string }) => {
     const registry = host.forSender(event.sender);
     if (!registry) return { ok: false, error: 'unknown window' };
-    registry.attach(String(payload?.slotId ?? ''));
-    return { ok: true };
+    // The payload carries the tab identity a lazily-created slot needs
+    // (pluginId / panelId / entry / tabKey); the slot id alone is not enough
+    // for a multi-instance panel's Nth view.
+    return registry.attach(String(payload?.slotId ?? ''), payload as Record<string, unknown>);
   });
 
   ipcMain.handle(
@@ -208,5 +263,11 @@ export function registerLiveSlotIpcHandlers(host: LiveSlotIpcHost): void {
     if (!registry) return { ok: false, error: 'unknown window' };
     registry.detach(String(payload?.slotId ?? ''));
     return { ok: true };
+  });
+
+  ipcMain.handle('pi:liveview:release', (event, payload: { slotId?: string }) => {
+    const registry = host.forSender(event.sender);
+    if (!registry) return { ok: false, error: 'unknown window' };
+    return registry.release(String(payload?.slotId ?? ''));
   });
 }

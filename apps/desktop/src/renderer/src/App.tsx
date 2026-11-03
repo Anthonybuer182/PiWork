@@ -10,6 +10,7 @@ import {
   useComposerStore,
   usePluginStore,
   usePanelStore,
+  panelIdOfTab,
   useCommandStore,
   usePermissionStore,
   initPermissionBridge,
@@ -152,11 +153,39 @@ function AppContent() {
           : undefined;
         const target = panelId ?? usePanelStore.getState().panels.find((p) => p.source === event.pluginId)?.id;
         if (target) {
-          openPanel(target, { focus: event.focus, params: event.params });
+          const state = usePanelStore.getState();
+          const entry = state.panels.find((p) => p.id === target);
+          const region = entry?.region ?? 'right';
+          const openKeys = state.openPanelIds[region].filter(
+            (key) => panelIdOfTab(key) === target,
+          );
+          const hasParams =
+            event.params !== undefined && Object.keys(event.params).length > 0;
+          // Activity events (`openPanelForActivity` after every tool) carry no
+          // params. In a multi-instance panel that used to create a phantom
+          // empty tab and steal focus from the page the tool had just opened.
+          // With an existing tab of that panel, surface THAT tab; with none,
+          // fall through and let the panel open its default (favorites) tab.
+          if (entry?.multiInstance && !hasParams) {
+            if (event.focus === false) return;
+            if (openKeys.length > 0) {
+              const focused = state.focusedId[region];
+              const key =
+                focused && openKeys.includes(focused) ? focused : openKeys[openKeys.length - 1];
+              usePanelStore.getState().setFocused(region, key);
+              if (region === 'right') useUIStore.getState().setRightPanelOpen(true);
+              else if (region === 'left') useUIStore.getState().setSidebarOpen(true);
+              return;
+            }
+          }
+          openPanel(target, {
+            focus: event.focus,
+            params: event.params,
+            instanceId: event.instanceId,
+          });
           // Surface the panel's own side: a backend-opened panel must not land
           // in a collapsed column the user cannot see. focus=false means
           // "badge, don't steal focus" — no reveal in that case, either region.
-          const region = usePanelStore.getState().panels.find((p) => p.id === target)?.region;
           if (event.focus !== false) {
             if (region === 'right') useUIStore.getState().setRightPanelOpen(true);
             else if (region === 'left') useUIStore.getState().setSidebarOpen(true);
@@ -166,8 +195,37 @@ function AppContent() {
         const target = event.panelId
           ? `plugin:${event.pluginId}:${event.panelId}`
           : usePanelStore.getState().panels.find((p) => p.source === event.pluginId)?.id;
-        const entry = target ? usePanelStore.getState().panels.find((p) => p.id === target) : undefined;
-        if (entry) usePanelStore.getState().closeTab(entry.region, entry.id);
+        const entry = target
+          ? usePanelStore.getState().panels.find((p) => p.id === target)
+          : undefined;
+        if (entry) {
+          if (event.tabId) {
+            usePanelStore.getState().closeTab(entry.region, event.tabId);
+          } else {
+            // No tab named: close every tab of that panel (the old
+            // single-tab semantics).
+            const keys = usePanelStore
+              .getState()
+              .openPanelIds[entry.region].filter((key) => panelIdOfTab(key) === entry.id);
+            for (const key of keys) usePanelStore.getState().closeTab(entry.region, key);
+          }
+        }
+      } else if (event.type === 'tab-update') {
+        usePanelStore
+          .getState()
+          .updateTab(event.tabId, { title: event.title, params: event.params });
+      } else if (event.type === 'tab-focus') {
+        const panel = usePanelStore
+          .getState()
+          .panels.find((p) => p.id === panelIdOfTab(event.tabId));
+        // focus=false is the no-focus-steal case: the tab is already open and
+        // the tool only wanted the column surfaced — never move the user's
+        // active tab out from under them.
+        if (panel && event.focus) {
+          usePanelStore.getState().setFocused(panel.region, event.tabId);
+          if (panel.region === 'right') useUIStore.getState().setRightPanelOpen(true);
+          else if (panel.region === 'left') useUIStore.getState().setSidebarOpen(true);
+        }
       } else if (event.type === 'plugins-changed') {
         // Install/uninstall/enable/disable — refresh discovery + panels.
         usePluginStore.getState().loadPlugins();

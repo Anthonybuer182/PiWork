@@ -60,7 +60,7 @@ export {
   stopSpeaking,
 } from './stores/voice-playback-store';
 export { usePluginStore, getPluginBridge } from './stores/plugin-store';
-export { usePanelStore, pluginPanelId, usePanelActivation } from './stores/panel-store';
+export { usePanelStore, pluginPanelId, usePanelActivation, panelIdOfTab, instanceIdOfTab, tabKeyOf } from './stores/panel-store';
 export type { PanelEntry, PanelKeepAlive, PanelRuntimeState, PanelRegion, PanelAnchor } from './stores/panel-store';
 export { HOST_LEFT_PANELS } from './components/panels/host-panels';
 export { useCommandStore, HOST_COMMANDS } from './stores/command-store';

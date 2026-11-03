@@ -29,6 +29,8 @@ export interface PluginPanelInfo {
   keepAlive?: 'always' | 'lru' | 'never';
   /** Whether the panel's tabs follow the session. Defaults to 'global'. */
   scope?: import('./manifest.js').PanelScope;
+  /** Several host tabs of this panel may be open at once. */
+  multiInstance?: boolean;
   /** Sidebar column. Defaults to 'right'. */
   region?: PanelRegion;
   /** Position within the region's rail. Defaults to 'top'. */
@@ -133,6 +135,8 @@ export interface PluginInfo {
 export interface PluginPanelStatus {
   pluginId: string;
   panelId?: string;
+  /** Multi-instance panels: which host tab this status describes. */
+  tabId?: string;
   badge?: number | string;
   activity?: 'idle' | 'streaming' | 'working' | 'error';
   detail?: string;
@@ -144,15 +148,29 @@ export type PluginEvent =
   | { type: 'state-changed'; pluginId: string; state: PluginRuntimeState; error?: string }
   | { type: 'plugins-changed' }
   /** Backend requested a panel open. focus=false → badge only, no steal.
-   *  `params` ride the open (e.g. `{ file }` for the viewer pane). */
+   *  `params` ride the open (e.g. `{ file }` for the viewer pane).
+   *  `instanceId` is present when the host should mount a NEW instance of a
+   *  multi-instance panel (the host tab key is derived from it). */
   | {
       type: 'panel-open';
       pluginId: string;
       panelId?: string;
       focus: boolean;
       params?: Record<string, unknown>;
+      instanceId?: string;
     }
   /** A plugin asked to close one of its own panels (e.g. unsplit a pane). */
-  | { type: 'panel-close'; pluginId: string; panelId?: string }
+  | { type: 'panel-close'; pluginId: string; panelId?: string; tabId?: string }
+  /** The backend changed a tab's params/title (a file opened inside the
+   *  viewer's own file tree, a browser page title). */
+  | {
+      type: 'tab-update';
+      pluginId: string;
+      tabId: string;
+      title?: string;
+      params?: Record<string, unknown>;
+    }
+  /** Surface an already-open host tab (no new tab, no params matching). */
+  | { type: 'tab-focus'; pluginId: string; tabId: string; focus: boolean }
   /** Marketplace install progress phases. */
   | { type: 'install-phase'; pluginId: string; phase: import('./market.js').InstallPhase };

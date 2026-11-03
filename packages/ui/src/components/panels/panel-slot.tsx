@@ -1,5 +1,4 @@
 import { useEffect, type ComponentType } from 'react';
-import { Minimize2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { usePanelStore, type PanelEntry } from '@/stores/panel-store';
 import { useI18n } from '@/i18n';
@@ -9,8 +8,6 @@ import { SessionList } from '@/components/session/session-list';
 import { ContextPanel } from '@/components/context/context-panel';
 import { ensureRelayInstalled } from '@/components/plugins/panel-relay';
 import { LiveSlot } from './live-slot';
-import { panelTitle } from './panel-title';
-import { RailIcon } from './panel-rail';
 
 /**
  * Host panels ("the host is the zeroth contributor") — rendered through the
@@ -49,15 +46,47 @@ function hasNativeViewHost(): boolean {
  * It also installs the relay — the theme push that keeps a panel's colors in
  * sync with the shell.
  */
-function PluginWebViewPanel({ pluginId, panelId }: { pluginId: string; panelId: string }) {
-  const params = usePanelStore((s) => s.params[`plugin:${pluginId}:${panelId}`]);
+function PluginWebViewPanel({
+  pluginId,
+  panelId,
+  tabKey,
+  entry,
+  active,
+}: {
+  pluginId: string;
+  panelId: string;
+  tabKey: string;
+  entry?: string;
+  active: boolean;
+}) {
+  const params = usePanelStore((s) => s.params[tabKey]);
   useEffect(() => {
     ensureRelayInstalled();
   }, []);
-  return <LiveSlot pluginId={pluginId} panelId={panelId} notifyMounted params={params} />;
+  return (
+    <LiveSlot
+      pluginId={pluginId}
+      panelId={panelId}
+      tabKey={tabKey}
+      entry={entry}
+      active={active}
+      notifyMounted
+      params={params}
+    />
+  );
 }
 
-export function PanelBody({ panel }: { panel: PanelEntry }) {
+export function PanelBody({
+  panel,
+  tabKey,
+  active = true,
+}: {
+  panel: PanelEntry;
+  /** This tab's key (multi-instance) — also the params lookup and native view slot identity. */
+  tabKey?: string;
+  /** Whether this pane is the active tab (drives `panel.activated`). */
+  active?: boolean;
+}) {
   const { t } = useI18n();
   // Host panel: a React component the shell owns.
   if (panel.source === 'host') {
@@ -75,97 +104,56 @@ export function PanelBody({ panel }: { panel: PanelEntry }) {
         </div>
       );
     }
-    return <PluginWebViewPanel pluginId={panel.pluginId} panelId={panel.panelId} />;
+    return (
+      <PluginWebViewPanel
+        pluginId={panel.pluginId}
+        panelId={panel.panelId}
+        tabKey={tabKey ?? panel.id}
+        entry={panel.entry}
+        active={active}
+      />
+    );
   }
   return null;
 }
 
 /**
- * One work-area pane: the panel's body, plus — only while the pane is ZOOMED —
- * a slim host-drawn header carrying identity and the restore control.
+ * One tab's pane: the panel body, hidden while another tab is active.
  *
- * The tiled panes draw no header: the header tab strip directly above already
- * shows every open panel's icon and title, and a second copy right under it
- * read as duplication. Zoom must live outside the panel body either way
- * (plugin pages are native views that would cover any DOM floating inside
- * them), so in tiled mode it lives on the tab (hover button + double-click);
- * zoomed, the header returns as the pane's own title bar with 还原.
+ * The tab strip above already carries the panel's icon and title, so the pane
+ * draws no header of its own — a second copy right under the strip read as
+ * duplication in the old multi-pane work area too.
  *
- * `zoomable` is false for regions where a pane already spans its whole
- * container (the left sidebar) — zooming there is meaningless.
+ * `hidden` is `display:none`, not a conditional unmount: an inactive tab keeps
+ * its state (scroll, expanded folders, a live browser page) while the
+ * keep-alive budget holds it. A native view reports 0×0 when its host element
+ * is display:none, which is the host's signal to hide the view.
  */
 export function PaneView({
   panel,
-  focused,
-  zoomed,
-  zoomable = true,
+  tabKey,
+  active,
   hidden = false,
-  width,
 }: {
   panel: PanelEntry;
-  focused: boolean;
-  zoomed: boolean;
-  zoomable?: boolean;
-  /** Rendered but kept off the layout (kept-alive while minimized). */
+  /** The tab key this pane renders (params + native view identity). */
+  tabKey: string;
+  active: boolean;
+  /** Rendered but kept off the layout (kept-alive while another tab is active). */
   hidden?: boolean;
-  /** Flex-basis width when laid out (px). Undefined → flex:1. */
-  width?: number;
 }) {
-  const { t } = useI18n();
-  const setFocused = usePanelStore((s) => s.setFocused);
-  const toggleZoom = usePanelStore((s) => s.toggleZoom);
-  const region = panel.region;
-  const title = panelTitle(panel, t);
-
   return (
     <div
       data-panel-container={panel.id}
-      data-pane-focused={focused ? 'true' : undefined}
+      data-pane-tab={tabKey}
+      data-pane-active={active ? 'true' : undefined}
       className={cn(
-        'group/pane flex min-w-0 flex-col overflow-hidden',
-        focused ? 'bg-background' : 'bg-background/95',
+        'flex min-w-0 flex-1 flex-col overflow-hidden bg-background',
         hidden && 'hidden',
       )}
-      style={hidden ? undefined : { flex: width != null ? `0 0 ${width}px` : '1 1 0%' }}
-      onMouseDown={() => {
-        if (!focused) setFocused(region, panel.id);
-      }}
     >
-      {/* Header only while zoomed — see the doc comment above. */}
-      {zoomed && (
-        <div
-          data-pane-header={panel.id}
-          onDoubleClick={(e) => {
-            if (!zoomable) return;
-            e.preventDefault();
-            toggleZoom(region, panel.id);
-          }}
-          className={cn(
-            'flex h-7 shrink-0 select-none items-center gap-1.5 border-b px-2 text-xs',
-            focused ? 'border-border bg-accent/60 text-accent-foreground' : 'bg-muted/40 text-muted-foreground',
-          )}
-        >
-          <RailIcon panel={panel} size={14} className="h-3.5 w-3.5 shrink-0" />
-          <span className="min-w-0 flex-1 truncate">{title}</span>
-          {zoomable && (
-            <button
-              type="button"
-              aria-label={t('还原窗格')}
-              title={t('还原（其他窗格回到工作区；Esc 同效）')}
-              data-pane-zoom={panel.id}
-              onClick={(e) => {
-                e.stopPropagation();
-                toggleZoom(region, panel.id);
-              }}
-              className="shrink-0 rounded-sm p-0.5 text-muted-foreground transition-colors hover:bg-accent hover:text-accent-foreground"
-            >
-              <Minimize2 className="h-3 w-3" />
-            </button>
-          )}
-        </div>
-      )}
       <div className="min-h-0 flex-1">
-        <PanelBody panel={panel} />
+        <PanelBody panel={panel} tabKey={tabKey} active={active} />
       </div>
     </div>
   );

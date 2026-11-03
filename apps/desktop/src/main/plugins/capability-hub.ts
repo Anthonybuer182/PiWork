@@ -247,8 +247,67 @@ export class CapabilityHub {
         if (!panelId || !panels.some((p: { id: string }) => p.id === panelId)) {
           throw new Error(`plugin "${pluginId}" does not contribute panel "${panelId}"`);
         }
-        this.emitEvent({ type: 'panel-close', pluginId, panelId });
-        return { ok: true, panelId };
+        const tabId = params.tabId ? String(params.tabId) : undefined;
+        if (tabId) {
+          // A plugin may only close tabs of its own panels. The tab key is the
+          // panel entry id, optionally suffixed with `##<instance>`.
+          const prefix = `plugin:${pluginId}:${panelId}`;
+          if (tabId !== prefix && !tabId.startsWith(`${prefix}##`)) {
+            throw new Error(`panel.close: "${tabId}" is not a tab of "${prefix}"`);
+          }
+        }
+        this.emitEvent({ type: 'panel-close', pluginId, panelId, tabId });
+        return { ok: true, panelId, tabId };
+      },
+    });
+
+    // ── panel.updateTab (requires contributing the panel) ──
+    // A panel can change its own host tab's label/params — the viewer's file
+    // tree opens a document inside an already-empty tab, the browser's page
+    // title changes on navigation. Main only relays; the shell owns the state.
+    this.capabilities.set('panel.updateTab', {
+      handler: ({ pluginId, params }) => {
+        const plugin = this.registry.get(pluginId);
+        const panels = plugin?.manifest.contributes?.panels ?? [];
+        const tabId = params.tabId ? String(params.tabId) : '';
+        if (!tabId) throw new Error('panel.updateTab needs a tabId');
+        const panelId = params.panelId ? String(params.panelId) : undefined;
+        if (panelId && !panels.some((p: { id: string }) => p.id === panelId)) {
+          throw new Error(`plugin "${pluginId}" does not contribute panel "${panelId}"`);
+        }
+        const prefix = panelId ? `plugin:${pluginId}:${panelId}` : `plugin:${pluginId}:`;
+        if (!tabId.startsWith(prefix)) {
+          throw new Error(`panel.updateTab: "${tabId}" does not belong to plugin "${pluginId}"`);
+        }
+        const title =
+          typeof params.title === 'string'
+            ? params.title
+            : params.title === null
+              ? ''
+              : undefined;
+        const openParams =
+          params.params && typeof params.params === 'object' && !Array.isArray(params.params)
+            ? (params.params as Record<string, unknown>)
+            : undefined;
+        this.emitEvent({ type: 'tab-update', pluginId, tabId, title, params: openParams });
+        return { ok: true, tabId };
+      },
+    });
+
+    // ── panel.focusTab (requires contributing the panel) ──
+    // Focus a host tab by its key. Distinct from panel.open: the tab is
+    // already open and its params may not identify it (a browser favorites
+    // tab keeps `{}` until its first navigation).
+    this.capabilities.set('panel.focusTab', {
+      handler: ({ pluginId, params }) => {
+        const tabId = params.tabId ? String(params.tabId) : '';
+        if (!tabId) throw new Error('panel.focusTab needs a tabId');
+        if (!tabId.startsWith(`plugin:${pluginId}:`)) {
+          throw new Error(`panel.focusTab: "${tabId}" does not belong to plugin "${pluginId}"`);
+        }
+        const focus = params.focus !== false;
+        this.emitEvent({ type: 'tab-focus', pluginId, tabId, focus });
+        return { ok: true, tabId };
       },
     });
 

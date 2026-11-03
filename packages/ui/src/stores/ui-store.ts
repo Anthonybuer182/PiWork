@@ -34,6 +34,13 @@ interface UIState {
    * otherwise cover the dialog and swallow its clicks.
    */
   settingsOpen: boolean;
+  /**
+   * The plugin picker is a DOM popover anchored to the tab strip's `+`. Like
+   * the settings dialog it has to hide the native panel views while open:
+   * those sit above the DOM, so the popover would otherwise be painted under
+   * the active panel and its search field would be unreachable.
+   */
+  panelPickerOpen: boolean;
   rightPanelWidth: number;
   leftPanelWidth: number;
   compactMode: boolean;
@@ -61,6 +68,7 @@ interface UIState {
   toggleChatSide: () => void;
   openSettings: () => void;
   setSettingsOpen: (open: boolean) => void;
+  setPanelPickerOpen: (open: boolean) => void;
   setSidebarOpen: (open: boolean) => void;
   setRightPanelOpen: (open: boolean) => void;
   setCenterPanelOpen: (open: boolean) => void;
@@ -82,6 +90,7 @@ export const useUIStore = create<UIState>()(
       centerPanelOpen: true,
       chatRightOfPanels: false,
       settingsOpen: false,
+      panelPickerOpen: false,
       rightPanelWidth: 600,
       // A comfortable width for the session list, file tree and context panel,
       // and the width the column is dragged from.
@@ -100,7 +109,17 @@ export const useUIStore = create<UIState>()(
         set({ activeWorkspaceId: workspaceId, activeSessionId: sessionId });
         setPanelLayoutWorkspace(workspaceId);
       },
-      setActiveSession: (id) => set({ activeSessionId: id }),
+      // Switch the panel store's session slice BEFORE the session id reaches
+      // React. Child LiveSlots react to `activeSessionId` in effects that run
+      // before the App's enterSession effect; if the tabs were still mounted
+      // there, every stashed panel would re-report itself as belonging to the
+      // NEW session (and the browser's host↔engine mapping would go stale).
+      // Doing the swap synchronously makes the old tabs disappear from the
+      // render before any of them can observe the new session.
+      setActiveSession: (id) => {
+        usePanelStore.getState().enterSession(id);
+        set({ activeSessionId: id });
+      },
       // File selection routes through the filePreview contribution chain:
       // a plugin panel claims the extension — there is no host fallback
       // (preview is fully plugin-owned).
@@ -137,6 +156,7 @@ export const useUIStore = create<UIState>()(
       toggleChatSide: () => set((s) => ({ chatRightOfPanels: !s.chatRightOfPanels })),
       openSettings: () => set({ settingsOpen: true }),
       setSettingsOpen: (open) => set({ settingsOpen: open }),
+      setPanelPickerOpen: (open) => set({ panelPickerOpen: open }),
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
       setRightPanelOpen: (open) => set({ rightPanelOpen: open }),
       setCenterPanelOpen: (open) => set({ centerPanelOpen: open }),

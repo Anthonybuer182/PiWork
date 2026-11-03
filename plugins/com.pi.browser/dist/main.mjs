@@ -862,6 +862,8 @@ function plugin(handlers) {
   let panelPort = null;
   const panelPorts = /* @__PURE__ */ new Map();
   const portPanel = /* @__PURE__ */ new Map();
+  const portTab = /* @__PURE__ */ new Map();
+  const tabMeta = /* @__PURE__ */ new Map();
   let pluginId = "";
   let dataDir = "";
   let booted = false;
@@ -871,13 +873,19 @@ function plugin(handlers) {
   let portClosed = false;
   let probeSeq = 0;
   const pendingProbes = /* @__PURE__ */ new Map();
-  function routeFor(panelId) {
+  function routeFor(panelId, tabId) {
     if (panelId) {
-      const p = panelPorts.get(panelId);
-      if (p)
-        return p;
+      const ports = panelPorts.get(panelId);
+      if (ports && ports.size > 0) {
+        if (tabId) {
+          const matched = [...ports].filter((port) => portTab.get(port) === tabId);
+          if (matched.length > 0)
+            return matched;
+        }
+        return [...ports];
+      }
     }
-    return panelPort;
+    return panelPort ? [panelPort] : [];
   }
   __name(routeFor, "routeFor");
   const post = /* @__PURE__ */ __name((message) => host.postMessage(message), "post");
@@ -900,16 +908,23 @@ function plugin(handlers) {
         }, options?.timeoutMs ?? CALL_TIMEOUT_MS);
       });
     },
-    send(panelId, event, data) {
-      const port = routeFor(panelId);
-      if (!port)
+    send(panelId, event, data, tabId) {
+      const ports = routeFor(panelId, tabId);
+      if (ports.length === 0)
         return false;
-      port.postMessage({ kind: "event", event, panelId, data });
-      return true;
+      let delivered = false;
+      for (const port of ports) {
+        try {
+          port.postMessage({ kind: "event", event, panelId, tabId, data });
+          delivered = true;
+        } catch {
+        }
+      }
+      return delivered;
     },
     panelAlive(panelId, timeoutMs = PROBE_TIMEOUT_MS) {
-      const port = routeFor(panelId);
-      if (!port)
+      const ports = routeFor(panelId);
+      if (ports.length === 0)
         return Promise.resolve(false);
       const id = "probe-" + ++probeSeq;
       return new Promise((resolve) => {
@@ -921,7 +936,12 @@ function plugin(handlers) {
           clearTimeout(timer);
           resolve(true);
         });
-        port.postMessage({ kind: "event", event: "pi.probe", panelId, data: { id } });
+        for (const port of ports) {
+          try {
+            port.postMessage({ kind: "event", event: "pi.probe", panelId, data: { id } });
+          } catch {
+          }
+        }
       });
     },
     async openPanel(panelId, options) {
@@ -954,7 +974,8 @@ function plugin(handlers) {
     }
     try {
       const result = await handlers.onTool(name, msg.params ?? {}, ctx, {
-        sessionId: msg.sessionId
+        sessionId: msg.sessionId,
+        workspaceId: msg.workspaceId
       });
       if (result === void 0 || result === null) {
         post({
@@ -978,11 +999,14 @@ function plugin(handlers) {
     const msg = raw;
     if (!msg || typeof msg !== "object")
       return;
+    if (sourcePort && msg.tabId !== void 0)
+      portTab.set(sourcePort, msg.tabId);
     if (msg.kind === "request") {
       const id = String(msg.id ?? "");
       const method = String(msg.method ?? "");
       const panelId = msg.panelId ?? "";
-      const replyPort = sourcePort ?? routeFor(panelId);
+      const tabId = msg.tabId;
+      const replyPort = sourcePort ?? routeFor(panelId)[0];
       const reply = /* @__PURE__ */ __name((ok, error, result) => {
         replyPort?.postMessage({ kind: "response", id, ok, panelId, error, result });
       }, "reply");
@@ -998,7 +1022,12 @@ function plugin(handlers) {
         return;
       }
       try {
-        const result = await handlers.onRequest(panelId, method, msg.params ?? {}, ctx);
+        const known = tabId ? tabMeta.get(tabId) : void 0;
+        const result = await handlers.onRequest(panelId, method, msg.params ?? {}, ctx, {
+          tabId,
+          sessionId: known?.sessionId,
+          workspaceId: known?.workspaceId
+        });
         if (result === void 0) {
           reply(false, `onRequest handled "${method}" without returning anything. Return the answer (a value, or true), or rethrow for a method you do not handle.`);
           return;
@@ -1012,6 +1041,7 @@ function plugin(handlers) {
     if (msg.kind === "event") {
       const event = String(msg.event ?? "");
       const panelId = msg.panelId ?? "";
+      const tabId = msg.tabId;
       if (event === "pi.probe.reply") {
         const probeId = String(msg.data?.id ?? "");
         const resolve = pendingProbes.get(probeId);
@@ -1024,6 +1054,13 @@ function plugin(handlers) {
       if (!panelId)
         log("warn", `panel event "${event}" arrived with no panel id.`);
       if (event === "panel.mounted") {
+        const data = msg.data ?? {};
+        if (data.tabId) {
+          tabMeta.set(data.tabId, {
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId
+          });
+        }
         if (!handlers.onPanelMounted) {
           if (!mountWarned.has(panelId)) {
             mountWarned.add(panelId);
@@ -1032,10 +1069,32 @@ function plugin(handlers) {
           return;
         }
         try {
-          const data = msg.data ?? {};
-          await handlers.onPanelMounted(panelId, data.params, ctx, { sessionId: data.sessionId });
+          await handlers.onPanelMounted(panelId, data.params, ctx, {
+            tabId: data.tabId ?? tabId,
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId
+          });
         } catch (err) {
           log("error", `onPanelMounted for "${panelId}" threw: ${describe(err)}`);
+        }
+        return;
+      }
+      if (event === "panel.activated" && handlers.onPanelActivated) {
+        const data = msg.data ?? {};
+        if (data.tabId) {
+          tabMeta.set(data.tabId, {
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId
+          });
+        }
+        try {
+          await handlers.onPanelActivated(panelId, data.params, ctx, {
+            tabId: data.tabId ?? tabId,
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId
+          });
+        } catch (err) {
+          log("error", `onPanelActivated for "${panelId}" threw: ${describe(err)}`);
         }
         return;
       }
@@ -1044,7 +1103,12 @@ function plugin(handlers) {
         return;
       }
       try {
-        await handlers.onEvent(panelId, event, msg.data, ctx);
+        const known = tabId ? tabMeta.get(tabId) : void 0;
+        await handlers.onEvent(panelId, event, msg.data, ctx, {
+          tabId,
+          sessionId: known?.sessionId,
+          workspaceId: known?.workspaceId
+        });
       } catch (err) {
         log("error", `panel event "${event}" handler threw: ${describe(err)}`);
       }
@@ -1119,18 +1183,25 @@ function plugin(handlers) {
           const pid = e.data?.panelId;
           if (pid) {
             portPanel.set(port, pid);
-            panelPorts.set(pid, port);
+            const ports = panelPorts.get(pid) ?? /* @__PURE__ */ new Set();
+            ports.add(port);
+            panelPorts.set(pid, ports);
           }
           void onPanelMessage(e.data, port);
         });
         try {
           port.on("close", () => {
             const pid = portPanel.get(port);
-            if (pid && panelPorts.get(pid) === port)
-              panelPorts.delete(pid);
+            if (pid) {
+              const ports = panelPorts.get(pid);
+              ports?.delete(port);
+              if (ports && ports.size === 0)
+                panelPorts.delete(pid);
+            }
             portPanel.delete(port);
             if (panelPort === port) {
-              panelPort = panelPorts.size > 0 ? [...panelPorts.values()][panelPorts.size - 1] : null;
+              const last = [...panelPorts.values()].at(-1);
+              panelPort = last ? [...last].at(-1) ?? null : null;
               if (!panelPort)
                 portClosed = true;
             }
@@ -1673,6 +1744,116 @@ function bucketFor(key) {
   return b;
 }
 __name(bucketFor, "bucketFor");
+var hostToEngine = /* @__PURE__ */ new Map();
+var engineToHost = /* @__PURE__ */ new Map();
+var hostSession = /* @__PURE__ */ new Map();
+var activeHostTab = null;
+var pendingHostFocus = /* @__PURE__ */ new Map();
+var loadedHosts = /* @__PURE__ */ new Set();
+function bindHostTab(hostTabId, engineTabId, sessionId) {
+  const oldEngine = hostToEngine.get(hostTabId);
+  if (oldEngine && engineToHost.get(oldEngine) === hostTabId) engineToHost.delete(oldEngine);
+  const oldHost = engineToHost.get(engineTabId);
+  if (oldHost && hostToEngine.get(oldHost) === engineTabId) hostToEngine.delete(oldHost);
+  hostToEngine.set(hostTabId, engineTabId);
+  engineToHost.set(engineTabId, hostTabId);
+  hostSession.set(hostTabId, sessionId ?? panelSession ?? null);
+}
+__name(bindHostTab, "bindHostTab");
+function unbindHostTab(hostTabId) {
+  const engine = hostToEngine.get(hostTabId);
+  if (engine && engineToHost.get(engine) === hostTabId) engineToHost.delete(engine);
+  hostToEngine.delete(hostTabId);
+  hostSession.delete(hostTabId);
+  loadedHosts.delete(hostTabId);
+  pendingHostFocus.delete(engine ?? "");
+  if (activeHostTab === hostTabId) activeHostTab = null;
+}
+__name(unbindHostTab, "unbindHostTab");
+function engineOfHost(hostTabId) {
+  return hostTabId ? hostToEngine.get(hostTabId) : void 0;
+}
+__name(engineOfHost, "engineOfHost");
+function hostOfEngine(engineTabId) {
+  return engineTabId ? engineToHost.get(engineTabId) : void 0;
+}
+__name(hostOfEngine, "hostOfEngine");
+async function showEngine(ctx, engineTabId, focus, sessionId) {
+  if (!engineTabId) return;
+  const hostTab = hostOfEngine(engineTabId);
+  const sameSession = hostTab ? sessionOfHost(hostTab) === (sessionId ?? panelSession) : false;
+  if (hostTab && sameSession) {
+    await ctx.call("panel.focusTab", { panelId: "browser", tabId: hostTab, focus }).catch(() => {
+    });
+    return;
+  }
+  pendingHostFocus.set(engineTabId, focus);
+  await ctx.call("panel.open", {
+    panelId: "browser",
+    focus,
+    params: { engineTabId }
+  }).catch(() => {
+  });
+}
+__name(showEngine, "showEngine");
+function sessionOfHost(hostTabId) {
+  return hostTabId ? hostSession.get(hostTabId) ?? null : null;
+}
+__name(sessionOfHost, "sessionOfHost");
+function rowOfEngine(engineTabId) {
+  if (!engineTabId) return void 0;
+  for (const b of tabBuckets.values()) {
+    const row = b.tabs.find((t) => t.id === engineTabId);
+    if (row) return row;
+  }
+  return void 0;
+}
+__name(rowOfEngine, "rowOfEngine");
+function syncHostTab(ctx, hostTabId) {
+  const engineId = engineOfHost(hostTabId);
+  const row = rowOfEngine(engineId);
+  const rawUrl = row?.url ?? "";
+  const blank = !rawUrl || /^about:blank/i.test(rawUrl);
+  const url = blank ? "" : rawUrl;
+  const title = blank ? "" : row?.title ?? "";
+  const loaded = !!engineId && !blank && (loadedHosts.has(hostTabId) || !!url);
+  void ctx.call("panel.updateTab", {
+    panelId: "browser",
+    tabId: hostTabId,
+    title: title || "",
+    params: loaded ? { engineTabId: engineId } : {}
+  }).catch(() => {
+  });
+}
+__name(syncHostTab, "syncHostTab");
+function pushHostState(ctx, hostTabId) {
+  const engineId = engineOfHost(hostTabId) ?? "";
+  const row = rowOfEngine(engineId);
+  const rawUrl = row?.url ?? "";
+  const blank = !rawUrl || /^about:blank/i.test(rawUrl);
+  const url = blank ? "" : rawUrl;
+  const title = blank ? "" : row?.title ?? "";
+  const b = bucketFor(bucketKey(sessionOfHost(hostTabId)));
+  ctx.send(
+    "browser",
+    "ui.tabs",
+    {
+      tabs: b.tabs,
+      activeTabId: engineId,
+      engineTabId: engineId,
+      split: null,
+      splitRatio: 0.5
+    },
+    hostTabId
+  );
+  ctx.send(
+    "browser",
+    "ui.urlChanged",
+    { url, title, favorited: isFavorite(url), private: privateMode },
+    hostTabId
+  );
+}
+__name(pushHostState, "pushHostState");
 function targetTabId(sessionKey, explicit) {
   if (typeof explicit === "string" && explicit) return explicit;
   return bucketFor(bucketKey(sessionKey)).activeTabId ?? void 0;
@@ -1732,8 +1913,25 @@ async function syncBucket(ctx) {
   }
 }
 __name(syncBucket, "syncBucket");
-function pushTabs(ctx) {
-  const b = bucketFor(bucketKey());
+function pushTabs(ctx, hostTabId) {
+  const b = bucketFor(bucketKey(sessionOfHost(hostTabId ?? activeHostTab)));
+  const target = hostTabId ?? activeHostTab ?? void 0;
+  if (target) {
+    const engineId = engineOfHost(target);
+    ctx.send(
+      "browser",
+      "ui.tabs",
+      {
+        tabs: b.tabs,
+        activeTabId: engineId ?? b.activeTabId ?? "",
+        engineTabId: engineId ?? "",
+        split: null,
+        splitRatio: 0.5
+      },
+      target
+    );
+    return;
+  }
   const data = { tabs: b.tabs, activeTabId: b.activeTabId ?? "", split: b.split, splitRatio: b.splitRatio };
   for (const panelId of panelTargets()) ctx.send(panelId, "ui.tabs", data);
 }
@@ -2157,7 +2355,7 @@ function recordVisit(url, title) {
   return entry;
 }
 __name(recordVisit, "recordVisit");
-function pushUrl(ctx, url, title) {
+function pushUrl(ctx, url, title, hostTabId) {
   lastUrl = url;
   const data = {
     url,
@@ -2165,6 +2363,11 @@ function pushUrl(ctx, url, title) {
     favorited: isFavorite(url),
     private: privateMode
   };
+  const target = hostTabId ?? activeHostTab ?? void 0;
+  if (target) {
+    ctx.send("browser", "ui.urlChanged", data, target);
+    return;
+  }
   for (const panelId of panelTargets()) ctx.send(panelId, "ui.urlChanged", data);
 }
 __name(pushUrl, "pushUrl");
@@ -2192,7 +2395,7 @@ async function refreshTitle(ctx, tabId) {
   }
   const url = String(state?.url ?? "");
   const title = String(state?.title ?? "");
-  if (!url || !title) return;
+  if (!url || !title || /^about:blank/i.test(url)) return;
   for (const b of tabBuckets.values()) {
     const row = b.tabs.find((t) => t.id === tabId);
     if (row) row.title = title;
@@ -2201,6 +2404,14 @@ async function refreshTitle(ctx, tabId) {
   if (entry && entry.title !== title) {
     entry.title = title;
     void save(ctx, HISTORY_KEY, history, "history");
+  }
+  const hostTab = hostOfEngine(tabId);
+  if (hostTab && sessionOfHost(hostTab) === panelSession) {
+    syncHostTab(ctx, hostTab);
+    if (hostTab === activeHostTab && urlKey(url) === urlKey(lastUrl)) {
+      pushUrl(ctx, url, title, hostTab);
+    }
+    return;
   }
   if (urlKey(url) === urlKey(lastUrl)) pushUrl(ctx, url, title);
 }
@@ -2467,34 +2678,111 @@ plugin({
     } catch {
     }
   },
-  async onPanelMounted(panelId, _params, ctx, meta) {
+  async onPanelMounted(panelId, params, ctx, meta) {
     mountedPanels.add(panelId);
-    panelSession = meta?.sessionId ?? panelSession;
+    const hostTabId = meta?.tabId ?? panelId ?? "browser";
+    const sessionId = meta?.sessionId ?? panelSession;
+    panelSession = sessionId ?? panelSession;
+    activeHostTab = hostTabId;
     await ensureLoaded(ctx);
     syncPoll(ctx);
-    await syncBucket(ctx);
-    scheduleInject(ctx);
-    const key = bucketKey();
-    const tabId = targetTabId(key);
-    if (tabId) {
+    const key = bucketKey(sessionId);
+    const p = params ?? {};
+    if (!p.engineTabId && !p.url) await syncBucketFor(ctx, key);
+    const b = bucketFor(key);
+    const wasLoaded = loadedHosts.has(hostTabId);
+    if (p.engineTabId || p.url || wasLoaded) loadedHosts.add(hostTabId);
+    else loadedHosts.delete(hostTabId);
+    let engineId = String(p.engineTabId ?? engineOfHost(hostTabId) ?? "");
+    if (engineId) {
       try {
-        const state = await ctx.call("browser.getUrl", { tabId });
-        if (state?.url) {
-          pushUrl(ctx, state.url, state.title);
-        } else if (lastUrl) {
-          pushUrl(ctx, lastUrl);
-        }
+        await ctx.call("browser.getUrl", { tabId: engineId });
       } catch {
-        if (lastUrl) pushUrl(ctx, lastUrl);
+        engineId = "";
+        loadedHosts.delete(hostTabId);
       }
     }
+    if (!engineId) {
+      const created = await ctx.call("browser.newTab", { sessionId: key });
+      engineId = String(created?.tabId ?? "");
+    }
+    if (engineId) {
+      const previousEngine = engineOfHost(hostTabId);
+      if (previousEngine && previousEngine !== engineId) {
+        await ctx.call("browser.closeTab", { tabId: previousEngine }).catch(() => {
+        });
+        for (const bucket of tabBuckets.values()) {
+          bucket.tabs = bucket.tabs.filter((t) => t.id !== previousEngine);
+        }
+      }
+      if (!b.tabs.some((t) => t.id === engineId)) {
+        b.tabs.push({ id: engineId, url: "", title: "" });
+      }
+      b.activeTabId = engineId;
+      bindHostTab(hostTabId, engineId, sessionId);
+      const pendingFocus = pendingHostFocus.get(engineId);
+      if (pendingFocus !== void 0) {
+        pendingHostFocus.delete(engineId);
+        if (pendingFocus) {
+          void ctx.call("panel.focusTab", { panelId: "browser", tabId: hostTabId, focus: true }).catch(() => {
+          });
+        }
+      }
+      try {
+        await ctx.call("browser.activateTab", { sessionId: key, tabId: engineId });
+      } catch {
+      }
+      if (p.url) {
+        loadedHosts.add(hostTabId);
+        try {
+          const result = await ctx.call(
+            "browser.navigate",
+            { url: normalizeUrl(p.url), tabId: engineId },
+            { timeoutMs: NAVIGATE_TIMEOUT_MS }
+          );
+          const row = b.tabs.find((t) => t.id === engineId);
+          if (row && result?.url) row.url = result.url;
+          if (row && result?.title) row.title = result.title;
+        } catch {
+        }
+      }
+    }
+    syncHostTab(ctx, hostTabId);
+    pushHostState(ctx, hostTabId);
+    scheduleInject(ctx);
   },
-  async onRequest(panelId, method, params, ctx) {
+  async onPanelActivated(panelId, _params, ctx, meta) {
+    const hostTabId = meta?.tabId ?? panelId ?? "browser";
+    activeHostTab = hostTabId;
+    const sessionId = meta?.sessionId ?? panelSession;
+    if (sessionId) panelSession = sessionId;
+    const engineId = engineOfHost(hostTabId);
+    if (engineId) {
+      const key = bucketKey(sessionId);
+      const b = bucketFor(key);
+      b.activeTabId = engineId;
+      try {
+        await ctx.call("browser.activateTab", { sessionId: key, tabId: engineId });
+      } catch {
+      }
+    }
+    syncHostTab(ctx, hostTabId);
+    pushHostState(ctx, hostTabId);
+  },
+  async onRequest(panelId, method, params, ctx, meta) {
     await ensureLoaded(ctx);
-    const key = bucketKey();
+    const hostTabId = meta?.tabId ?? activeHostTab ?? panelId ?? "browser";
+    const sessionId = meta?.sessionId ?? panelSession;
+    const key = bucketKey(sessionId);
+    const hostEngine = engineOfHost(hostTabId);
+    if (hostEngine) {
+      bucketFor(key).activeTabId = hostEngine;
+    }
     switch (method) {
       case "nav.open": {
         const t = await ensureTab(ctx, key);
+        bindHostTab(hostTabId, t.id, sessionId);
+        loadedHosts.add(hostTabId);
         const result = await ctx.call(
           "browser.navigate",
           { url: normalizeUrl(params.url), tabId: t.id },
@@ -2503,7 +2791,9 @@ plugin({
         if (result?.url) lastUrl = result.url;
         const row = bucketFor(key).tabs.find((x) => x.id === t.id);
         if (row && result?.url) row.url = result.url;
-        pushTabs(ctx);
+        if (row && result?.title) row.title = result.title;
+        await syncHostTab(ctx, hostTabId);
+        pushHostState(ctx, hostTabId);
         return { url: result?.url ?? "", title: result?.title ?? "" };
       }
       case "nav.back": {
@@ -2536,35 +2826,38 @@ plugin({
           );
           tab.url = result?.url ?? "";
         }
-        await syncBucket(ctx);
+        await ctx.call("panel.open", {
+          panelId: "browser",
+          focus: true,
+          params: { engineTabId: tab.id }
+        });
         return { tabId: tab.id };
       }
       case "tabs.activate": {
         const tabId = String(params.tabId ?? "");
         if (!tabId) throw new Error("tabs.activate: missing tabId");
         await ctx.call("browser.activateTab", { sessionId: key, tabId });
-        await syncBucket(ctx);
+        await ctx.call("panel.open", {
+          panelId: "browser",
+          focus: true,
+          params: { engineTabId: tabId }
+        });
         return { ok: true };
       }
       case "tabs.close": {
         const tabId = String(params.tabId ?? "");
         if (!tabId) throw new Error("tabs.close: missing tabId");
+        const hostTab = hostOfEngine(tabId);
+        if (hostTab && sessionOfHost(hostTab) === (sessionId ?? panelSession)) {
+          unbindHostTab(hostTab);
+          await ctx.call("panel.close", { panelId: "browser", tabId: hostTab }).catch(() => {
+          });
+        }
         await ctx.call("browser.closeTab", { tabId });
         const b = bucketFor(key);
         b.tabs = b.tabs.filter((t) => t.id !== tabId);
         if (b.activeTabId === tabId) {
           b.activeTabId = b.tabs.find((t) => !t.evicted)?.id ?? null;
-        }
-        if (b.split && (b.split[0] === tabId || b.split[1] === tabId)) {
-          b.split = null;
-          await ctx.call("browser.setSplitTabs", { sessionId: key, tabId: null }).catch(() => {
-          });
-        }
-        pushTabs(ctx);
-        const active = b.tabs.find((t) => t.id === b.activeTabId);
-        if (active?.url) {
-          lastUrl = active.url;
-          pushUrl(ctx, active.url, active.title);
         }
         return { ok: true };
       }
@@ -2633,9 +2926,10 @@ plugin({
           selPopup,
           clips: clips.length,
           tabs: b.tabs,
-          activeTabId: b.activeTabId ?? "",
-          split: b.split,
-          splitRatio: b.splitRatio
+          activeTabId: hostEngine ?? b.activeTabId ?? "",
+          engineTabId: hostEngine ?? "",
+          split: null,
+          splitRatio: 0.5
         };
       }
       // ── Omnibox ──
@@ -2856,14 +3150,37 @@ plugin({
       if (!b.tabs.some((t) => t.id === tabId2)) {
         b.tabs.push({ id: tabId2, url: String(d.url ?? ""), title: "" });
       }
-      pushTabs(ctx);
+      const eventSession = d.sessionId ?? panelSession;
+      if (!hostOfEngine(tabId2) && eventSession === panelSession) {
+        await ctx.call("panel.open", {
+          panelId: "browser",
+          focus: true,
+          params: { engineTabId: tabId2 }
+        }).catch(() => {
+        });
+      }
       return;
     }
     if (event !== "browser.urlChanged") return;
     await ensureLoaded(ctx);
     const tabId = String(d.tabId ?? "");
     const url = String(d.url ?? "");
-    if (!url) return;
+    if (!tabId || !url) return;
+    if (/^about:blank/i.test(url)) {
+      for (const b of tabBuckets.values()) {
+        const row = b.tabs.find((t) => t.id === tabId);
+        if (row) {
+          row.url = "";
+          row.title = "";
+        }
+      }
+      const hostTab2 = hostOfEngine(tabId);
+      if (hostTab2 && sessionOfHost(hostTab2) === panelSession) {
+        syncHostTab(ctx, hostTab2);
+        if (hostTab2 === activeHostTab) pushHostState(ctx, hostTab2);
+      }
+      return;
+    }
     if (recordVisit(url, "")) void save(ctx, HISTORY_KEY, history, "history");
     for (const b of tabBuckets.values()) {
       const row = b.tabs.find((t) => t.id === tabId);
@@ -2872,22 +3189,45 @@ plugin({
         break;
       }
     }
-    const visible = bucketFor(bucketKey());
-    if (tabId && visible.activeTabId && tabId !== visible.activeTabId) {
-      pushTabs(ctx);
+    const hostTab = hostOfEngine(tabId);
+    if (hostTab && sessionOfHost(hostTab) === panelSession) {
+      syncHostTab(ctx, hostTab);
+      if (hostTab === activeHostTab) {
+        lastUrl = url;
+        pushUrl(ctx, url, void 0, hostTab);
+      }
+      scheduleTitleRefresh(ctx, tabId);
+      scheduleInject(ctx);
       return;
     }
-    lastUrl = url;
-    pushUrl(ctx, url);
-    scheduleTitleRefresh(ctx, tabId || void 0);
-    scheduleInject(ctx);
+    scheduleTitleRefresh(ctx, tabId);
+  },
+  /** The host closed a browser tab: drop its engine tab too, so it stops
+   *  appearing in tab lists and does not keep running in the background. */
+  async onEvent(_panelId, event, data, ctx, meta) {
+    if (event !== "panel.closed") return;
+    const hostTabId = String(data?.tabId ?? meta?.tabId ?? "");
+    if (!hostTabId) return;
+    const engineId = hostOfEngine(hostTabId);
+    unbindHostTab(hostTabId);
+    if (!engineId) return;
+    await ctx.call("browser.closeTab", { tabId: engineId }).catch(() => {
+    });
+    for (const b of tabBuckets.values()) {
+      b.tabs = b.tabs.filter((t) => t.id !== engineId);
+      if (b.activeTabId === engineId) {
+        b.activeTabId = b.tabs.find((t) => !t.evicted)?.id ?? null;
+      }
+    }
   },
   async onTool(name, params, ctx, call) {
     const sessionKey = call?.sessionId ?? null;
     const tid = targetTabId(sessionKey, params.tab);
     const reveal = name === "browser_navigate" || name === "browser_walk" || name === "browser_screenshot" || name === "browser_show" || name === "browser_tab_open" || name === "browser_tab_switch";
-    void ctx.openPanel("browser", { focus: reveal }).catch(() => {
-    });
+    if (!["browser_navigate", "browser_tab_open", "browser_tab_switch"].includes(name)) {
+      const current = engineOfHost(activeHostTab) ?? tid;
+      if (current) void showEngine(ctx, current, reveal, sessionKey ?? panelSession);
+    }
     switch (name) {
       case "browser_navigate": {
         const url = normalizeUrl(params.url);
@@ -2896,7 +3236,9 @@ plugin({
         const finalUrl = result?.url ?? url;
         const row = bucketFor(bucketKey(sessionKey)).tabs.find((t) => t.id === tab.id);
         if (row) row.url = finalUrl;
-        pushTabs(ctx);
+        await showEngine(ctx, tab.id, true, sessionKey ?? panelSession);
+        const viaHost = hostOfEngine(tab.id);
+        if (viaHost) syncHostTab(ctx, viaHost);
         const head = `\u5DF2\u6253\u5F00 ${finalUrl}${result?.title ? ` \u2014 ${result.title}` : ""}`;
         if (result?.page?.authKind === "captcha") {
           return `${head}
@@ -2940,7 +3282,7 @@ plugin({
         const b = bucketFor(bucketKey(sessionKey));
         b.tabs.push(tab);
         b.activeTabId = tab.id;
-        pushTabs(ctx);
+        await showEngine(ctx, tab.id, true, sessionKey ?? panelSession);
         return `\u5DF2\u65B0\u5EFA\u6807\u7B7E\u9875 [${tab.id}]${tab.url ? ` \u2014 ${tab.url}` : ""}`;
       }
       case "browser_tab_switch": {
@@ -2949,13 +3291,19 @@ plugin({
         await ctx.call("browser.activateTab", { sessionId: bucketKey(sessionKey), tabId });
         const b = bucketFor(bucketKey(sessionKey));
         b.activeTabId = tabId;
-        pushTabs(ctx);
+        await showEngine(ctx, tabId, true, sessionKey ?? panelSession);
         const row = b.tabs.find((t) => t.id === tabId);
         return `\u5DF2\u5207\u6362\u5230\u6807\u7B7E\u9875 [${tabId}]${row?.title ? ` \u2014 ${row.title}` : ""}`;
       }
       case "browser_tab_close": {
         const tabId = String(params.tabId ?? "").trim();
         if (!tabId) throw new Error("browser_tab_close: missing tabId");
+        const hostTab = hostOfEngine(tabId);
+        if (hostTab && sessionOfHost(hostTab) === (sessionKey ?? panelSession)) {
+          unbindHostTab(hostTab);
+          await ctx.call("panel.close", { panelId: "browser", tabId: hostTab }).catch(() => {
+          });
+        }
         await ctx.call("browser.closeTab", { tabId });
         const b = bucketFor(bucketKey(sessionKey));
         b.tabs = b.tabs.filter((t) => t.id !== tabId);

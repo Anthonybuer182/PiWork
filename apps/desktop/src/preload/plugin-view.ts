@@ -24,6 +24,14 @@ import { contextBridge, ipcRenderer } from 'electron';
 
 const PLUGIN_ID =
   process.argv.find((a) => a.startsWith('--pi-plugin-id='))?.slice('--pi-plugin-id='.length) ?? '';
+/**
+ * The host tab this view belongs to. Singleton panels' tab key is their panel
+ * entry id; multi-instance panels append an instance suffix. It rides on every
+ * panel → backend message so a backend shared by several tabs can tell them
+ * apart (see `PluginHandlers.onRequest`'s meta).
+ */
+const TAB_KEY =
+  process.argv.find((a) => a.startsWith('--pi-tab-key='))?.slice('--pi-tab-key='.length) ?? '';
 
 interface PortLike {
   on(event: 'message', listener: (ev: { data: unknown }) => void): unknown;
@@ -145,15 +153,23 @@ ipcRenderer.on('pi:plugin:event', (_event, evt) => eventCallback?.(evt));
 /** Post to the backend, queueing while the port is still in flight. */
 function toBackend(payload: unknown): void {
   sentCount++;
+  let message = payload;
+  // Every message carries the originating tab. The backend SDK groups ports by
+  // panel id and uses this to route `ctx.send(panelId, …, tabId)` and to hand
+  // `tabId` to onRequest/onEvent. Older backends ignore the extra field.
+  if (TAB_KEY && payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    const record = payload as Record<string, unknown>;
+    if (record.tabId === undefined) message = { ...record, tabId: TAB_KEY };
+  }
   if (port) {
     try {
-      port.postMessage(payload);
+      port.postMessage(message);
       return;
     } catch {
       /* port closed mid-flight — fall through to the outbox */
     }
   }
-  outbox.push(payload);
+  outbox.push(message);
 }
 
 /**
@@ -167,23 +183,76 @@ ipcRenderer.on(
   'pi:plugin:panel-mounted',
   (
     _event,
-    msg: { panelId?: string; params?: unknown; sessionId?: string; workspaceId?: string },
+    msg: {
+      panelId?: string;
+      tabId?: string;
+      params?: unknown;
+      sessionId?: string;
+      workspaceId?: string;
+    },
   ) => {
     toBackend({
       kind: 'event',
       event: 'panel.mounted',
       panelId: msg?.panelId,
+      tabId: msg?.tabId ?? TAB_KEY,
       // sessionId rides in `data` (NOT in params): it identifies the
       // conversation the panel now serves, it is not an open param. Same for
       // workspaceId — it is the project the panel is serving.
       data: {
         panelId: msg?.panelId,
+        tabId: msg?.tabId ?? TAB_KEY,
         params: msg?.params,
         sessionId: msg?.sessionId,
         workspaceId: msg?.workspaceId,
       },
     });
     notifyWorkspace(msg?.workspaceId);
+  },
+);
+
+// The user switched to this tab. The backend keeps "current document / current
+// page" per conversation; this tells it which tab's state is current.
+ipcRenderer.on(
+  'pi:plugin:panel-activated',
+  (
+    _event,
+    msg: {
+      panelId?: string;
+      tabId?: string;
+      params?: unknown;
+      sessionId?: string;
+      workspaceId?: string;
+    },
+  ) => {
+    toBackend({
+      kind: 'event',
+      event: 'panel.activated',
+      panelId: msg?.panelId,
+      tabId: msg?.tabId ?? TAB_KEY,
+      data: {
+        panelId: msg?.panelId,
+        tabId: msg?.tabId ?? TAB_KEY,
+        params: msg?.params,
+        sessionId: msg?.sessionId,
+        workspaceId: msg?.workspaceId,
+      },
+    });
+  },
+);
+
+// The host tab was closed and this view is about to be destroyed. Multi-tab
+// backends use it to drop the per-tab state (open file, engine tab mapping).
+ipcRenderer.on(
+  'pi:plugin:panel-closed',
+  (_event, msg: { panelId?: string; tabId?: string }) => {
+    toBackend({
+      kind: 'event',
+      event: 'panel.closed',
+      panelId: msg?.panelId,
+      tabId: msg?.tabId ?? TAB_KEY,
+      data: { ...msg, tabId: msg?.tabId ?? TAB_KEY },
+    });
   },
 );
 
@@ -214,6 +283,8 @@ function notifyWorkspace(workspaceId: string | undefined): void {
 
 const bridge = {
   pluginId: PLUGIN_ID,
+  /** This view's host tab key (singleton: the panel entry id). */
+  tabId: TAB_KEY,
 
   /** Ask main for a MessagePort pair; the other end goes to the backend. */
   ensurePort: (pluginId?: string): Promise<{ ok: boolean; error?: string }> =>
@@ -333,6 +404,7 @@ const bridge = {
    */
   stats: (): Record<string, unknown> => ({
     pluginId: PLUGIN_ID,
+    tabId: TAB_KEY,
     portArrived: port !== null,
     portStyle: port ? (typeof (port as unknown as { on?: unknown }).on === 'function' ? 'emitter' : 'dom') : 'none',
     sent: sentCount,

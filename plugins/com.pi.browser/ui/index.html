@@ -361,6 +361,73 @@
       cursor: pointer;
     }
     #tabs .newtab:hover { background: hsl(var(--accent, 221 19% 17%)); }
+
+    /* ── Host tabs (2026-11) ─────────────────────────────────────────
+       The host owns the tab strip; the in-panel strip and the split view are
+       gone. A tab with no page shows the favorites page (DOM), which also
+       means the engine view must be hidden: #page-slot[hidden] reports 0×0
+       to the live slot. */
+    #tabs { display: none !important; }
+    #split-gutter, #page-slot-b { display: none !important; }
+    #page-slot[hidden] { display: none; }
+    #newtab {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      padding: 28px 24px;
+      background: hsl(var(--background, 222 19% 7%));
+    }
+    #newtab[hidden] { display: none; }
+    .nt-head {
+      max-width: 900px;
+      margin: 0 auto 14px;
+      font-size: 12px;
+      letter-spacing: 0.03em;
+      color: hsl(var(--muted-foreground, 217 9% 59%));
+      user-select: none;
+    }
+    .nt-grid {
+      max-width: 900px;
+      margin: 0 auto;
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+      gap: 10px;
+    }
+    .nt-card {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      padding: 12px;
+      border: 1px solid hsl(var(--border, 218 14% 20%));
+      border-radius: 10px;
+      background: hsl(var(--card, 222 15% 11%));
+      color: hsl(var(--foreground, 220 21% 92%));
+      text-align: left;
+      font: inherit;
+      cursor: pointer;
+    }
+    .nt-card:hover { background: hsl(var(--accent, 221 19% 17%)); }
+    .nt-title {
+      font-size: 13px;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .nt-url {
+      font-size: 11px;
+      color: hsl(var(--muted-foreground, 217 9% 59%));
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .nt-empty {
+      max-width: 900px;
+      margin: 48px auto 0;
+      text-align: center;
+      font-size: 12.5px;
+      color: hsl(var(--muted-foreground, 217 9% 59%));
+    }
   </style>
 </head>
 <body>
@@ -392,12 +459,22 @@
     <div id="page-slot-b"></div>
   </div>
 
+  <div id="newtab" hidden>
+    <div class="nt-head">收藏</div>
+    <div id="nt-favs" class="nt-grid"></div>
+    <div id="nt-empty" class="nt-empty" hidden>收藏的网页会出现在这里。打开一个网页，点地址栏右侧的 ★ 收藏。</div>
+  </div>
+
   <script>
     (function () {
       var input = document.getElementById('url');
       var omnibox = document.getElementById('omnibox');
       var list = document.getElementById('omni-list');
       var btnStar = document.getElementById('btn-star');
+      var pageSlot = document.getElementById('page-slot');
+      var newtab = document.getElementById('newtab');
+      var ntFavs = document.getElementById('nt-favs');
+      var ntEmpty = document.getElementById('nt-empty');
       var chkPrivate = document.getElementById('chk-private');
       var chkSel = document.getElementById('chk-sel');
       var btnClear = document.getElementById('btn-clear');
@@ -408,7 +485,9 @@
       // reports 0×0 — the host hides the view). A tab switch changes no DOM
       // size, so refresh() is what re-reports.
       var slotHandle = window.piSDK.liveSlot('page', document.getElementById('page-slot-a'), function () {
-        return state.activeTabId;
+        // Each host tab is bound to ONE engine tab (the backend pushes it as
+        // engineTabId). activeTabId is the legacy fallback.
+        return state.engineTabId || state.activeTabId;
       });
       var slotBHandle = window.piSDK.liveSlot('page-b', document.getElementById('page-slot-b'), function () {
         var s = state.split;
@@ -681,6 +760,7 @@
         active: -1,      // highlighted row across both sections
         tabs: [],        // this conversation's tabs (mirror of the backend)
         activeTabId: '',
+        engineTabId: '', // the engine tab THIS host tab shows
         split: null,     // [leftTabId, rightTabId] while the panes are split
         splitRatio: 0.5  // the panes' width share (primary's fraction)
       };
@@ -721,6 +801,54 @@
         btnStar.title = state.favorited
           ? '取消收藏（本站已记录的快捷方式会保留，可在地址栏删除）'
           : '收藏此页（收藏后本站重复的操作会记成快捷方式）';
+      }
+
+      // ── New-tab page (favorites) ──
+      // The host tab with no page is not blank: it shows the favorites grid.
+      // The engine view is a native layer, so it must be hidden while this
+      // DOM page is up — #page-slot[hidden] makes the live slot report 0×0.
+      var ntSeq = 0;
+      function syncNewTab() {
+        var empty = !state.url || /^about:blank/i.test(state.url);
+        newtab.hidden = !empty;
+        pageSlot.hidden = empty;
+        // Always force a report: hiding the parent changes the slot to 0×0,
+        // and the engine view must be told to hide even when the observer's
+        // batch lands after the first paint.
+        if (slotHandle && slotHandle.refresh) slotHandle.refresh();
+        if (!empty) return;
+        renderNewTab();
+      }
+      function renderNewTab() {
+        var seq = ++ntSeq;
+        window.piSDK.request('omnibox.search', { query: '' }).then(function (res) {
+          if (seq !== ntSeq) return;
+          var favs = (res && res.favorites) || [];
+          ntFavs.textContent = '';
+          ntEmpty.hidden = favs.length > 0;
+          for (var i = 0; i < favs.length; i++) {
+            (function (f) {
+              var card = document.createElement('button');
+              card.type = 'button';
+              card.className = 'nt-card';
+              card.title = f.url || '';
+              var title = document.createElement('span');
+              title.className = 'nt-title';
+              title.textContent = f.title || displayUrl(f.url);
+              var url = document.createElement('span');
+              url.className = 'nt-url';
+              url.textContent = displayUrl(f.url);
+              card.appendChild(title);
+              card.appendChild(url);
+              card.addEventListener('click', function () {
+                input.value = f.url;
+                state.url = f.url;
+                act('nav.open', { url: f.url });
+              });
+              ntFavs.appendChild(card);
+            })(favs[i]);
+          }
+        }).catch(function () {});
       }
 
       // ── Omnibox ──
@@ -1280,15 +1408,20 @@
           state.title = String(msg.data.title || '');
           state.favorited = msg.data.favorited === true;
           updateStar();
+          syncNewTab();
           if (!omnibox.hidden) refreshList();
         } else if (msg.event === 'ui.tabs') {
           state.tabs = msg.data.tabs || [];
           state.activeTabId = String(msg.data.activeTabId || '');
-          state.split = Array.isArray(msg.data.split) ? msg.data.split : null;
-          state.splitRatio = typeof msg.data.splitRatio === 'number' ? msg.data.splitRatio : 0.5;
+          state.engineTabId = String(msg.data.engineTabId || msg.data.activeTabId || '');
+          // The host owns tabs and has no split view.
+          state.split = null;
+          state.splitRatio = 0.5;
           renderTabs();
+          syncNewTab();
         } else if (msg.event === 'ui.favoritesChanged' || msg.event === 'ui.historyCleared') {
           if (!omnibox.hidden) refreshList();
+          if (!newtab.hidden) renderNewTab();
         } else if (msg.event === 'ui.recipesChanged') {
           // A recipe's health follows every run — the agent's runs included.
           if (!omnibox.hidden) refreshList();
@@ -1309,17 +1442,19 @@
         state.favorited = s.favorited === true;
         state.private = s.private === true;
         state.selPopup = s.selPopup !== false;
+        state.engineTabId = String(s.engineTabId || s.activeTabId || '');
         if (s.tabs) {
           state.tabs = s.tabs;
           state.activeTabId = String(s.activeTabId || '');
-          state.split = Array.isArray(s.split) ? s.split : null;
-          state.splitRatio = typeof s.splitRatio === 'number' ? s.splitRatio : 0.5;
+          state.split = null;
+          state.splitRatio = 0.5;
           applySplitClass();
           renderTabs();
         }
         chkPrivate.checked = state.private;
         chkSel.checked = state.selPopup;
         updateStar();
+        syncNewTab();
       }).catch(function () {});
     })();
   </script>
