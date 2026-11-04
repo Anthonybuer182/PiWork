@@ -24,9 +24,23 @@ export const EN_MESSAGES = {
   浅色: 'Light',
   深色: 'Dark',
   跟随系统: 'System',
-  '外观和语言保存在本机。': 'Appearance and language are stored on this device.',
+  '外观、语言和网络设置保存在本机。':
+    'Appearance, language and network settings are stored on this device.',
   '改动即时保存，关掉不丢。': 'Changes save as you make them.',
   未知错误: 'Unknown error',
+
+  // ── Network proxy (Settings → 通用) ──
+  网络代理: 'Network proxy',
+  直接连接: 'Direct connection',
+  手动配置: 'Manual',
+  '所有请求直接发出，不走代理。': 'Every request goes out directly, without a proxy.',
+  '所有请求都走这个代理。支持 http、https 和 socks5，改完立即生效。':
+    'Every request goes through this proxy. http, https and socks5 are supported; applies immediately.',
+  '跟随系统：{proxy}': 'Following the system: {proxy}',
+  '跟随系统：系统当前没有设置代理。': 'Following the system: no proxy is configured.',
+  代理地址: 'Proxy address',
+  '填好后按回车或点别处保存；也可以写 socks5://主机:端口。':
+    'Press Enter or click away to save. socks5://host:port works too.',
 
   // ── Model settings ──
   '服务商与模型 · ~/.pi/agent/models.json': 'Providers and models · ~/.pi/agent/models.json',

@@ -17,6 +17,7 @@ import { AskService, registerAskIpc } from '@main/asks';
 import { TodoService, registerTodoIpc } from '@main/todos';
 import { ToolSettingsService, registerToolSettingsIpc } from '@main/preferences/tools';
 import { StorageService, registerStorageIpc, applyStorageSettings } from '@main/storage';
+import { ProxyService, registerProxyIpc } from '@main/network';
 import { VoiceSettingsService } from '@main/voice/settings';
 import { resolveVoiceProvider } from '@main/voice/registry';
 import { registerVoiceIpc, warmLocalTts } from '@main/voice/ipc';
@@ -132,6 +133,14 @@ if (!gotLock) {
       const icon = join(app.getAppPath(), 'build/icon.png');
       if (existsSync(icon)) app.dock?.setIcon(icon);
     }
+
+    // Network (设置 → 通用 → 网络代理): route both Chromium and the main
+    // process's fetch through the chosen proxy. Installed before a window
+    // exists so the very first provider request already uses the right route;
+    // later changes re-apply to both stacks immediately.
+    const proxyService = new ProxyService(join(app.getPath('userData'), 'network.json'));
+    await proxyService.install();
+    registerProxyIpc(proxyService);
 
     const settingsManager = SettingsManager.create(app.getPath('home'));
 
