@@ -1119,7 +1119,7 @@ function CustomHttpFields({
         <Label htmlFor="voiceHeaders">{t('请求头（JSON）')}</Label>
         <textarea
           id="voiceHeaders"
-          className="mt-1 min-h-[56px] w-full rounded-md border bg-background px-2 py-1.5 font-mono text-[11px] outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="mt-1 min-h-[56px] w-full rounded-md border bg-background px-2 py-1.5 font-mono text-[11px] outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
           placeholder='{"X-Api-Key": "..."}'
           defaultValue={option('headers')}
           onBlur={(event) => setOption('headers', event.target.value)}
@@ -1129,7 +1129,7 @@ function CustomHttpFields({
         <Label htmlFor="voiceBodyTemplate">{t('请求体模板')}</Label>
         <textarea
           id="voiceBodyTemplate"
-          className="mt-1 min-h-[86px] w-full rounded-md border bg-background px-2 py-1.5 font-mono text-[11px] outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="mt-1 min-h-[86px] w-full rounded-md border bg-background px-2 py-1.5 font-mono text-[11px] outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
           placeholder={
             isStt
               ? '{"audio":"{{audio_base64}}","mimeType":"{{mime}}","language":"{{language}}","model":"{{model}}"}'

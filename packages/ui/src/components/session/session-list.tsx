@@ -72,7 +72,7 @@ export function SessionList() {
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
           onKeyDown={(e) => e.key === 'Escape' && setFilter('')}
-          className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
+          className="min-w-0 flex-1 bg-transparent text-xs outline-hidden placeholder:text-muted-foreground"
         />
       </div>
       {needle && visible.length === 0 && (

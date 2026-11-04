@@ -1268,7 +1268,7 @@ export function Composer() {
   return (
     <div
       className={cn(
-        'rounded-3xl border border-border bg-card shadow-sm mx-4 mb-4 overflow-visible transition-colors',
+        'rounded-3xl border border-border bg-card shadow-xs mx-4 mb-4 overflow-visible transition-colors',
         // 完全访问 states itself on its own control (red icon + label in
         // PermissionModeButton). Ringing the whole composer reads as "this
         // input is wrong" and paints every surrounding element red, so the

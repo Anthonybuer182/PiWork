@@ -138,7 +138,7 @@ function PendingApprovalFallback({ hostedToolCallIds }: { hostedToolCallIds: Set
         <div
           key={req.requestId}
           data-permission-fallback={req.requestId}
-          className="overflow-hidden rounded-md border border-amber-400/50 shadow-sm"
+          className="overflow-hidden rounded-md border border-amber-400/50 shadow-xs"
         >
           <PermissionRequestCard request={req} />
         </div>
@@ -171,7 +171,7 @@ function PendingAskFallback({ hostedToolCallIds }: { hostedToolCallIds: Set<stri
         <div
           key={req.requestId}
           data-ask-fallback={req.requestId}
-          className="overflow-hidden rounded-md border border-sky-400/50 shadow-sm"
+          className="overflow-hidden rounded-md border border-sky-400/50 shadow-xs"
         >
           <AskCard request={req} />
         </div>
@@ -563,7 +563,7 @@ export function ChatTimeline() {
       {isStreaming && !isAtBottom && (
         <button
           onClick={scrollToBottom}
-          className="absolute bottom-4 right-4 z-10 flex h-9 w-9 items-center justify-center rounded-full border bg-background shadow-sm hover:bg-muted transition-colors"
+          className="absolute bottom-4 right-4 z-10 flex h-9 w-9 items-center justify-center rounded-full border bg-background shadow-xs hover:bg-muted transition-colors"
           aria-label={t('滚动到底部')}
         >
           <ArrowDown className="h-4 w-4" />

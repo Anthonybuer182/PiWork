@@ -343,7 +343,7 @@ export function ComposerInput({
       onKeyDown={handleKeyDown}
       className={cn(
         'w-full bg-transparent px-3 py-2 text-sm',
-        'focus:outline-none',
+        'focus:outline-hidden',
         disabled && 'cursor-not-allowed opacity-50',
         // Placeholder via CSS :empty pseudo-class
         '[&:empty]:before:content-[attr(data-placeholder)] [&:empty]:before:text-muted-foreground',

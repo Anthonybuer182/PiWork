@@ -92,7 +92,7 @@ export function GeneralSettingsPage() {
                 onClick={() => setTheme(opt.value)}
                 className={cn(
                   'rounded px-2.5 py-1 text-xs transition-colors',
-                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                  'focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring',
                   theme === opt.value
                     ? 'bg-accent font-medium text-accent-foreground'
                     : 'text-muted-foreground hover:text-foreground',

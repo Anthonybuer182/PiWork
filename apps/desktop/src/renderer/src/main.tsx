@@ -2,7 +2,7 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { App } from './App';
 import { applyInitialWindowContext } from '@pi/ui';
-import '@pi/ui/globals.css';
+import './index.css';
 
 // Every BrowserWindow is told its workspace/session by main (URL query). Apply
 // it before the first render so a second window never flashes the first

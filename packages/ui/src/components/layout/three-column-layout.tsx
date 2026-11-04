@@ -647,7 +647,7 @@ export function ThreeColumnLayout({
               transform: 'translateX(-50%)',
             }}
           >
-            <span className="whitespace-nowrap rounded-full bg-primary px-2.5 py-1 text-[11px] font-medium leading-none text-primary-foreground shadow-sm">
+            <span className="whitespace-nowrap rounded-full bg-primary px-2.5 py-1 text-[11px] font-medium leading-none text-primary-foreground shadow-xs">
               {t('松开收起{label}', { label: hintLabel })}
             </span>
           </div>

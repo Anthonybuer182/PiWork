@@ -169,7 +169,7 @@ export function AskCard({ request }: { request: AskRequest }) {
               }
             }}
             placeholder={t('输入其他答案…')}
-            className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-muted-foreground/50"
+            className="min-w-0 flex-1 bg-transparent text-sm outline-hidden placeholder:text-muted-foreground/50"
           />
         </div>
       </div>

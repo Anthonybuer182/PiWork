@@ -87,7 +87,7 @@ export function SettingsDialog() {
         // A click on the dimmed backdrop must not discard a half-finished
         // form. Esc and the close button remain.
         onInteractOutside={(e) => e.preventDefault()}
-        className="h-[min(680px,calc(100vh-96px))] w-[min(940px,calc(100vw-96px))] max-w-none gap-0 overflow-hidden p-0 outline-none sm:rounded-xl"
+        className="h-[min(680px,calc(100vh-96px))] w-[min(940px,calc(100vw-96px))] max-w-none gap-0 overflow-hidden p-0 outline-hidden sm:rounded-xl"
       >
         <DialogTitle className="sr-only">{t('设置')}</DialogTitle>
         <DialogDescription className="sr-only">{t('配置模型服务商、技能和通用选项')}</DialogDescription>
@@ -112,7 +112,7 @@ export function SettingsDialog() {
                 onClick={() => setSection(id)}
                 className={cn(
                   'flex items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors',
-                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                  'focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring',
                   section === id
                     ? 'bg-accent font-medium text-accent-foreground'
                     : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',

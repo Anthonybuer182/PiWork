@@ -253,7 +253,7 @@ function MessageBubbleImpl({
                   ref={textareaRef}
                   className={cn(
                     'rounded-3xl bg-muted px-4 py-2.5 text-sm w-full min-w-[260px]',
-                    'resize-none outline-none ring-1 ring-border focus:ring-foreground/20',
+                    'resize-none outline-hidden ring-1 ring-border focus:ring-foreground/20',
                     'placeholder:text-muted-foreground/60 overflow-hidden',
                   )}
                   value={editingContent}

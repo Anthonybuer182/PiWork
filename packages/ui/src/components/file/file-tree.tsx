@@ -155,7 +155,7 @@ export function FileTree() {
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => e.key === 'Escape' && setQuery('')}
-          className="min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
+          className="min-w-0 flex-1 bg-transparent text-xs outline-hidden placeholder:text-muted-foreground"
         />
         {searching && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground shrink-0" />}
       </div>

@@ -150,7 +150,7 @@ export function PanelTabs({ region = 'right' }: { region?: PanelRegion }) {
         }}
         onDragEnd={endDrag}
         className={cn(
-          'group/tab relative flex h-8 max-w-[176px] shrink-0 items-center gap-2 rounded-lg px-2.5 text-[13px] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+          'group/tab relative flex h-8 max-w-[176px] shrink-0 items-center gap-2 rounded-lg px-2.5 text-[13px] transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring',
           active
             ? 'bg-accent text-accent-foreground'
             : 'text-muted-foreground hover:bg-accent/40 hover:text-foreground/80',
@@ -290,7 +290,7 @@ function PluginPickerList({
           onChange={(e) => setQuery(e.target.value)}
           placeholder={t('搜索插件…')}
           aria-label={t('搜索插件')}
-          className="h-10 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
+          className="h-10 w-full bg-transparent text-sm outline-hidden placeholder:text-muted-foreground"
           onKeyDown={(e) => {
             if (e.key === 'ArrowDown') {
               e.preventDefault();
