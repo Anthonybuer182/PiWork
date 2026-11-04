@@ -734,6 +734,61 @@ export const EN_MESSAGES = {
   'Kokoro 中文音色建议 48–52；MeloTTS 仅 0': 'Kokoro Chinese voices: try 48–52; MeloTTS only has voice 0',
   'Kokoro 中文音色建议 48–52，英文可试 0；MeloTTS 仅 0': 'Kokoro: Chinese voices 48–52, English try voice 0; MeloTTS only has voice 0',
   'JSON 中的 hex': 'hex string in JSON',
+
+  // ── Storage settings (Settings → 存储) ──
+  存储: 'Storage',
+  数据位置: 'Data location',
+  '会话记录、配置、插件和技能都放在这个文件夹里。换到更大的磁盘时，数据会跟着走。':
+    'Conversations, configuration, plugins and skills all live in this folder. Move it to a bigger disk and the data goes with it.',
+  '更改位置…': 'Change location…',
+  '选择中…': 'Choosing…',
+  '复制中…': 'Copying…',
+  '恢复默认': 'Use default',
+  '恢复中…': 'Restoring…',
+  '打开文件夹': 'Open folder',
+  '换位置时复制现有数据': 'Copy the current data to the new location',
+  '打开时会把当前文件夹里的内容复制到新位置；关掉则从空文件夹开始。目标文件夹里已经有数据时不会被覆盖，而是直接使用。':
+    'On copies everything from the current folder into the new one; off starts empty. A target that already holds data is used as-is — nothing is overwritten.',
+  '选择数据存放位置': 'Choose where to store data',
+  选择: 'Choose',
+  '已改为 {path}。这个文件夹里已经有数据，会直接使用其中的内容；重启后生效。':
+    'Changed to {path}. That folder already holds data, so it will be used as-is; takes effect after a restart.',
+  '已把 {n} 个文件复制到 {path}；重启后生效。':
+    'Copied {n} files to {path}; takes effect after a restart.',
+  '已改为 {path}，新位置是空的；重启后生效。':
+    'Changed to {path}. The new location is empty; takes effect after a restart.',
+  '已恢复到默认位置 {path}。默认位置已有数据，没有覆盖；重启后生效。':
+    'Restored the default location {path}. The default already holds data, so nothing was overwritten; takes effect after a restart.',
+  '已恢复到默认位置 {path}；重启后生效。':
+    'Restored the default location {path}; takes effect after a restart.',
+  '已恢复默认位置，当前就在使用默认位置。':
+    'Restored the default location — it is already the one in use.',
+  '新位置 {path} 会在重启后生效，现在仍在使用上面的位置。':
+    'The new location {path} takes effect after a restart; the location above is still in use.',
+  '改动会在重启后生效。': 'The change takes effect after a restart.',
+  立即重启: 'Restart now',
+  占用空间: 'Space used',
+  '共 {size}': '{size} in total',
+  '{n} 个文件': '{n} files',
+  '点一行在文件管理器中打开。大小包含文件夹里的全部内容，符号链接不计入。':
+    'Click a row to open it in your file manager. Sizes cover everything in the folder; symbolic links are not counted.',
+  会话记录: 'Conversations',
+  '所有对话的完整记录，包括分支和回退过的内容。':
+    'The complete record of every conversation, including branches and rewound content.',
+  '已安装插件的代码和它们自己的依赖。':
+    'Installed plugin code and the dependencies they bring along.',
+  技能与扩展: 'Skills & extensions',
+  '全局技能、扩展和自定义 agent。': 'Global skills, extensions and custom agents.',
+  运行时依赖: 'Runtime dependencies',
+  '插件用的 npm 包，以及 fd、rg 等内置命令行工具。':
+    'npm packages used by plugins, plus bundled command-line tools such as fd and rg.',
+  其他数据: 'Other data',
+  '全局配置、提示词、模型列表和模型凭据等小文件。':
+    'Small files: global configuration, prompts, the model list and credentials.',
+  应用数据: 'App data',
+  '窗口布局、语音模型、权限审计和 Chromium 缓存。':
+    'Window layout, voice models, the permission audit and Chromium caches.',
+  读取存储信息失败: 'Could not read storage information',
   // ---- END ----
 } as const;
 

@@ -16,6 +16,7 @@ import { PermissionService, installPermissionGate, registerPermissionIpc } from 
 import { AskService, registerAskIpc } from '@main/asks';
 import { TodoService, registerTodoIpc } from '@main/todos';
 import { ToolSettingsService, registerToolSettingsIpc } from '@main/preferences/tools';
+import { StorageService, registerStorageIpc, applyStorageSettings } from '@main/storage';
 import { VoiceSettingsService } from '@main/voice/settings';
 import { resolveVoiceProvider } from '@main/voice/registry';
 import { registerVoiceIpc, warmLocalTts } from '@main/voice/ipc';
@@ -68,6 +69,12 @@ function adoptLegacySettings(): void {
   }
 }
 adoptLegacySettings();
+
+// Settings → 存储 may have moved the agent's data directory. The SDK reads
+// `PI_CODING_AGENT_DIR` on every `getAgentDir()` call, but the plugin registry
+// captures the path when it is constructed — so the choice must be in the
+// environment before startup reaches any of that.
+applyStorageSettings();
 
 // Enable Chrome DevTools Protocol so external tooling (Playwright, DevTools)
 // can connect to the app's own webContents (including the embedded browser
@@ -200,6 +207,10 @@ if (!gotLock) {
       join(app.getPath('userData'), 'interaction-settings.json'),
     );
     registerToolSettingsIpc(toolSettings, () => toolCatalog);
+
+    // Storage (设置 → 存储): sizes and the agent data directory. The location
+    // itself was already applied at the top of this file, before startup.
+    registerStorageIpc(new StorageService(app.getPath('userData')));
 
     // Voice (设置 → 语音): provider list + preferences in userData/voice.json.
     // Vendor calls happen in main and local inference in a utility process;
