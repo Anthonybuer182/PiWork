@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   AudioLines,
+  Cable,
   Cpu,
   FileText,
   Hammer,
@@ -13,6 +14,7 @@ import { useUIStore } from '@/stores/ui-store';
 import { useI18n, type MessageKey } from '@/i18n';
 import { hasVoiceApi } from '@/lib/voice/voice-client';
 import { hasStorageApi } from '@/lib/storage-client';
+import { hasMcpApi } from '@/lib/mcp-client';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { GeneralSettingsPage } from './general-settings';
 import { ModelsSettingsPage } from './models-settings';
@@ -21,8 +23,9 @@ import { StorageSettingsPage } from './storage-settings';
 import { SkillsSettingsPage } from './skills-settings';
 import { ToolsSettingsPage } from './tools-settings';
 import { VoiceSettingsPage } from './voice-settings';
+import { McpSettingsPage } from './mcp-settings';
 
-type SectionId = 'general' | 'models' | 'context' | 'storage' | 'voice' | 'tools' | 'skills';
+type SectionId = 'general' | 'models' | 'context' | 'storage' | 'voice' | 'tools' | 'skills' | 'mcp';
 
 const SECTIONS: { id: SectionId; label: MessageKey; icon: typeof Cpu }[] = [
   { id: 'general', label: '通用', icon: SlidersHorizontal },
@@ -32,6 +35,7 @@ const SECTIONS: { id: SectionId; label: MessageKey; icon: typeof Cpu }[] = [
   { id: 'voice', label: '语音', icon: AudioLines },
   { id: 'tools', label: '工具', icon: Hammer },
   { id: 'skills', label: '技能', icon: Sparkles },
+  { id: 'mcp', label: 'MCP', icon: Cable },
 ];
 
 /**
@@ -76,7 +80,9 @@ export function SettingsDialog() {
   // playback path, so the section is absent rather than broken. Storage is
   // likewise about a directory the desktop app owns.
   const sections = SECTIONS.filter(
-    (s) => (s.id !== 'voice' || hasVoiceApi()) && (s.id !== 'storage' || hasStorageApi()),
+    (s) => (s.id !== 'voice' || hasVoiceApi())
+      && (s.id !== 'storage' || hasStorageApi())
+      && (s.id !== 'mcp' || hasMcpApi()),
   );
   const active = sections.find((s) => s.id === section) ?? sections[0];
 
@@ -139,6 +145,7 @@ export function SettingsDialog() {
               {section === 'voice' && hasVoiceApi() && <VoiceSettingsPage />}
               {section === 'tools' && <ToolsSettingsPage />}
               {section === 'skills' && <SkillsSettingsPage />}
+              {section === 'mcp' && hasMcpApi() && <McpSettingsPage />}
             </div>
           </div>
         </div>

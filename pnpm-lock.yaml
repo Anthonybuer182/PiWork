@@ -26,6 +26,9 @@ importers:
       '@earendil-works/pi-coding-agent':
         specifier: ^1.5.0
         version: 1.5.0(@aws-sdk/credential-provider-node@3.972.92)(@smithy/signature-v4@5.7.5)(ws@8.21.0)(zod@3.25.76)
+      '@earendil-works/pi-mcp':
+        specifier: 1.5.0
+        version: 1.5.0
       '@pi/sdk-wrapper':
         specifier: workspace:*
         version: link:../../packages/sdk-wrapper

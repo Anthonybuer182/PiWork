@@ -39,6 +39,8 @@ export interface RegisterIpcHandlersOptions {
   getGlobalDisabledTools?: RealChatServiceOptions['getGlobalDisabledTools'];
   /** Called after the run is aborted and before the session file is removed. */
   onSessionDeleted?: (sessionId: string) => void;
+  /** MCP servers — see RealChatServiceOptions.mcp. */
+  mcp?: RealChatServiceOptions['mcp'];
 }
 
 let onSessionDeletedHook: ((sessionId: string) => void) | undefined;
@@ -65,6 +67,7 @@ export function registerIpcHandlers(
     pluginDocsProvider: options?.pluginDocsProvider,
     onSessionCreated: options?.onSessionCreated,
     getGlobalDisabledTools: options?.getGlobalDisabledTools,
+    mcp: options?.mcp,
   });
 
   // The renderer owns "which workspace is on screen" — a view fact, not a

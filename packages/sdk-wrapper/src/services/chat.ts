@@ -60,6 +60,9 @@ export interface ChatService {
   /** Optional: tear down cached sessions so the next prompt rebuilds them
    *  (plugin tool/skill sets changing at runtime). */
   invalidateSessions?(): void;
+  /** Optional: retire every cached session (app quit). Extensions such as MCP
+   *  close their child processes on `session_shutdown`. */
+  dispose?(): Promise<void>;
   sendMessage(params: SendMessageParams): Promise<Message>;
   sendMessageStream(
     params: SendMessageParams,

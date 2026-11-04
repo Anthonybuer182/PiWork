@@ -16,3 +16,4 @@ export * from './network.js';
 export * from './permission.js';
 export * from './interaction.js';
 export * from './plugin/index.js';
+export * from './mcp.js';

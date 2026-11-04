@@ -3,8 +3,8 @@ import { statSync, readFileSync, existsSync } from 'node:fs';
 import type { ChatService, SendMessageParams, StreamChunk } from '../services/chat.js';
 import type { Message, AssistantMessage, ContentBlock, ToolResultBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, AgentContextConfig, AgentContextReloadResult, AgentToolInfo, AppendSegmentInfo, ContextFileInfo, ContextFileScope, PromptFileInfo, GlobalContextFile, GlobalContextInfo, ModelCapabilities } from '@pi/types';
 import { ASK_TOOL_NAME, TODO_TOOL_NAME } from '@pi/types';
-import { createAgentSession, SessionManager, DefaultResourceLoader, getAgentDir, SettingsManager, formatSkillsForPrompt } from '@earendil-works/pi-coding-agent';
-import type { AgentSession, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, SessionManager, DefaultResourceLoader, getAgentDir, SettingsManager, formatSkillsForPrompt, createMcpExtension, createToolSearchExtension } from '@earendil-works/pi-coding-agent';
+import type { AgentSession, InlineExtension, McpExtensionOptions, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
 import { createModelRegistry, getSharedModelRuntime } from './model-runtime.js';
 import { extractThinkContent } from '../utils/think-parser.js';
 import { deleteFileWithMtimeGuard, writeFileWithMtimeGuard } from '../utils/safe-write.js';
@@ -261,6 +261,20 @@ export function buildAppendSystemPromptOverride(
   ];
 }
 
+/**
+ * MCP wiring. Servers live in `mcp.json` (read by the SDK's own extension), so
+ * the host only decides whether this workspace has any enabled server and how
+ * the extension is configured.
+ */
+export interface McpChatOptions {
+  /** Built per session that has MCP enabled; see `createMcpExtension`. */
+  extensionOptions: () => McpExtensionOptions;
+  /** Whether this workspace has at least one enabled MCP server. */
+  enabled: (cwd: string) => boolean;
+  /** Tool the model uses to discover deferred MCP tools. Default: `tool_search`. */
+  discoveryTool?: string;
+}
+
 export interface RealChatServiceOptions {
   customToolsProvider?: () => unknown[];
   /** Enabled plugins' PLUGIN.md index. Read per session, so installs take effect without a restart. */
@@ -279,6 +293,26 @@ export interface RealChatServiceOptions {
    * by a stale renderer.
    */
   getGlobalDisabledTools?: () => string[];
+  /** MCP servers, when the host supports them. Omit to keep MCP off entirely. */
+  mcp?: McpChatOptions;
+}
+
+/**
+ * Tear a cached session down the way the SDK expects.
+ *
+ * Extensions receive `session_shutdown`; the MCP extension closes its stdio
+ * children and HTTP streams there. Dropping a session with `unsubscribe()`
+ * alone (what this adapter used to do) leaves those processes running, so
+ * every workspace switch or plugin reload would leak one process per server.
+ */
+export async function retireSession(
+  session: AgentSession,
+  reason: 'quit' | 'reload' | 'new' = 'new',
+): Promise<void> {
+  try {
+    await session.extensionRunner.emit({ type: 'session_shutdown', reason });
+  } catch { /* best-effort */ }
+  try { session.dispose(); } catch { /* best-effort */ }
 }
 
 export function createRealChatService(
@@ -361,6 +395,32 @@ export function createRealChatService(
   // so the streaming adapter and the session loader share one implementation.
   // detectWrittenFiles and getMimeType are imported from ../utils/file-detection.js
 
+  /**
+   * Extensions to load for a workspace.
+   *
+   * MCP is opt-in per workspace: with no enabled servers the app behaves
+   * exactly as before (no extension, no `tool_search`). When servers exist the
+   * SDK's own MCP extension owns the protocol, transports and tool lifecycle;
+   * `tool_search` is what makes `deferred` tools reachable for the model.
+   */
+  function mcpExtensionFactories(workCwd: string): InlineExtension[] {
+    if (!options?.mcp?.enabled(workCwd)) return [];
+    return [
+      {
+        name: 'mcp',
+        factory: createMcpExtension(options.mcp.extensionOptions()),
+        builtin: true,
+        replaceable: true,
+      },
+      {
+        name: 'tool-search',
+        factory: createToolSearchExtension(),
+        builtin: true,
+        replaceable: true,
+      },
+    ];
+  }
+
   async function createResourceLoader(
     workCwd: string,
     selectedSkillIds?: string[],
@@ -373,6 +433,7 @@ export function createRealChatService(
     const resourceLoader = new DefaultResourceLoader({
       cwd: workCwd,
       agentDir: getAgentDir(),
+      extensionFactories: mcpExtensionFactories(workCwd),
       appendSystemPromptOverride: buildAppendSystemPromptOverride(pluginDocs, toolNames, capabilities),
       skillsOverride: selectedSkillIds
         ? (base) => {
@@ -413,6 +474,7 @@ export function createRealChatService(
         effectiveCapabilities = modelCapabilitiesOf(stale.session.model) ?? null;
       }
       try { stale.unsubscribe(); } catch { /* best-effort */ }
+      await retireSession(stale.session, 'new');
       activeSessions.delete(key);
       staleSessions.delete(key);
     }
@@ -464,6 +526,7 @@ export function createRealChatService(
       }
       // cwd / skills / tools / capabilities mismatch — tear down and create a new session
       cached.unsubscribe();
+      await retireSession(cached.session, 'new');
       activeSessions.delete(key);
     }
     let sessionManager: SessionManager;
@@ -481,6 +544,13 @@ export function createRealChatService(
     const customTools = options?.customToolsProvider?.() ?? [];
     const toolNames = toolNamesOf(customTools);
     for (const name of effectiveDisabled) toolNames.delete(name);
+
+    // `tool_search` is how the model reaches deferred MCP tools. It is only
+    // added when this workspace has MCP servers, so an MCP-free workspace
+    // keeps exactly the same tool list as before.
+    if (options?.mcp?.enabled(workCwd)) {
+      toolNames.add(options.mcp.discoveryTool ?? 'tool_search');
+    }
 
     // `tools` is an ALLOWLIST in the SDK, not just "which built-ins to switch
     // on": `createAgentSession` turns it into `allowedToolNames`, and
@@ -505,6 +575,11 @@ export function createRealChatService(
       // built-ins and custom tools alike.
       excludeTools: effectiveDisabled.length > 0 ? effectiveDisabled : undefined,
     });
+
+    // Extensions only start when the host binds them: `session_start` is
+    // emitted here, and that is what makes the MCP extension connect its
+    // servers. Without this call the extensions load but never run.
+    await session.bindExtensions({});
 
     // Host-level per-session hooks (permission gate, audit, …). Runs before the
     // session is cached so the gate is live for the very first prompt.
@@ -1052,9 +1127,19 @@ export function createRealChatService(
           continue;
         }
         try { cached.unsubscribe(); } catch { /* best-effort */ }
+        void retireSession(cached.session, 'reload');
         activeSessions.delete(key);
         staleSessions.delete(key);
       }
+    },
+
+    /** Retire every cached session. Called on app quit so extensions (notably
+     *  MCP stdio servers) get `session_shutdown` instead of dying with us. */
+    async dispose(): Promise<void> {
+      const sessions = [...activeSessions.values()].map((entry) => entry.session);
+      activeSessions.clear();
+      staleSessions.clear();
+      await Promise.all(sessions.map((session) => retireSession(session, 'quit')));
     },
 
     getAgentContextConfig(
@@ -1631,19 +1716,22 @@ export function createRealChatService(
         if (entry) {
           try { await entry.session.abort(); } catch { /* ignore */ }
           entry.unsubscribe();
+          await retireSession(entry.session, 'new');
           activeSessions.delete(sessionId);
           staleSessions.delete(sessionId);
         }
         return;
       }
       // Abort all active sessions (backward compatibility)
-      for (const [, { session }] of activeSessions) {
+      const sessions = [...activeSessions.values()].map((entry) => entry.session);
+      for (const session of sessions) {
         try {
           await session.abort();
         } catch { /* ignore */ }
       }
       activeSessions.clear();
       staleSessions.clear();
+      await Promise.all(sessions.map((session) => retireSession(session, 'new')));
     },
 
     async steer(sessionId: string, content: string, images?: { name: string; mimeType: string; data: string }[]): Promise<void> {

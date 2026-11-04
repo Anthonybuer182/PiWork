@@ -1,4 +1,4 @@
-import { app } from 'electron';
+import { app, shell } from 'electron';
 import { APP_NAME } from '@main/branding';
 import { registerIpcHandlers } from '@main/ipc/index';
 import { registerNativeIpcHandlers } from '@main/ipc/native';
@@ -8,6 +8,8 @@ import { setSharedModelRuntime } from '@pi/sdk-wrapper/adapters';
 import { copyFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { ENGINE_UA, VlmAnalyzer } from '@main/browser';
+import { McpConfigStore } from '@main/mcp/config-store';
+import { registerMcpIpc } from '@main/mcp/ipc';
 import { persistBrowserSessionCookies } from '@main/browser/browser-session';
 import { PluginSystem, registerPluginSchemePrivileges } from '@main/plugins';
 import { registerPluginIpcHandlers } from '@main/ipc/plugins';
@@ -225,6 +227,13 @@ if (!gotLock) {
     // itself was already applied at the top of this file, before startup.
     registerStorageIpc(new StorageService(app.getPath('userData')));
 
+    // MCP servers (设置 → MCP). The config is pi's own `mcp.json`, so the CLI
+    // and the app share one list; which workspaces may run a project-scoped
+    // file is PiWork's own decision and lives in userData.
+    const mcpStore = new McpConfigStore({
+      trustPath: join(app.getPath('userData'), 'mcp-trust.json'),
+    });
+
     // Voice (设置 → 语音): provider list + preferences in userData/voice.json.
     // Vendor calls happen in main and local inference in a utility process;
     // the renderer only records, encodes WAV and plays back audio, so vendor
@@ -344,6 +353,22 @@ if (!gotLock) {
       customToolsProvider: () => [...hostTools, ...pluginSystem.aggregateTools()],
       getGlobalDisabledTools: () => toolSettings.getDisabled(),
       pluginDocsProvider: () => pluginSystem.listPluginDocs(),
+      mcp: {
+        enabled: (cwd) => mcpStore.hasEnabledServers(cwd),
+        extensionOptions: () => ({
+          // Read through the store so the app and the SDK agree on exposure
+          // normalization and on which project files count as trusted.
+          loadConfig: (ctx) => mcpStore.loadForSession(ctx.cwd),
+          // OAuth sign-in for HTTP servers: hand the URL to the OS only when
+          // it is a web URL.
+          openUrl: (url) => {
+            try {
+              const parsed = new URL(url);
+              if (parsed.protocol === 'http:' || parsed.protocol === 'https:') void shell.openExternal(url);
+            } catch { /* ignore malformed URLs */ }
+          },
+        }),
+      },
       onSessionCreated: (session, info) => {
         rememberSessionWorkspace(info.sessionKey, info.cwd);
         installPermissionGate(session, info.sessionKey, permissionService);
@@ -361,6 +386,10 @@ if (!gotLock) {
         windows.releaseActiveSession(sessionId);
       },
     });
+    registerMcpIpc(mcpStore, {
+      invalidateSessions: () => chatService.invalidateSessions?.(),
+    });
+
     // A plugin write/delete may have changed a .pi prompt file or an AGENTS.md
     // the agent already loaded. Rebuild the affected live sessions so the save
     // applies to the next turn instead of waiting for a new session.
@@ -465,7 +494,13 @@ if (!gotLock) {
       event.preventDefault();
       const timeout = new Promise<void>((resolve) => setTimeout(resolve, 1_500));
       void Promise.race([
-        persistBrowserSessionCookies().then(() => undefined),
+        Promise.all([
+          persistBrowserSessionCookies().then(() => undefined),
+          // Retire cached agent sessions first: extensions close their child
+          // processes (MCP stdio servers) on `session_shutdown`, and killing
+          // the app without it leaves them orphaned.
+          chatService.dispose?.() ?? Promise.resolve(),
+        ]),
         timeout,
       ])
         .catch((err) => {

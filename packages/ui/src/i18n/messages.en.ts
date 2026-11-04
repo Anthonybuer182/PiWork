@@ -803,6 +803,54 @@ export const EN_MESSAGES = {
   '窗口布局、语音模型、权限审计和 Chromium 缓存。':
     'Window layout, voice models, the permission audit and Chromium caches.',
   读取存储信息失败: 'Could not read storage information',
+  // ── MCP (Settings → MCP) ──
+  MCP: 'MCP',
+  'MCP 服务器': 'MCP servers',
+  'MCP 仅在桌面应用中可用。': 'MCP is only available in the desktop app.',
+  '接入 Model Context Protocol 服务器。工具不会常驻提示词——模型需要时通过搜索发现，避免多服务器撑爆上下文。':
+    'Connect Model Context Protocol servers. Their tools are not kept in the prompt — the model discovers them on demand, so many servers do not crowd out the context.',
+  '本项目': 'This project',
+  '添加服务器': 'Add server',
+  '添加 MCP 服务器': 'Add MCP server',
+  '编辑 MCP 服务器': 'Edit MCP server',
+  '传输方式': 'Transport',
+  '本地命令 (stdio)': 'Local command (stdio)',
+  '远程服务 (HTTP)': 'Remote server (HTTP)',
+  '命令': 'Command',
+  '参数（每行一个）': 'Arguments (one per line)',
+  '环境变量（每行 KEY=value）': 'Environment (KEY=value per line)',
+  '环境变量格式应为 KEY=value，每行一条': 'Each environment line must look like KEY=value',
+  '工作目录（可选）': 'Working directory (optional)',
+  '地址': 'URL',
+  '请求头（每行 Name: value）': 'Headers (Name: value per line)',
+  '请求头格式应为 Name: value，每行一条': 'Each header line must look like Name: value',
+  '说明（可选）': 'Description (optional)',
+  '一句话描述这个服务器提供什么': 'One line about what this server offers',
+  '超时（秒）': 'Timeout (seconds)',
+  '按需加载工具': 'Load tools on demand',
+  '测试连接': 'Test connection',
+  '连接成功：协议 {version}，发现 {count} 个工具': 'Connected: protocol {version}, {count} tools',
+  '连接失败：{message}': 'Connection failed: {message}',
+  '连接失败': 'Connection failed',
+  '{name} 连接成功：协议 {version}，{count} 个工具': '{name} connected: protocol {version}, {count} tools',
+  '{name} 连接失败：{message}': '{name} failed: {message}',
+  '可用 · {count} 个工具': 'Ready · {count} tools',
+  '这个命令会在本机执行，并继承 PiWork 的环境变量（包括 API Key）。只添加你信任的服务器。':
+    "This command runs on your machine and inherits PiWork's environment, including API keys. Only add servers you trust.",
+  '此配置写入全局 mcp.json，与 pi 命令行共享。': 'Saved to the global mcp.json, shared with the pi CLI.',
+  '此配置写入当前工作区的 .pi/mcp.json，只在本工作区生效。':
+    "Saved to this workspace's .pi/mcp.json; it applies only here.",
+  '允许本项目运行 MCP 服务器': 'Allow this project to run MCP servers',
+  '项目里的 .pi/mcp.json 可以执行本机命令。只在你信任这个仓库时开启。':
+    "A project's .pi/mcp.json can run local commands. Turn this on only for repositories you trust.",
+  '配置文件有问题': 'Problems in the config file',
+  '还没有配置 MCP 服务器。添加一个，或在 pi 命令行里用 mcp add 添加，两边共享同一份配置。':
+    'No MCP servers yet. Add one here, or with "mcp add" in the pi CLI — both share the same file.',
+  '这个工作区还没有项目级的 MCP 服务器。': 'This workspace has no project-scoped MCP servers.',
+  '项目覆盖': 'Project override',
+  '删除 MCP 服务器？': 'Delete MCP server?',
+  '将从配置文件中移除 {name}，已打开会话中的工具会在下一条消息后失效。':
+    'Removes {name} from the config file. Tools in open sessions stop working after the next message.',
   // ---- END ----
 } as const;
 
