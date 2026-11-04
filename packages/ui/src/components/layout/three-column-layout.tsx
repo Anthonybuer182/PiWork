@@ -688,7 +688,7 @@ export function ThreeColumnLayout({
                 sidebarOpen ? { width: currentLeftWidth, transition: widthTransition } : undefined
               }
               className={cn(
-                'flex-shrink-0 overflow-hidden border-r',
+                'shrink-0 overflow-hidden border-r',
                 !sidebarOpen && 'hidden',
               )}
             >
@@ -748,7 +748,7 @@ export function ThreeColumnLayout({
               }}
               className={cn(
                 'overflow-hidden flex flex-col',
-                rightTakesCenter ? 'min-w-0 flex-1' : 'flex-shrink-0',
+                rightTakesCenter ? 'min-w-0 flex-1' : 'shrink-0',
               )}
             >
               <div className="flex-1 overflow-hidden">{rightPanel}</div>
