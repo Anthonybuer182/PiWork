@@ -83,8 +83,9 @@ writeModelsJson(INITIAL_MODELS_JSON);
 
 // ── Test 1: ModelRegistry loads models with correct input ──
 test('ModelRegistry loads MiniMax-M3 with input: ["text"] initially', async () => {
-  const { ModelRegistry, AuthStorage } = await import('@earendil-works/pi-coding-agent');
-  const registry = ModelRegistry.create(AuthStorage.inMemory());
+  const { ModelRegistry, ModelRuntime } = await import('@earendil-works/pi-coding-agent');
+  // pi 1.x: the async runtime owns the catalog; the registry is a sync facade.
+  const registry = new ModelRegistry(await ModelRuntime.create({ allowModelNetwork: false }));
 
   const minimaxM3 = registry.getAll().find(m => m.id === 'MiniMax-M3');
   assert(minimaxM3, 'MiniMax-M3 should be in the registry');
@@ -162,8 +163,9 @@ test('migrateModelsConfig is idempotent', async () => {
 test('registry.refresh() reloads patched MiniMax-M3 with image support', async () => {
   // At this point, models.json has MiniMax-M3 with input: ["text", "image"]
   // (patched by test 2). Let's create a registry and verify.
-  const { ModelRegistry, AuthStorage } = await import('@earendil-works/pi-coding-agent');
-  const registry = ModelRegistry.create(AuthStorage.inMemory());
+  const { ModelRegistry, ModelRuntime } = await import('@earendil-works/pi-coding-agent');
+  // pi 1.x: the async runtime owns the catalog; the registry is a sync facade.
+  const registry = new ModelRegistry(await ModelRuntime.create({ allowModelNetwork: false }));
 
   const minimaxM3 = registry.getAll().find(m => m.id === 'MiniMax-M3');
   assert(minimaxM3, 'MiniMax-M3 should be in the registry');
@@ -178,11 +180,11 @@ test('chat.ts flow: migrate + refresh updates in-memory model', async () => {
   // Reset to initial state
   writeModelsJson(INITIAL_MODELS_JSON);
 
-  const { ModelRegistry, AuthStorage } = await import('@earendil-works/pi-coding-agent');
+  const { ModelRegistry, ModelRuntime } = await import('@earendil-works/pi-coding-agent');
   const { migrateModelsConfig } = await import('../../../packages/sdk-wrapper/src/adapters/config.ts');
 
   // Simulate app startup: registry loaded BEFORE migration
-  const registry = ModelRegistry.create(AuthStorage.inMemory());
+  const registry = new ModelRegistry(await ModelRuntime.create({ allowModelNetwork: false }));
 
   // At this point, in-memory model has input: ["text"]
   const beforeModel = registry.getAll().find(m => m.id === 'MiniMax-M3');
@@ -193,7 +195,7 @@ test('chat.ts flow: migrate + refresh updates in-memory model', async () => {
 
   // Simulate chat.ts flow: migrate + refresh (this is what our fix does)
   migrateModelsConfig();
-  registry.refresh();
+  await registry.refresh();
 
   // After refresh, in-memory model should have input: ["text", "image"]
   const afterModel = registry.getAll().find(m => m.id === 'MiniMax-M3');
@@ -217,16 +219,16 @@ test('Already-patched file: migrate returns 0, refresh still works', async () =>
   // models.json already has MiniMax-M3 with input: ["text", "image"]
   // (set by test 5's migrateModelsConfig)
 
-  const { ModelRegistry, AuthStorage } = await import('@earendil-works/pi-coding-agent');
+  const { ModelRegistry, ModelRuntime } = await import('@earendil-works/pi-coding-agent');
   const { migrateModelsConfig } = await import('../../../packages/sdk-wrapper/src/adapters/config.ts');
 
   // Simulate app startup with already-patched config
-  const registry = ModelRegistry.create(AuthStorage.inMemory());
+  const registry = new ModelRegistry(await ModelRuntime.create({ allowModelNetwork: false }));
 
   // Migration returns 0 (nothing to patch) but we still call refresh()
   const patched = migrateModelsConfig();
   assert(patched === 0, `Expected 0 models patched (already done), got ${patched}`);
-  registry.refresh();  // This is the KEY: always refresh regardless of migration result
+  await registry.refresh();  // This is the KEY: always refresh regardless of migration result
 
   const model = registry.getAll().find(m => m.id === 'MiniMax-M3');
   assert(model, 'MiniMax-M3 should be in the registry');

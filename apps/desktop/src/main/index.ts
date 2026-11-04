@@ -3,7 +3,8 @@ import { APP_NAME } from '@main/branding';
 import { registerIpcHandlers } from '@main/ipc/index';
 import { registerNativeIpcHandlers } from '@main/ipc/native';
 import { registerWindowIpcHandlers } from '@main/ipc/windows';
-import { SettingsManager, ModelRegistry, AuthStorage } from '@earendil-works/pi-coding-agent';
+import { SettingsManager, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { setSharedModelRuntime } from '@pi/sdk-wrapper/adapters';
 import { copyFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { ENGINE_UA, VlmAnalyzer } from '@main/browser';
@@ -144,9 +145,12 @@ if (!gotLock) {
 
     const settingsManager = SettingsManager.create(app.getPath('home'));
 
-    // Shared ModelRegistry — used by the chat service and the browser walk
-    // planner's VLM analyzer.
-    const sharedModelRegistry = ModelRegistry.create(AuthStorage.inMemory());
+    // Shared ModelRuntime — used by the chat service and the browser walk
+    // planner's VLM analyzer. pi 1.x resolves models and credentials through an
+    // async runtime; the registry is only a synchronous read facade over it.
+    const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+    setSharedModelRuntime(modelRuntime);
+    const sharedModelRegistry = new ModelRegistry(modelRuntime);
     // VLM analyzer for goal-directed browser navigation (gracefully handles
     // missing VLM config).
     const vlmAnalyzer = new VlmAnalyzer(sharedModelRegistry, { timeoutMs: 15000 });
@@ -334,7 +338,7 @@ if (!gotLock) {
     // filled in below and read through this closure.
     let hostTools: AgentCustomTool[] = [];
 
-    const { chatService } = registerIpcHandlers(settingsManager, sharedModelRegistry, {
+    const { chatService } = registerIpcHandlers(settingsManager, modelRuntime, {
       // The full set; the per-session allow/deny decision is applied by the
       // adapter through `excludedToolNames`, which covers built-ins too.
       customToolsProvider: () => [...hostTools, ...pluginSystem.aggregateTools()],

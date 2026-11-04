@@ -5,8 +5,10 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { APP_NAME } from './branding';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// Named moduleDir, not __dirname: electron-vite 6 injects its own
+// __filename/__dirname shim into the ESM main bundle, and a second
+// declaration is a SyntaxError at load.
+const moduleDir = path.dirname(fileURLToPath(import.meta.url));
 
 /**
  * Icon for a dev run: there is no app bundle to take one from, so point at
@@ -14,7 +16,7 @@ const __dirname = path.dirname(__filename);
  * In a packaged build this path lands inside the asar, resolves to nothing,
  * and each platform falls back to the bundle icon.
  */
-const DEV_ICON = path.join(__dirname, '../../build/icon.png');
+const DEV_ICON = path.join(moduleDir, '../../build/icon.png');
 
 /** Height of the renderer-drawn title bar; must match TitleBar's h-11 (2.75rem). */
 export const TITLE_BAR_HEIGHT = 44;
@@ -79,7 +81,7 @@ export function createMainWindow(options: CreateWindowOptions = {}): BrowserWind
           }
         : { frame: false }),
     webPreferences: {
-      preload: path.join(__dirname, '../preload/index.js'),
+      preload: path.join(moduleDir, '../preload/index.js'),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
@@ -104,7 +106,7 @@ export function createMainWindow(options: CreateWindowOptions = {}): BrowserWind
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
     mainWindow.loadURL(url.toString());
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../renderer/index.html'), { query });
+    mainWindow.loadFile(path.join(moduleDir, '../renderer/index.html'), { query });
   }
 
   // The title names the workspace so Mission Control / the Window menu can

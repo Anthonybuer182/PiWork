@@ -3,8 +3,9 @@ import { statSync, readFileSync, existsSync } from 'node:fs';
 import type { ChatService, SendMessageParams, StreamChunk } from '../services/chat.js';
 import type { Message, AssistantMessage, ContentBlock, ToolResultBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, AgentContextConfig, AgentContextReloadResult, AgentToolInfo, AppendSegmentInfo, ContextFileInfo, ContextFileScope, PromptFileInfo, GlobalContextFile, GlobalContextInfo, ModelCapabilities } from '@pi/types';
 import { ASK_TOOL_NAME, TODO_TOOL_NAME } from '@pi/types';
-import { createAgentSession, SessionManager, ModelRegistry, AuthStorage, DefaultResourceLoader, getAgentDir, SettingsManager, formatSkillsForPrompt } from '@earendil-works/pi-coding-agent';
-import type { AgentSession } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, SessionManager, DefaultResourceLoader, getAgentDir, SettingsManager, formatSkillsForPrompt } from '@earendil-works/pi-coding-agent';
+import type { AgentSession, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { createModelRegistry, getSharedModelRuntime } from './model-runtime.js';
 import { extractThinkContent } from '../utils/think-parser.js';
 import { deleteFileWithMtimeGuard, writeFileWithMtimeGuard } from '../utils/safe-write.js';
 import { detectWrittenFiles } from '../utils/file-detection.js';
@@ -282,7 +283,7 @@ export interface RealChatServiceOptions {
 
 export function createRealChatService(
   cwd: string,
-  modelRegistry?: ModelRegistry,
+  modelRuntime?: ModelRuntime,
   settingsManager?: SettingsManager,
   options?: RealChatServiceOptions,
 ): ChatService {
@@ -307,15 +308,26 @@ export function createRealChatService(
   // Track last message end time per session for thinking time calculation
   const sessionTimings = new Map<string, number>();
 
-  // Shared ModelRegistry — picks up built-in models + models from ~/.pi/agent/models.json
-  const registry = modelRegistry ?? ModelRegistry.create(AuthStorage.inMemory());
+  // Shared ModelRuntime — picks up built-in models + models from ~/.pi/agent/models.json.
+  // pi 1.x resolves models/auth through ModelRuntime (async); the registry is a
+  // synchronous read facade over it, created on first use.
+  let runtimePromise: Promise<ModelRuntime> | undefined = modelRuntime
+    ? Promise.resolve(modelRuntime)
+    : undefined;
+  let registry: ModelRegistry | undefined;
 
-  /** Find a model in the registry by its ID string.
+  async function modelAccess(): Promise<{ runtime: ModelRuntime; registry: ModelRegistry }> {
+    runtimePromise ??= getSharedModelRuntime();
+    const runtime = await runtimePromise;
+    registry ??= createModelRegistry(runtime);
+    return { runtime, registry };
+  }
+
+  /** Find a model among the available ones by its ID string.
    *  Supports "provider/modelId" format for disambiguation.
    *  When multiple models share the same ID, prefers models with configured
    *  auth (from models.json or env vars) over built-in ones without auth. */
-  function findModelById(modelId: string) {
-    const available = registry.getAvailable();
+  function findModelById(modelId: string, available: ReturnType<ModelRegistry['getAvailable']>) {
     // An aggregator provider may name its model "deepseek/deepseek-flash", so
     // the id itself can contain a slash. Splitting first would read "deepseek"
     // as a provider and look up an id that does not exist. An exact id match
@@ -479,10 +491,11 @@ export function createRealChatService(
     // aggregate still listed it. So: built-ins we want ON, plus every custom
     // tool the providers contributed. Disabled names still come off via
     // `excludeTools`, which is the denylist for both families.
+    const { runtime } = await modelAccess();
     const { session } = await createAgentSession({
       cwd: workCwd,
       sessionManager,
-      modelRegistry: registry, // share registry so custom models are visible
+      modelRuntime: runtime, // share the runtime so custom models are visible
       resourceLoader: await createResourceLoader(workCwd, skills, toolNames, effectiveCapabilities),
       settingsManager,         // share settings so shell path is respected
       tools: [...ACTIVE_BUILTIN_TOOLS, ...toolNames],
@@ -1093,8 +1106,9 @@ export function createRealChatService(
       // depends on the requested model's input modalities, and a model added
       // to models.json since startup must be resolvable here.
       migrateModelsConfig();
-      registry.refresh();
-      const requestedModel = params.modelId ? findModelById(params.modelId) : undefined;
+      const { registry } = await modelAccess();
+      await registry.refresh();
+      const requestedModel = params.modelId ? findModelById(params.modelId, registry.getAvailable()) : undefined;
       if (params.modelId && !requestedModel) {
         throw new Error(`Model "${params.modelId}" not found. Please configure a valid model in Settings or set the correct API key environment variable.`);
       }
@@ -1160,8 +1174,9 @@ export function createRealChatService(
       // Same ordering as sendMessage: refresh, resolve the requested model,
       // then build the session with that model's capability note.
       migrateModelsConfig();
-      registry.refresh();
-      const requestedModel = params.modelId ? findModelById(params.modelId) : undefined;
+      const { registry } = await modelAccess();
+      await registry.refresh();
+      const requestedModel = params.modelId ? findModelById(params.modelId, registry.getAvailable()) : undefined;
       if (params.modelId && !requestedModel) {
         const errMsg = `Model "${params.modelId}" not found. Please configure a valid model in Settings or set the correct API key environment variable.`;
         onChunk({ type: 'error', error: errMsg });

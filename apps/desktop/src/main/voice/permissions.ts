@@ -20,6 +20,14 @@ export function installMicrophonePermissionHandler(windows: WindowRegistry): voi
   const ses = session.defaultSession;
 
   ses.setPermissionRequestHandler((webContents, permission, callback, details) => {
+    // Electron 45 reports screen capture as its own `display-capture`
+    // permission; before that it arrived as `media` with empty mediaTypes and
+    // was denied below. Deny it explicitly so the upgrade does not widen what
+    // plugin panels can ask for.
+    if (permission === 'display-capture') {
+      callback(false);
+      return;
+    }
     // Only media is constrained here. Electron grants other requests when no
     // handler is installed; denying them would quietly break clipboard and
     // notification behaviour that already worked.
@@ -33,6 +41,7 @@ export function installMicrophonePermissionHandler(windows: WindowRegistry): voi
   });
 
   ses.setPermissionCheckHandler((webContents, permission, _origin, details) => {
+    if (permission === 'display-capture') return false;
     if (permission !== 'media') return true;
     const mediaType = (details as { mediaType?: string } | undefined)?.mediaType;
     return isHostWindow(webContents) && mediaType !== 'video';

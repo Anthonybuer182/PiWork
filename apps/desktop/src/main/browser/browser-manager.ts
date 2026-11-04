@@ -600,7 +600,10 @@ export class BrowserManager {
     wc.on('zoom-changed', (_event, zoomDirection: 'in' | 'out') => {
       this.applyManualZoom(t, zoomDirection === 'in' ? BrowserManager.ZOOM_STEP : 1 / BrowserManager.ZOOM_STEP);
     });
-    wc.on('console-message', (_event, _level, message) => {
+    // Electron 45 moved the payload onto the event object; the positional
+    // (level, message, …) arguments are deprecated.
+    wc.on('console-message', (event) => {
+      const message = event.message;
       if (message === '__pi-zoom:in') this.applyManualZoom(t, BrowserManager.ZOOM_STEP);
       else if (message === '__pi-zoom:out') this.applyManualZoom(t, 1 / BrowserManager.ZOOM_STEP);
     });

@@ -1,6 +1,7 @@
 import { ipcMain, dialog, app } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
-import { ModelRegistry, AuthStorage, SettingsManager } from '@earendil-works/pi-coding-agent';
+import { SettingsManager } from '@earendil-works/pi-coding-agent';
+import type { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import {
   createRealWorkspaceService,
   createRealSessionService,
@@ -44,13 +45,12 @@ let onSessionDeletedHook: ((sessionId: string) => void) | undefined;
 
 export function registerIpcHandlers(
   settingsManager: SettingsManager,
-  modelRegistry?: ModelRegistry,
+  modelRuntime?: ModelRuntime,
   options?: RegisterIpcHandlersOptions,
 ): { chatService: ChatService } {
-  // Shared ModelRegistry so config writes refresh chat's visible model list.
-  // If an external registry is provided, use it (allows sharing with VLM analyzer).
-  const sharedModelRegistry = modelRegistry ?? ModelRegistry.create(AuthStorage.inMemory());
-
+  // One ModelRuntime for the whole process: config writes and chat's visible
+  // model list must read the same catalog. When the host does not pass one in,
+  // the adapters lazily create (and share) their own.
   // app.getPath('home') is stable across platforms and never points inside
   // the app bundle (unlike process.cwd() in packaged builds).
   const defaultCwd = app.getPath('home');
@@ -58,9 +58,9 @@ export function registerIpcHandlers(
   workspaceService = createRealWorkspaceService();
   sessionService = createRealSessionService();
   fileService = createRealFileService();
-  configService = createRealConfigService(defaultCwd, undefined, sharedModelRegistry, settingsManager);
+  configService = createRealConfigService(defaultCwd, undefined, modelRuntime, settingsManager);
   onSessionDeletedHook = options?.onSessionDeleted;
-  chatService = createRealChatService(defaultCwd, sharedModelRegistry, settingsManager, {
+  chatService = createRealChatService(defaultCwd, modelRuntime, settingsManager, {
     customToolsProvider: options?.customToolsProvider,
     pluginDocsProvider: options?.pluginDocsProvider,
     onSessionCreated: options?.onSessionCreated,

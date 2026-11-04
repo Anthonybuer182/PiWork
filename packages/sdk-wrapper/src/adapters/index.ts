@@ -15,6 +15,10 @@ export {
 export type { PluginDoc, RealChatServiceOptions } from './chat.js';
 export { formatPluginDocsForPrompt } from './chat.js';
 
+// Model runtime plumbing (pi 1.x): the host creates one runtime at startup and
+// hands it to every adapter; these let it share that instance process-wide.
+export { getSharedModelRuntime, setSharedModelRuntime, createModelRegistry } from './model-runtime.js';
+
 // Node-only helpers. Exported from the adapters entry rather than the package
 // root because they import `node:fs` — the root entry is what the renderer
 // bundles, so a filesystem module there would break the browser build.

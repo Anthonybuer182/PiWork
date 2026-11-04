@@ -7,6 +7,14 @@ directories:
   buildResources: build
   output: release
 
+# Electron 42+ no longer downloads its binary during `pnpm install`, so
+# electron-builder fetches it at pack time — and github.com releases are not
+# reachable from the network this repo is built on. The npmmirror build is the
+# same unsigned binary. Delete this block (or set ELECTRON_MIRROR) on a machine
+# that can reach GitHub.
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/
+
 # App icon (512x512 PNG). electron-builder auto-converts to .icns (macOS) and .ico (Windows).
 icon: build/icon.png
 
@@ -75,6 +83,16 @@ extraResources:
 
 mac:
   category: public.app-category.developer-tools
+  # Electron 44 dropped macOS 12. Pin the floor in the bundle so a download
+  # does not land on a machine that cannot launch it (Electron 45 needs 13+).
+  minimumSystemVersion: "13.0"
+  # Ship unsigned. There is no Developer ID in the pipeline, and without this
+  # electron-builder auto-discovers whatever identity happens to sit in the
+  # build machine's keychain (an Apple *Development* one here) and then fails
+  # on `codesign --timestamp` whenever Apple's timestamp service is
+  # unreachable. Delete this line — and fill in the hardenedRuntime /
+  # entitlements block below — once a Developer ID identity exists.
+  identity: null
   extendInfo:
     # Required by macOS before the app may open the microphone (语音转写).
     NSMicrophoneUsageDescription: PiWork 需要访问麦克风，把语音转写成文字。

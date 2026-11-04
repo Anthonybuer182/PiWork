@@ -1,4 +1,4 @@
-import { ipcMain, dialog, shell, clipboard, app, BrowserWindow, nativeImage, Menu } from 'electron';
+import { ipcMain, dialog, shell, clipboard, app, BrowserWindow, nativeImage, Menu, ClipboardItem } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
 import fs from 'fs';
 import path from 'path';
@@ -299,15 +299,16 @@ export function registerNativeIpcHandlers(windows: WindowRegistry): void {
 
   // ── Clipboard ──
 
-  ipcMain.handle('pi:clipboard:write', (_event, text: string) => {
-    clipboard.writeText(text);
+  ipcMain.handle('pi:clipboard:write', async (_event, text: string) => {
+    // Electron 45 made the clipboard async (W3C-shaped API).
+    await clipboard.writeText(text);
   });
 
   ipcMain.handle('pi:clipboard:read', () => {
     return clipboard.readText();
   });
 
-  ipcMain.handle('pi:clipboard:writeImage', (_event, imagePath: string) => {
+  ipcMain.handle('pi:clipboard:writeImage', async (_event, imagePath: string) => {
     const resolved = path.isAbsolute(imagePath) ? imagePath : path.resolve(imagePath);
     if (!fs.existsSync(resolved)) {
       throw new Error(`Image file not found: ${resolved}`);
@@ -316,7 +317,14 @@ export function registerNativeIpcHandlers(windows: WindowRegistry): void {
     if (img.isEmpty()) {
       throw new Error(`Failed to load image from: ${resolved}`);
     }
-    clipboard.writeImage(img);
+    // `clipboard.writeImage()` is gone in Electron 45: images go through the
+    // async ClipboardItem API, one MIME entry per item. Copy into a plain
+    // Uint8Array — a Node Buffer's backing store may be a SharedArrayBuffer,
+    // which the DOM Blob typing does not accept.
+    const png = new Uint8Array(img.toPNG());
+    await clipboard.write([
+      new ClipboardItem({ 'image/png': new Blob([png], { type: 'image/png' }) }),
+    ]);
   });
 
   ipcMain.handle('pi:clipboard:clear', () => {
