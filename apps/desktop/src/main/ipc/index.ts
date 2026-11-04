@@ -252,7 +252,7 @@ async function handleChat(action: string, params: unknown): Promise<unknown> {
       return chatService.navigateTree(p.sessionId as string, p.entryId as string, p.options as any);
     case 'compact':
       return chatService.compact(p.sessionId as string, p.customInstructions as string | undefined);
-    // ── agent context (the host's context panel) ──
+    // ── agent context (Settings → 上下文 and host tools) ──
     case 'getAgentContextConfig':
       return chatService.getAgentContextConfig(
         p.workspacePath as string,
@@ -261,6 +261,13 @@ async function handleChat(action: string, params: unknown): Promise<unknown> {
       );
     case 'reloadAgentContext':
       return chatService.reloadAgentContext(p.workspacePath as string);
+    case 'getGlobalContextInfo':
+      return chatService.getGlobalContextInfo();
+    case 'reloadAgentContextForFile':
+      return chatService.reloadAgentContextForFile(
+        p.filePath as string,
+        p.preferredWorkspace as string | undefined,
+      );
     case 'writeContextFile':
       return chatService.writeContextFile(p as unknown as Parameters<typeof chatService.writeContextFile>[0]);
     case 'deleteContextFile':

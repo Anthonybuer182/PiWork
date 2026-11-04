@@ -337,6 +337,15 @@ if (!gotLock) {
         windows.releaseActiveSession(sessionId);
       },
     });
+    // A plugin write/delete may have changed a .pi prompt file or an AGENTS.md
+    // the agent already loaded. Rebuild the affected live sessions so the save
+    // applies to the next turn instead of waiting for a new session.
+    pluginSystem.onContextFileWrite = (filePath) => {
+      void chatService.reloadAgentContextForFile(filePath).catch((err) => {
+        console.error('[agent-context] reload after file write failed:', err);
+      });
+    };
+
     hostTools = createHostAgentTools({
       readContextConfig: chatService.getAgentContextConfig.bind(chatService),
       todoService,

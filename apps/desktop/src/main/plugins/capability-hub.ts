@@ -44,6 +44,13 @@ export interface CapabilityDeps {
   getPermissionMode?: (sessionId: string) => 'default' | 'full';
   /** Whether a TTS provider is ready; plugins get the error text when not. */
   voiceReady?: () => { ok: boolean; error?: string };
+  /**
+   * Called after a plugin write/delete lands. The host decides whether the
+   * path is part of an agent's standing context and rebuilds the affected
+   * live session — saving `.pi/SYSTEM.md` from the file viewer must apply to
+   * the next turn, not wait for a new session.
+   */
+  onContextFileWrite?: (filePath: string) => void;
 }
 
 interface CapabilitySpec {
@@ -64,6 +71,7 @@ export class CapabilityHub {
   private readonly sendToRenderer?: (channel: string, payload: unknown) => void;
   private readonly getPermissionMode?: (sessionId: string) => 'default' | 'full';
   private readonly voiceReady?: () => { ok: boolean; error?: string };
+  private readonly onContextFileWrite?: (filePath: string) => void;
   private readonly capabilities = new Map<string, CapabilitySpec>();
 
   constructor(deps: CapabilityDeps) {
@@ -74,6 +82,7 @@ export class CapabilityHub {
     this.sendToRenderer = deps.sendToRenderer;
     this.getPermissionMode = deps.getPermissionMode;
     this.voiceReady = deps.voiceReady;
+    this.onContextFileWrite = deps.onContextFileWrite;
 
     this.registerCapabilities();
   }
@@ -395,7 +404,11 @@ export class CapabilityHub {
           typeof params.contentB64 === 'string'
             ? Buffer.from(params.contentB64, 'base64')
             : String(params.content ?? '');
-        return writeFileWithMtimeGuard(path, content, expectedMtime);
+        const written = writeFileWithMtimeGuard(path, content, expectedMtime);
+        // No-op for ordinary files; rebuilds a live session when this was one
+        // of its prompt/context files.
+        this.onContextFileWrite?.(path);
+        return written;
       },
     });
 
@@ -404,11 +417,15 @@ export class CapabilityHub {
     // underneath the caller is the whole point of passing the expected mtime.
     this.capabilities.set('filesystem.delete', {
       permission: 'filesystem',
-      handler: ({ params }) =>
-        deleteFileWithMtimeGuard(
-          String(params.path ?? ''),
+      handler: ({ params }) => {
+        const path = String(params.path ?? '');
+        const deleted = deleteFileWithMtimeGuard(
+          path,
           typeof params.expectedMtime === 'number' ? params.expectedMtime : undefined,
-        ),
+        );
+        this.onContextFileWrite?.(path);
+        return deleted;
+      },
     });
 
     // ── office.read (permission: filesystem) — text-level office extraction ──

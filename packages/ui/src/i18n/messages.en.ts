@@ -301,8 +301,8 @@ export const EN_MESSAGES = {
   '{group} · {count} 个 · {chars} 字符': '{group} · {count} · {chars} chars',
   '# 全局指令\n\n': '# Global instructions\n\n',
   '已删除。{note}': 'Deleted. {note}',
-  '{path}\n\n删掉之后，它替换或追加的内容会立即从系统提示词里消失，恢复成没有这个文件时的样子。':
-    '{path}\n\nOnce deleted, whatever it replaces or appends disappears from the system prompt immediately, restoring the state before the file existed.',
+  '{path}\n\n删掉之后，它注入的内容会立即从系统提示词里消失，恢复成没有这个文件时的样子。':
+    '{path}\n\nOnce deleted, whatever it injects disappears from the system prompt immediately, restoring the state before the file existed.',
   '{action}被拒绝：这个文件在你打开之后被外部改过，宿主拒绝写入以免覆盖别人刚做的修改。请先取消、重新打开拿到最新内容。\n（宿主的说明：{error}）':
     '{action} was refused: the file was changed outside the app after you opened it, so the host will not write over someone else’s edit. Cancel and reopen to get the latest content.\n(host message: {error})',
   '已保存并生效，下一条消息就会带上新内容。':
@@ -348,6 +348,28 @@ export const EN_MESSAGES = {
   '已复制到剪贴板。': 'Copied to the clipboard.',
   '{label}已复制到剪贴板。': '{label} copied to the clipboard.',
   '复制失败：当前环境不允许访问剪贴板。': 'Copy failed: this environment does not allow clipboard access.',
+
+  // ── Context settings (Settings → 上下文) ──
+  全局上下文: 'Global context',
+  '读取全局上下文失败': 'Could not read the global context',
+  '这些文件对所有工作区生效。工作区里的 .pi/SYSTEM.md 和 .pi/APPEND_SYSTEM.md 会遮住这里的同名文件；AGENTS.md 不会遮住，而是叠加。':
+    'These files apply to every workspace. A workspace .pi/SYSTEM.md or .pi/APPEND_SYSTEM.md shadows the copy here; AGENTS.md does not shadow — it is added on top.',
+  '写入后会完全替换 SDK 内置的系统提示词。除非你自己把工具用法和行为说明写进去，否则 agent 会失去这些能力。':
+    'Writing this replaces the SDK’s built-in system prompt entirely. Unless you include the tool usage and behaviour guidance yourself, the agent loses those abilities.',
+  '当前工作区有自己的 .pi/SYSTEM.md，这里的全局文件不会生效。':
+    'This workspace has its own .pi/SYSTEM.md, so the global file here has no effect.',
+  '当前工作区有自己的 .pi/APPEND_SYSTEM.md，这里的全局文件不会生效。':
+    'This workspace has its own .pi/APPEND_SYSTEM.md, so the global file here has no effect.',
+  '会叠加到每个工作区的上下文里，和工作区及上级目录的 AGENTS.md 一起注入。':
+    'Added to every workspace’s context, together with the AGENTS.md files from the workspace and its parent directories.',
+  '同目录下还有 {paths}。SDK 按 AGENTS.md → CLAUDE.md 的顺序只读取第一个，这些文件不会被读取。':
+    'Also in this directory: {paths}. The SDK reads only the first match in the order AGENTS.md → CLAUDE.md, so these files are not read.',
+  '创建后写入全局，对所有工作区生效。': 'Created globally; applies to every workspace.',
+  '当前工作区注入的 AGENTS.md': 'AGENTS.md injected into this workspace',
+  '这些文件会全部叠加进上下文，按全局 → 上级目录 → 工作区的顺序排列。':
+    'All of these are added to the context, ordered global → parent directories → workspace.',
+  '{n} 个': '{n}',
+  '以当前提示词为起点创建': 'Create from the current prompt',
   '重新读取': 'Reload',
   '需要一次对话后才能读取完整提示词': 'Send one message before the full prompt can be read',
   完整系统提示词: 'Full system prompt',

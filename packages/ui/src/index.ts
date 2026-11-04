@@ -83,7 +83,6 @@ export { SettingsDialog, SettingsRailButton } from './components/settings';
 export { UsageBar } from './components/usage';
 export { ErrorBoundary, LoadingSpinner, EmptyState, ErrorState, ConfirmDialog } from './components/common';
 export { FileTree, FileTreeNode } from './components/file';
-export { ContextPanel } from './components/context';
 
 export { PluginCenter } from './components/plugins/plugin-center';
 export { DeclarativeRenderer } from './components/plugins/declarative/declarative-renderer';

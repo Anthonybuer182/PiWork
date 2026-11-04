@@ -80,6 +80,12 @@ export class PluginSystem {
   /** Notified whenever the aggregate tool/skill set changes. */
   onExtensionsChanged: (() => void) | null = null;
   /**
+   * Notified after any plugin write/delete so the host can rebuild a live
+   * session when the path was one of its prompt/context files. Assigned once
+   * the chat service exists; the hub captures this lazily.
+   */
+  onContextFileWrite: ((filePath: string) => void) | null = null;
+  /**
    * A plugin's backend just (re)started — activate, re-enable, or crash
    * restart. Panel views reused across those events hold ports to the dead
    * process; the host uses this to push fresh ones (see PluginWebViews.
@@ -132,6 +138,9 @@ export class PluginSystem {
       sendToRenderer: opts?.sendToRenderer,
       getPermissionMode: opts?.getPermissionMode,
       voiceReady: opts?.voiceReady,
+      // Lazy on purpose: the chat service is created after the kernel, and the
+      // hook is only invoked by a later plugin write.
+      onContextFileWrite: (filePath) => this.onContextFileWrite?.(filePath),
     });
     this.marketplace = new PluginMarketplace(this.registry);
   }
@@ -398,8 +407,8 @@ export class PluginSystem {
           name: tool.name,
           label: tool.name,
           // Carried on the tool itself so anything reporting on the tool set —
-          // the context panel's per-plugin schema cost, most directly — can
-          // attribute a tool to its plugin without re-deriving it from the
+          // the context-audit tool's per-plugin schema cost, most directly —
+          // can attribute a tool to its plugin without re-deriving it from the
           // registry.
           pluginId,
           description: tool.description ?? `Plugin tool from ${pluginId}`,

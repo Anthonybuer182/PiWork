@@ -9,5 +9,5 @@ export * from './services/file.js';
 export * from './services/config.js';
 export * from './proxy/index.js';
 // Pure, dependency-free formatting shared by the agent tool (main) and the
-// context panel (renderer). No node builtins, so it is safe in both bundles.
+// Settings UI (renderer). No node builtins, so it is safe in both bundles.
 export * from './utils/agent-context.js';

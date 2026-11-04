@@ -257,12 +257,14 @@ async function handleRequest(server: ViteDevServer, method: string, params: any)
         case 'followUp': return chatService.followUp(params.sessionId, params.content, params.images);
         case 'navigateTree': return chatService.navigateTree(params.sessionId, params.entryId, params.options);
         case 'compact': return chatService.compact(params.sessionId, params.customInstructions);
-        // Agent context. The context panel is a host panel, so it renders here
-        // too — these routes must stay in step with ipc/index.ts's handleChat,
-        // and nothing enforces that, so they are the pair to check first when a
-        // panel works on desktop and not on web.
+        // Agent context. Settings → 上下文 renders here too — these routes
+        // must stay in step with ipc/index.ts's handleChat, and nothing
+        // enforces that, so they are the pair to check first when a page works
+        // on desktop and not on web.
         case 'getAgentContextConfig': return chatService.getAgentContextConfig(params.workspacePath, params.workspaceId);
         case 'reloadAgentContext': return chatService.reloadAgentContext(params.workspacePath);
+        case 'getGlobalContextInfo': return chatService.getGlobalContextInfo();
+        case 'reloadAgentContextForFile': return chatService.reloadAgentContextForFile(params.filePath, params.preferredWorkspace);
         case 'writeContextFile': return chatService.writeContextFile(params);
         case 'deleteContextFile': return chatService.deleteContextFile(params);
       }

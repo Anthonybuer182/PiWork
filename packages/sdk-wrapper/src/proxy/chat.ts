@@ -82,8 +82,9 @@ export function createProxyChatService(transport: Transport): ChatService {
     },
 
     // ── agent context ──
-    // The context panel is a host UI, so it reaches these the same way any
-    // other host panel reaches its data: over the ordinary request transport.
+    // Settings → 上下文 and the host's context-audit tool reach these the same
+    // way any other host UI reaches its data: over the ordinary request
+    // transport.
     async getAgentContextConfig(workspacePath: string, workspaceId?: string, sessionId?: string) {
       return transport.request('chat.getAgentContextConfig', {
         workspacePath,
@@ -96,6 +97,19 @@ export function createProxyChatService(transport: Transport): ChatService {
       return transport.request('chat.reloadAgentContext', { workspacePath }) as ReturnType<
         ChatService['reloadAgentContext']
       >;
+    },
+
+    async getGlobalContextInfo() {
+      return transport.request('chat.getGlobalContextInfo', {}) as ReturnType<
+        ChatService['getGlobalContextInfo']
+      >;
+    },
+
+    async reloadAgentContextForFile(filePath: string, preferredWorkspace?: string) {
+      return transport.request('chat.reloadAgentContextForFile', {
+        filePath,
+        preferredWorkspace,
+      }) as ReturnType<ChatService['reloadAgentContextForFile']>;
     },
 
     async writeContextFile(params) {

@@ -1,4 +1,4 @@
-import type { Message, ContentBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, ToolTiming, QueueState, StreamingBehavior, AgentContextConfig, AgentContextReloadResult } from '@pi/types';
+import type { Message, ContentBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, ToolTiming, QueueState, StreamingBehavior, AgentContextConfig, AgentContextReloadResult, GlobalContextInfo } from '@pi/types';
 
 export interface SendMessageParams {
   sessionId: string;
@@ -130,21 +130,46 @@ export interface ChatService {
    */
   reloadAgentContext(workspacePath: string): Promise<AgentContextReloadResult>;
   /**
+   * The global prompt/context files in the agent dir, for Settings → 上下文.
+   *
+   * Separate from `getAgentContextConfig` because it must work with no
+   * workspace open: these files apply to every workspace.
+   */
+  getGlobalContextInfo(): Promise<GlobalContextInfo>;
+  /**
+   * Rebuild affected live sessions after an ordinary file write.
+   *
+   * Used by the host to hook plugin `filesystem.write`/`delete`: saving
+   * `.pi/SYSTEM.md` or an AGENTS.md must take effect on the next turn, not
+   * silently wait for a new session. A no-op for files that are not part of
+   * any workspace's standing context.
+   *
+   * `preferredWorkspace` selects whose reload result is returned; every
+   * affected workspace is rebuilt either way (a global file applies to all).
+   */
+  reloadAgentContextForFile(
+    filePath: string,
+    preferredWorkspace?: string,
+  ): Promise<AgentContextReloadResult>;
+  /**
    * Write one of the agent's context/prompt files and rebuild the prompt.
    *
    * Separate from `file.write` because it carries the mtime guard (an editor
    * that read a file must not clobber a concurrent change) and because it
    * rebuilds the live session afterwards — the two always go together.
+   *
+   * `workspacePath` is omitted when editing a global file with no workspace
+   * open; the write still lands, it just has no live session to rebuild.
    */
   writeContextFile(params: {
-    workspacePath: string;
+    workspacePath?: string;
     path: string;
     content: string;
     expectedMtime?: number;
   }): Promise<{ file: { path: string; size: number; mtime: number }; reload: AgentContextReloadResult }>;
   /** Delete one of the agent's context/prompt files and rebuild the prompt. */
   deleteContextFile(params: {
-    workspacePath: string;
+    workspacePath?: string;
     path: string;
     expectedMtime?: number;
   }): Promise<{

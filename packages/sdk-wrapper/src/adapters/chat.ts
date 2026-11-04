@@ -1,7 +1,7 @@
 import * as path from 'path';
-import { statSync, readFileSync } from 'node:fs';
+import { statSync, readFileSync, existsSync } from 'node:fs';
 import type { ChatService, SendMessageParams, StreamChunk } from '../services/chat.js';
-import type { Message, AssistantMessage, ContentBlock, ToolResultBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, AgentContextConfig, AgentContextReloadResult, AgentToolInfo, AppendSegmentInfo, ContextFileInfo, ContextFileScope, PromptFileInfo, ModelCapabilities } from '@pi/types';
+import type { Message, AssistantMessage, ContentBlock, ToolResultBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, AgentContextConfig, AgentContextReloadResult, AgentToolInfo, AppendSegmentInfo, ContextFileInfo, ContextFileScope, PromptFileInfo, GlobalContextFile, GlobalContextInfo, ModelCapabilities } from '@pi/types';
 import { ASK_TOOL_NAME, TODO_TOOL_NAME } from '@pi/types';
 import { createAgentSession, SessionManager, ModelRegistry, AuthStorage, DefaultResourceLoader, getAgentDir, SettingsManager, formatSkillsForPrompt } from '@earendil-works/pi-coding-agent';
 import type { AgentSession } from '@earendil-works/pi-coding-agent';
@@ -23,6 +23,14 @@ import { migrateModelsConfig, modelCapabilitiesOf } from './config.js';
  * here; `excludeTools` (the user's global switches) still filters it.
  */
 export const ACTIVE_BUILTIN_TOOLS = ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'];
+
+/**
+ * The filenames the SDK tries, in order, for a directory's context file.
+ *
+ * The first one that exists wins; the rest are not read. Mirrored here so the
+ * Settings page can report which candidate is actually in effect.
+ */
+const GLOBAL_CONTEXT_NAMES = ['AGENTS.md', 'AGENTS.MD', 'CLAUDE.md', 'CLAUDE.MD'] as const;
 
 /**
  * Real chat adapter using createAgentSessionFromServices.
@@ -625,6 +633,67 @@ export function createRealChatService(
     return out;
   }
 
+  /**
+   * Read one file in the agent dir, tolerating absence.
+   *
+   * Kept separate from `readPromptFile` because these rows also carry the
+   * shadowed AGENTS.md candidates, which are a fact about the whole directory
+   * rather than about one file.
+   */
+  function readGlobalFile(
+    kind: GlobalContextFile['kind'],
+    filePath: string,
+    shadowed: string[] = [],
+  ): GlobalContextFile {
+    try {
+      const content = readFileSync(filePath, 'utf-8');
+      const st = statSync(filePath);
+      return {
+        kind,
+        path: filePath,
+        exists: true,
+        content,
+        bytes: Buffer.byteLength(content, 'utf-8'),
+        chars: content.length,
+        mtimeMs: st.mtimeMs,
+        shadowed,
+      };
+    } catch {
+      return {
+        kind,
+        path: filePath,
+        exists: false,
+        content: null,
+        bytes: 0,
+        chars: 0,
+        mtimeMs: 0,
+        shadowed,
+      };
+    }
+  }
+
+  /**
+   * The global files Settings → 上下文 edits.
+   *
+   * The agent dir is outside every workspace, so this is the only reader for
+   * them. AGENTS.md follows the SDK's candidate order; the variants that lose
+   * are reported so the page can say why editing one would do nothing.
+   */
+  function getGlobalContextInfo(): GlobalContextInfo {
+    const agentDir = getAgentDir();
+    const candidates = GLOBAL_CONTEXT_NAMES.map((name) => path.join(agentDir, name));
+    const existing = candidates.filter((p) => existsSync(p));
+    const active = existing[0] ?? candidates[0];
+    return {
+      agentDir,
+      files: [
+        readGlobalFile('system', path.join(agentDir, 'SYSTEM.md')),
+        readGlobalFile('append', path.join(agentDir, 'APPEND_SYSTEM.md')),
+        readGlobalFile('agents', active, existing.slice(1)),
+      ],
+    };
+  }
+
   async function readAgentContextConfig(
     workspacePath: string,
     workspaceId?: string,
@@ -839,12 +908,16 @@ export function createRealChatService(
   }
 
   /**
-   * Rebuild a live session's prompt from disk.
+   * Rebuild every live session in a workspace from disk.
    *
    * Context files are read when a session is built, so an AGENTS.md edit is
    * otherwise invisible until the user starts a new session. `session.reload()`
    * re-reads the resource loader and rebuilds the base prompt from it, which
    * makes the edit apply to the next turn.
+   *
+   * A workspace can have several live sessions (one per conversation, possibly
+   * in different windows), and each has its own resource loader — rebuilding
+   * only the first would leave the others on the old prompt.
    *
    * Refuses while anything is streaming: `reload()` resets global API providers
    * and tears down the extension runtime, which is not something to do under a
@@ -853,22 +926,19 @@ export function createRealChatService(
    */
   async function reloadAgentContext(workspacePath: string): Promise<AgentContextReloadResult> {
     const resolvedWorkspace = path.resolve(workspacePath);
-    let live: AgentSession | undefined;
+    const live: AgentSession[] = [];
     for (const cached of activeSessions.values()) {
-      if (path.resolve(cached.cwd) === resolvedWorkspace) {
-        live = cached.session;
-        break;
-      }
+      if (path.resolve(cached.cwd) === resolvedWorkspace) live.push(cached.session);
     }
     // No session yet: the file is read when one is created, so the edit lands
     // on its own without anything to rebuild.
-    if (!live) return { applied: false, reason: 'no-session' };
+    if (live.length === 0) return { applied: false, reason: 'no-session' };
 
     for (const cached of activeSessions.values()) {
       if (cached.session.isStreaming) return { applied: false, reason: 'busy' };
     }
 
-    await live.reload();
+    for (const session of live) await session.reload();
     return { applied: true };
   }
 
@@ -891,6 +961,70 @@ export function createRealChatService(
         message: err instanceof Error ? err.message : String(err),
       };
     }
+  }
+
+  /**
+   * Rebuild any live session whose standing context was just edited through an
+   * ordinary file write.
+   *
+   * The file viewer and other plugins write through `filesystem.write`, which
+   * knows nothing about agent context. Without this, saving `.pi/SYSTEM.md` in
+   * the file tree looks like it did nothing until a new session is created —
+   * there is no host editor writing through its own API any more. Called after
+   * every plugin write/delete; the filename check keeps the cost to a few
+   * string comparisons for ordinary files.
+   */
+  async function reloadAgentContextForFile(
+    filePath: string,
+    preferredWorkspace?: string,
+  ): Promise<AgentContextReloadResult> {
+    const resolvedFile = path.resolve(filePath);
+    const fileDir = path.dirname(resolvedFile);
+    const name = path.basename(resolvedFile);
+    const isPromptName = name === 'SYSTEM.md' || name === 'APPEND_SYSTEM.md';
+    const isContextName = (GLOBAL_CONTEXT_NAMES as readonly string[]).includes(name);
+    if (!isPromptName && !isContextName) return { applied: false, reason: 'no-session' };
+
+    const agentDir = path.resolve(getAgentDir());
+    // A global prompt/context file is read by every workspace.
+    const affectsEveryWorkspace = fileDir === agentDir;
+
+    const targets = new Set<string>();
+    for (const cached of activeSessions.values()) {
+      const cwd = path.resolve(cached.cwd);
+      let hit = affectsEveryWorkspace;
+      if (!hit && isPromptName) {
+        hit = fileDir === path.join(cwd, PROMPT_CONFIG_DIR);
+      }
+      if (!hit && isContextName) {
+        // The loader reads a context file from the workspace and from every
+        // ancestor directory, so a write anywhere on that chain matters.
+        let dir = cwd;
+        for (;;) {
+          if (dir === fileDir) {
+            hit = true;
+            break;
+          }
+          const parent = path.dirname(dir);
+          if (parent === dir) break;
+          dir = parent;
+        }
+      }
+      if (hit) targets.add(cwd);
+    }
+
+    const results = new Map<string, AgentContextReloadResult>();
+    for (const cwd of targets) results.set(cwd, await reloadAfterWrite(cwd));
+
+    if (preferredWorkspace) {
+      return (
+        results.get(path.resolve(preferredWorkspace)) ?? {
+          applied: false,
+          reason: 'no-session',
+        }
+      );
+    }
+    return results.values().next().value ?? { applied: false, reason: 'no-session' };
   }
 
   return {
@@ -922,15 +1056,36 @@ export function createRealChatService(
       return reloadAgentContext(workspacePath);
     },
 
+    getGlobalContextInfo(): Promise<GlobalContextInfo> {
+      return Promise.resolve(getGlobalContextInfo());
+    },
+
+    reloadAgentContextForFile(
+      filePath: string,
+      preferredWorkspace?: string,
+    ): Promise<AgentContextReloadResult> {
+      return reloadAgentContextForFile(filePath, preferredWorkspace);
+    },
+
     async writeContextFile({ workspacePath, path: filePath, content, expectedMtime }) {
       // Guard first: a refused write must not leave a half-applied reload.
       const file = writeFileWithMtimeGuard(filePath, content, expectedMtime);
-      return { file, reload: await reloadAfterWrite(workspacePath) };
+      // Path-based rather than workspace-based: a global file affects every
+      // live workspace, and the caller's workspace is only the one whose
+      // outcome the UI reports. No workspace open still writes — the next
+      // session reads it from disk.
+      return {
+        file,
+        reload: await reloadAgentContextForFile(filePath, workspacePath),
+      };
     },
 
     async deleteContextFile({ workspacePath, path: filePath, expectedMtime }) {
       const deleted = deleteFileWithMtimeGuard(filePath, expectedMtime);
-      return { deleted, reload: await reloadAfterWrite(workspacePath) };
+      return {
+        deleted,
+        reload: await reloadAgentContextForFile(filePath, workspacePath),
+      };
     },
 
     async sendMessage(params: SendMessageParams): Promise<Message> {

@@ -92,8 +92,8 @@ export const useUIStore = create<UIState>()(
       settingsOpen: false,
       panelPickerOpen: false,
       rightPanelWidth: 600,
-      // A comfortable width for the session list, file tree and context panel,
-      // and the width the column is dragged from.
+      // A comfortable width for the session list and file tree, and the width
+      // the column is dragged from.
       leftPanelWidth: 300,
       compactMode: false,
       disabledSkills: [],

@@ -10,7 +10,6 @@ import type { MessageKey } from '@/i18n';
 const HOST_PANEL_TITLES: Record<string, MessageKey> = {
   'host:sessions': '会话',
   'host:files': '文件',
-  'host:context': '上下文',
   'host:plugins': '插件中心',
 };
 

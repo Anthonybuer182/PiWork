@@ -28,18 +28,4 @@ export const HOST_LEFT_PANELS: PanelEntry[] = [
     region: 'left',
     order: 1,
   },
-  {
-    // The agent's standing context. A host panel rather than a plugin because
-    // it edits the agent's own configuration — SYSTEM.md, APPEND_SYSTEM.md,
-    // AGENTS.md — which is the same kind of thing the settings panel does to
-    // models.json, and the same kind of thing these three are: a global view of
-    // the workspace rather than of what is currently open.
-    id: 'host:context',
-    title: '上下文',
-    icon: 'sliders',
-    source: 'host',
-    keepAlive: 'always',
-    region: 'left',
-    order: 3,
-  },
 ];
