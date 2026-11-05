@@ -42,7 +42,12 @@ export type { PermissionMode, PermissionDecision, PermissionRequestPayload };
  * risk is a game the attacker always wins (`rm -rf` has a thousand spellings),
  * so the line is drawn at "does it touch the world at all".
  */
-const READ_ONLY_TOOLS = new Set(['read', 'ls', 'find', 'grep', TODO_TOOL_NAME, ASK_TOOL_NAME]);
+const READ_ONLY_TOOLS = new Set([
+  'read', 'ls', 'find', 'grep', TODO_TOOL_NAME, ASK_TOOL_NAME,
+  // Discovery only: it lists tool metadata and enables nothing. MCP tools
+  // themselves stay high-risk — they are third-party code and can do anything.
+  'tool_search',
+]);
 
 export class PermissionService {
   /** session key → mode. Missing key = the last mode picked this run. */

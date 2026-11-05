@@ -389,6 +389,13 @@ export function McpSettingsPage() {
   );
 
   const [scope, setScope] = useState<McpScope>('global');
+
+  // A probe result belongs to the scope it was run in; leaving it on screen
+  // after switching scopes reads as a status for the wrong list.
+  const changeScope = (next: McpScope) => {
+    setNotice(null);
+    setScope(next);
+  };
   useEffect(() => {
     if (!workspacePath && scope === 'project') setScope('global');
   }, [workspacePath, scope]);
@@ -499,7 +506,7 @@ export function McpSettingsPage() {
               key={value}
               type="button"
               disabled={value === 'project' && !workspacePath}
-              onClick={() => setScope(value)}
+              onClick={() => changeScope(value)}
               className={
                 scope === value
                   ? 'rounded-md bg-accent px-3 py-1 text-xs font-medium'

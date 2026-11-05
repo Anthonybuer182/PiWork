@@ -58,6 +58,10 @@ test('saving preserves unknown top-level and per-record fields', (t) => {
 
   const written = JSON.parse(readFileSync(config, 'utf8'));
   assert.equal(written.version, 1);
+  // PiWork's own fields must not leak into the pi-compatible file.
+  assert.equal(written.mcpServers.added.name, undefined);
+  assert.equal(written.mcpServers.added.scope, undefined);
+  assert.equal(written.mcpServers.added.override, undefined);
   assert.equal(written.autoEnableCodemode, true, 'unknown top-level key must survive');
   assert.deepEqual(written.mcpServers.existing.oauth, { clientId: 'abc' });
   assert.equal(written.mcpServers.added.command, 'npx');

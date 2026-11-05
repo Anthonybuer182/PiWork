@@ -47,10 +47,13 @@ export const MCP_LIMITS = {
   maxTimeoutSeconds: 600,
 } as const;
 
-/** Keys PiWork writes itself; everything else on a record is preserved as `extra`. */
+/** Keys PiWork writes itself; everything else on a record is preserved as `extra`.
+ *  `name`/`scope`/`override` are PiWork's own fields — they must never leak into
+ *  the file, where pi's schema does not know them. */
 const KNOWN_KEYS = new Set([
   'type', 'command', 'args', 'env', 'cwd', 'url', 'headers',
   'enabled', 'exposure', 'description', 'timeout',
+  'name', 'scope', 'override',
 ]);
 
 type RawServer = Record<string, unknown>;
