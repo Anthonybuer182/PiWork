@@ -3,6 +3,7 @@ import type { IpcMainInvokeEvent } from 'electron';
 import fs from 'fs';
 import path from 'path';
 import { TITLE_BAR_HEIGHT } from '../window-manager.js';
+import { setApplicationLanguage } from '../menu.js';
 import type { WindowRegistry } from '../windows.js';
 
 /**
@@ -343,5 +344,12 @@ export function registerNativeIpcHandlers(windows: WindowRegistry): void {
 
   ipcMain.handle('pi:app:getVersion', () => {
     return app.getVersion();
+  });
+
+  // 设置 → 通用 → 语言. The native menu bar is app-global and lives in main,
+  // which cannot read the renderer's localStorage; the renderer announces the
+  // value on mount and on every change so the menu can relabel itself.
+  ipcMain.handle('pi:app:setLanguage', (_event, language: unknown) => {
+    setApplicationLanguage(language);
   });
 }
