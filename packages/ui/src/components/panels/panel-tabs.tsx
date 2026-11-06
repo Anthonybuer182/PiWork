@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Check, Plus, Search, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { isOsFileDrag, useOsFileDropTarget } from '@/lib/os-drop';
+import { openDroppedPaths } from '@/lib/open-dropped';
 import { usePanelStore, panelIdOfTab, type PanelEntry, type PanelRegion } from '@/stores/panel-store';
 import { useUIStore } from '@/stores/ui-store';
 import { useI18n } from '@/i18n';
 import { panelTitle } from './panel-title';
 import { RailIcon } from './panel-rail';
 import { installedPanels } from './panel-order';
+import { NO_DRAG } from '@/components/layout/title-bar';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 
 /**
@@ -73,6 +76,15 @@ export function PanelTabs({ region = 'right' }: { region?: PanelRegion }) {
     setDropTargetId(null);
   };
 
+  // ── OS file drop: open each dropped file as a panel tab ──
+  // The strip is a DOM fallback for the right column: the body of an open tab
+  // is a native view, so plugin views forward their own drops (preload →
+  // main → `pi:os:dropped-files`). Open order is drop order, so the last
+  // dropped file ends up focused.
+  const { active: osDropActive, handlers: osDropHandlers } = useOsFileDropTarget((paths) => {
+    void openDroppedPaths(paths);
+  });
+
   const pick = (id: string) => {
     openPanel(id, { focus: true });
     setPickerOpen(false);
@@ -135,6 +147,10 @@ export function PanelTabs({ region = 'right' }: { region?: PanelRegion }) {
           setDropTargetId(key);
         }}
         onDrop={(e) => {
+          // OS file drops belong to the strip root: letting them bubble keeps
+          // the highlight state and open path in one place. This handler's
+          // unconditional stopPropagation would otherwise swallow them.
+          if (isOsFileDrag(e.dataTransfer)) return;
           e.preventDefault();
           e.stopPropagation();
           const from = e.dataTransfer.getData('text/plain');
@@ -223,10 +239,19 @@ export function PanelTabs({ region = 'right' }: { region?: PanelRegion }) {
 
   return (
     <div
-      className="flex h-full w-full min-w-0 select-none items-center gap-1 px-1.5"
+      className={cn(
+        'flex h-full w-full min-w-0 select-none items-center gap-1 rounded-md px-1.5 transition-colors',
+        osDropActive && 'bg-primary/5 ring-1 ring-primary/40',
+      )}
+      // The header band is a window drag region, and `-webkit-app-region: drag`
+      // swallows drag events — a drop target inside it would never fire. Opting
+      // this strip out costs window dragging over the tab row only; the rest
+      // of the header still moves the window.
+      style={NO_DRAG}
       role="toolbar"
       aria-label={t('插件标签')}
       data-testid={`panel-tabs-${region}`}
+      {...osDropHandlers}
     >
       {/* Tabs and `+` scroll together, with `+` immediately after the last
           tab (not pinned to the strip's right edge). With no tabs it is the

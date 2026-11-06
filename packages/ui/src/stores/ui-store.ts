@@ -5,6 +5,42 @@ import { useComposerStore } from './composer-store';
 import { windowScopedStorage, hasDesktopWindowApi } from '@/lib/window-identity';
 import { openWithSystemApp } from '@/lib/utils';
 
+/**
+ * Route an absolute path through the filePreview contribution chain and open
+ * it in the right column.
+ *
+ * Exported (rather than living only in `setActivePreviewFile`) so a multi-file
+ * drop can await the routing in drop order — concurrent `find-preview`
+ * responses would otherwise open the tabs in arbitrary order and focus the
+ * wrong one.
+ */
+export async function openPreviewFile(path: string): Promise<void> {
+  useUIStore.setState({ activePreviewFilePath: path });
+
+  const api = (window as unknown as {
+    electronAPI?: { invoke?: (channel: string, ...args: unknown[]) => Promise<unknown> };
+  }).electronAPI;
+  if (!api?.invoke) return;
+
+  try {
+    const res = await api.invoke('pi:plugin:find-preview', { path });
+    const panelId = (res as { panelId?: string | null } | undefined)?.panelId;
+    if (panelId) {
+      useUIStore.setState({ rightPanelOpen: true });
+      usePanelStore.getState().openPanel(panelId, { focus: true, params: { file: path } });
+    } else {
+      // No preview plugin claims this extension — code files, and the
+      // formats the file viewer deliberately leaves out (mkv/avi, Office
+      // formats without a renderer). Hand it to the system instead:
+      // falling through silently made the click look broken.
+      openWithSystemApp(path, useUIStore.getState().activeWorkspaceId ?? undefined);
+    }
+  } catch {
+    // A dropped file with no route is not actionable enough to toast; the
+    // panel simply does not open.
+  }
+}
+
 type ConnectionStatus = 'connected' | 'disconnected' | 'connecting';
 
 interface UIState {
@@ -131,28 +167,11 @@ export const useUIStore = create<UIState>()(
       // a plugin panel claims the extension — there is no host fallback
       // (preview is fully plugin-owned).
       setActivePreviewFile: (path) => {
-        set({ activePreviewFilePath: path });
-        if (!path) return;
-        const api = (window as unknown as {
-          electronAPI?: { invoke?: (channel: string, ...args: unknown[]) => Promise<unknown> };
-        }).electronAPI;
-        if (!api?.invoke) return;
-        api
-          .invoke('pi:plugin:find-preview', { path })
-          .then((res) => {
-            const panelId = (res as { panelId?: string | null } | undefined)?.panelId;
-            if (panelId) {
-              set({ rightPanelOpen: true });
-              usePanelStore.getState().openPanel(panelId, { focus: true, params: { file: path } });
-            } else {
-              // No preview plugin claims this extension — code files, and the
-              // formats the file viewer deliberately leaves out (mkv/avi, Office
-              // formats without a renderer). Hand it to the system instead:
-              // falling through silently made the click look broken.
-              openWithSystemApp(path, useUIStore.getState().activeWorkspaceId ?? undefined);
-            }
-          })
-          .catch(() => {});
+        if (!path) {
+          set({ activePreviewFilePath: null });
+          return;
+        }
+        void openPreviewFile(path);
       },
       toggleSidebar: () => set((s) => ({ sidebarOpen: !s.sidebarOpen })),
       toggleRightPanel: () => set((s) => ({ rightPanelOpen: !s.rightPanelOpen })),

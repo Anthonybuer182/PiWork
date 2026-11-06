@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type DragEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, FileText, Folder, Loader2, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { AlertTriangle, FileText, Folder, FolderX, Loader2, RefreshCw, Search, Trash2 } from 'lucide-react';
 import type { FileEntry, FileSearchResult } from '@pi/sdk-wrapper';
 import { useSDK } from '@/hooks/use-sdk';
 import { useUIStore } from '@/stores/ui-store';
@@ -19,6 +19,12 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import { isPreviewableInRightPanel, openWithSystemApp } from '@/lib/utils';
+import {
+  canImportFiles,
+  droppedFilePaths,
+  importDroppedFiles,
+  isOsFileDrag,
+} from '@/lib/os-drop';
 
 const HIDDEN_DIRS = new Set(['.git', 'node_modules', '.vite', 'dist', '.next', '__pycache__', '.DS_Store']);
 const DEBOUNCE_MS = 150;
@@ -60,6 +66,30 @@ export function FileTree() {
     queryFn: () => sdk.file.list(activeWorkspaceId!),
     enabled: !!activeWorkspaceId,
     staleTime: 5_000,
+  });
+
+  // A workspace folder deleted outside the app makes `file.list` throw a bare
+  // ENOENT. Ask the host whether the folder is still there so the panel can
+  // name the real problem instead of showing a generic load failure. The web
+  // build has no host bridge and keeps the generic message.
+  const { data: workspaceMissing } = useQuery({
+    queryKey: ['workspace-missing', activeWorkspaceId],
+    queryFn: async () => {
+      if (!activeWorkspaceId) return false;
+      const exists = (window as unknown as {
+        electronAPI?: { fs?: { exists?: (path: string) => Promise<boolean> } };
+      }).electronAPI?.fs?.exists;
+      if (!exists) return false;
+      try {
+        return !(await exists(activeWorkspaceId));
+      } catch {
+        return false;
+      }
+    },
+    enabled: !!activeWorkspaceId,
+    // Re-check when the user comes back to the window (React Query's default
+    // focus refetch) — the folder may have been deleted in the meantime.
+    staleTime: 0,
   });
 
   const {
@@ -119,6 +149,80 @@ export function FileTree() {
     }
   };
 
+  // ── OS file drop: copy into the workspace root ──
+  // `dragenter`/`dragleave` fire for every child element, so a depth counter
+  // is what keeps the overlay from flickering as the pointer crosses rows.
+  const dragDepth = useRef(0);
+  const [dropActive, setDropActive] = useState(false);
+  const [importing, setImporting] = useState(false);
+
+  // The web build has no path bridge, so only the desktop build advertises a
+  // drop affordance; its drop still prevents navigation and explains itself.
+  const handleDragEnter = (e: DragEvent<HTMLDivElement>) => {
+    if (!isOsFileDrag(e.dataTransfer) || !canImportFiles()) return;
+    e.preventDefault();
+    dragDepth.current += 1;
+    setDropActive(true);
+  };
+
+  const handleDragOver = (e: DragEvent<HTMLDivElement>) => {
+    if (!isOsFileDrag(e.dataTransfer) || !canImportFiles()) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+  };
+
+  const handleDragLeave = (e: DragEvent<HTMLDivElement>) => {
+    if (!isOsFileDrag(e.dataTransfer)) return;
+    dragDepth.current = Math.max(0, dragDepth.current - 1);
+    if (dragDepth.current === 0) setDropActive(false);
+  };
+
+  const handleDrop = async (e: DragEvent<HTMLDivElement>) => {
+    if (!isOsFileDrag(e.dataTransfer)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepth.current = 0;
+    setDropActive(false);
+    if (importing) return;
+
+    if (!canImportFiles()) {
+      toast(t('仅桌面端支持导入文件'), 'error');
+      return;
+    }
+    const paths = droppedFilePaths(e.dataTransfer);
+    if (paths.length === 0) {
+      toast(t('无法获取拖入文件的路径'), 'error');
+      return;
+    }
+
+    const workspaceId = activeWorkspaceId;
+    setImporting(true);
+    try {
+      const result = await importDroppedFiles(paths);
+      // Prefix invalidation covers the root list and every expanded directory.
+      queryClient.invalidateQueries({ queryKey: ['files', workspaceId] });
+      queryClient.invalidateQueries({ queryKey: ['file-search', workspaceId] });
+
+      if (result.imported.length > 0) {
+        toast(
+          result.skipped.length > 0
+            ? t('已导入 {count} 项，跳过 {skipped} 项', {
+                count: result.imported.length,
+                skipped: result.skipped.length,
+              })
+            : t('已导入 {count} 项', { count: result.imported.length }),
+        );
+      } else {
+        toast(t('没有可导入的文件'), 'error');
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast(t('导入失败：{message}', { message }), 'error');
+    } finally {
+      setImporting(false);
+    }
+  };
+
   if (!activeWorkspaceId) {
     return (
       <div className="flex flex-1 items-center justify-center p-4 text-sm text-muted-foreground">
@@ -127,11 +231,40 @@ export function FileTree() {
     );
   }
 
+  // The folder itself is gone: a file list can only fail, and search would
+  // report "no matches" for a directory that is not there. Name the real
+  // problem instead of the generic load error.
+  if (workspaceMissing) {
+    return (
+      <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-center">
+        <FolderX className="h-6 w-6 text-muted-foreground/70" />
+        <p className="text-sm font-medium">{t('工作区目录不存在')}</p>
+        <p className="max-w-full break-all text-xs text-muted-foreground">{activeWorkspaceId}</p>
+      </div>
+    );
+  }
+
   const searching = searchFetching && !!debounced;
   const hasQuery = debounced.length > 0;
 
   return (
-    <div className="flex flex-col flex-1 min-h-0">
+    <div
+      className="relative flex flex-col flex-1 min-h-0"
+      onDragEnter={handleDragEnter}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+      data-testid="file-tree-dropzone"
+    >
+      {(dropActive || importing) && (
+        <div className="pointer-events-none absolute inset-0 z-20 m-1 flex items-center justify-center rounded-md border-2 border-dashed border-primary/50 bg-background/85">
+          <span className="flex items-center gap-2 px-3 text-xs font-medium text-foreground">
+            {importing && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+            {importing ? t('正在导入…') : t('松开以导入到工作区')}
+          </span>
+        </div>
+      )}
+
       <div className="flex items-center gap-1.5 px-2 py-1.5 text-xs font-medium text-muted-foreground">
         <Folder className="h-3.5 w-3.5" />
         <span className="flex-1">{t('文件')}</span>
@@ -139,7 +272,12 @@ export function FileTree() {
           variant="ghost"
           size="icon"
           className="h-5 w-5"
-          onClick={() => queryClient.invalidateQueries({ queryKey: ['files', activeWorkspaceId] })}
+          onClick={() => {
+            queryClient.invalidateQueries({ queryKey: ['files', activeWorkspaceId] });
+            // Re-check existence too: the folder may have been removed outside
+            // the app since the last focus refetch.
+            queryClient.invalidateQueries({ queryKey: ['workspace-missing', activeWorkspaceId] });
+          }}
           disabled={isFetching}
           aria-label={t('刷新文件')}
         >

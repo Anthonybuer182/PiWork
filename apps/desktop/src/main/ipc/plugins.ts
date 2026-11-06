@@ -160,6 +160,21 @@ export function registerPluginIpcHandlers(system: PluginSystem, windows?: Window
     return { panelId: system.findPreviewHandler(path) };
   });
 
+  // OS files dropped on a plugin PANEL BODY (a native view): the shell renderer
+  // never sees that event, so the view's preload resolves the paths and sends
+  // them here. Route them to the owning window's host renderer, which owns the
+  // right-column tab store. Paths never pass through the plugin page.
+  ipcMain.on('pi:plugin:os-drop', (event, paths: unknown) => {
+    if (!windows || !Array.isArray(paths)) return;
+    const ctx = windows.byWebContents(event.sender);
+    if (!ctx || !ctx.pluginWebViews?.ownsWebContents(event.sender)) return;
+    const cleaned = paths
+      .filter((path): path is string => typeof path === 'string' && path.length > 0)
+      .slice(0, 50);
+    if (cleaned.length === 0) return;
+    windows.send(ctx.win, 'pi:os:dropped-files', { paths: cleaned });
+  });
+
   ipcMain.handle('pi:plugin:list-tools', () => {
     return system.aggregateTools().map((t) => ({ name: t.name, description: t.description, parameters: t.parameters }));
   });

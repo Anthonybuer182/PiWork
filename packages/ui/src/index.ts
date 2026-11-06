@@ -23,6 +23,7 @@ export { Select, SelectGroup, SelectValue, SelectTrigger, SelectContent, SelectL
 export { Slot } from './components/ui/slot';
 
 export { cn, isTextEditableFile, isPreviewableInRightPanel, openWithSystemApp } from './lib/utils';
+export { openDroppedPaths } from './lib/open-dropped';
 
 // Multi-window helpers (no-ops in the web build).
 export {

@@ -1,6 +1,7 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type {
   BuiltinModelId,
+  ImportFilesResult,
   VoiceBuiltinModel,
   VoiceCapability,
   VoiceModelProgress,
@@ -95,6 +96,14 @@ export interface ElectronAPI {
     listDir: (path: string) => Promise<DirEntry[]>;
     delete: (path: string) => Promise<{ success: boolean }>;
     rename: (oldPath: string, newPath: string) => Promise<{ success: boolean; path: string }>;
+    /**
+     * Absolute path of a `File` from an OS drop. Electron 32 removed
+     * `File.path`; this is the supported replacement and must run in the
+     * preload. JavaScript-constructed files yield '' — callers filter those.
+     */
+    pathForFile: (file: File) => string;
+    /** Copy OS-dropped paths into this window's workspace root. */
+    importFiles: (sources: string[]) => Promise<ImportFilesResult>;
   };
 
   // ── Shell ──
@@ -222,6 +231,8 @@ const electronAPI: ElectronAPI = {
     listDir: (p) => ipcRenderer.invoke('pi:fs:listDir', p),
     delete: (p) => ipcRenderer.invoke('pi:fs:delete', p),
     rename: (oldPath, newPath) => ipcRenderer.invoke('pi:fs:rename', oldPath, newPath),
+    pathForFile: (file) => webUtils.getPathForFile(file),
+    importFiles: (sources) => ipcRenderer.invoke('pi:fs:importFiles', sources),
   },
 
   shell: {

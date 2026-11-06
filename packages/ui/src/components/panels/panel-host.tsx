@@ -3,6 +3,9 @@ import { PanelRail } from './panel-rail';
 import { PanelBody, PaneView } from './panel-slot';
 import { PanelWelcome } from './panel-welcome';
 import { usePanelStore, panelIdOfTab, type PanelEntry, type PanelRegion } from '@/stores/panel-store';
+import { useOsFileDropTarget } from '@/lib/os-drop';
+import { openDroppedPaths } from '@/lib/open-dropped';
+import { useI18n } from '@/i18n';
 
 export { PanelRail };
 
@@ -29,10 +32,18 @@ export function PanelHost({
   /** Host actions pinned to the bottom of this region's rail. */
   railFooter?: ReactNode;
 }) {
+  const { t } = useI18n();
   const panels = usePanelStore((s) => s.panels);
   const openIds = usePanelStore((s) => s.openPanelIds[region]);
   const activeId = usePanelStore((s) => s.focusedId[region]);
   const mountedIds = usePanelStore((s) => s.mountedIds);
+
+  // The right body's DOM fallback (the welcome grid, and any gap not covered
+  // by a native view). Open tab bodies are WebContentsViews — their drops are
+  // forwarded by the plugin-view preload over `pi:os:dropped-files`.
+  const { active: osDropActive, handlers: osDropHandlers } = useOsFileDropTarget((paths) => {
+    void openDroppedPaths(paths);
+  });
 
   const byId = useMemo(() => new Map(panels.map((p) => [p.id, p])), [panels]);
   const open = useMemo(
@@ -66,7 +77,14 @@ export function PanelHost({
 
   // ── RIGHT region: one visible pane per active tab ──
   return (
-    <div className="flex h-full w-full" data-panel-slots={region}>
+    <div className="relative flex h-full w-full" data-panel-slots={region} {...osDropHandlers}>
+      {osDropActive && (
+        <div className="pointer-events-none absolute inset-0 z-30 m-2 flex items-center justify-center rounded-lg border-2 border-dashed border-primary/50 bg-background/80">
+          <span className="px-3 text-xs font-medium text-foreground">
+            {t('松开以在右栏打开')}
+          </span>
+        </div>
+      )}
       {open.length === 0 ? (
         <PanelWelcome region={region} />
       ) : (

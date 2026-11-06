@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 
 /**
  * Preload for plugin WebContentsViews.
@@ -415,6 +415,41 @@ const bridge = {
 };
 
 contextBridge.exposeInMainWorld('__piViewBridge', bridge);
+
+// ── OS file drops on the panel body ──
+// A panel body is a native WebContentsView, so the shell renderer never sees
+// these events. Resolve the paths here (the page never learns them) and hand
+// them to main, which routes them back to the owning window's host renderer to
+// open in the right column. Bubble phase + `defaultPrevented`: a plugin page
+// that handles the drop itself keeps it.
+function installOsFileDropForwarding(): void {
+  const isFileDrag = (dataTransfer: DataTransfer | null): boolean =>
+    !!dataTransfer &&
+    Array.from(dataTransfer.types ?? []).some((type) => type.toLowerCase() === 'files');
+
+  window.addEventListener('dragover', (event) => {
+    if (!isFileDrag(event.dataTransfer) || event.defaultPrevented) return;
+    event.preventDefault();
+    if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+  });
+
+  window.addEventListener('drop', (event) => {
+    if (!isFileDrag(event.dataTransfer) || event.defaultPrevented) return;
+    event.preventDefault();
+    const paths: string[] = [];
+    for (const file of Array.from(event.dataTransfer?.files ?? [])) {
+      try {
+        const path = webUtils.getPathForFile(file);
+        if (path) paths.push(path);
+      } catch {
+        // Not an OS-backed file — ignore it.
+      }
+    }
+    if (paths.length > 0) ipcRenderer.send('pi:plugin:os-drop', [...new Set(paths)]);
+  });
+}
+
+installOsFileDropForwarding();
 
 // Ask for the UI MessagePort immediately. Main sees THIS view's webContents as
 // the sender, so the port is transferred here rather than to the shell — which

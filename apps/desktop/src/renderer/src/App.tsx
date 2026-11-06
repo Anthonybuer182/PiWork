@@ -18,6 +18,7 @@ import {
   initAskBridge,
   useTodoStore,
   initTodoBridge,
+  openDroppedPaths,
   initToolBridge,
   initPluginVoiceBridge,
   getPluginBridge,
@@ -336,6 +337,20 @@ function AppContent() {
     api.on('pi:chat:send', (payload) => {
       const text = (payload as { text?: string } | undefined)?.text;
       if (text) useComposerStore.getState().setTriggerSend(text);
+    });
+  }, []);
+
+  // A file dropped on a plugin panel BODY is forwarded out of that native view
+  // by the plugin preload (view → main → here); the shell DOM never sees it.
+  // Open it through the same right-column path as a drop on the tab strip.
+  useEffect(() => {
+    const api = (window as unknown as {
+      electronAPI?: { on?: (channel: string, cb: (payload: unknown) => void) => void };
+    }).electronAPI;
+    if (!api?.on) return;
+    api.on('pi:os:dropped-files', (payload) => {
+      const paths = (payload as { paths?: string[] } | undefined)?.paths;
+      if (Array.isArray(paths) && paths.length > 0) void openDroppedPaths(paths);
     });
   }, []);
 
