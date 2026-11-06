@@ -1,4 +1,4 @@
-import { useMemo, useEffect } from 'react';
+import { useMemo, useEffect, useRef } from 'react';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { createProxySDKClient, IPCTransport } from '@pi/sdk-wrapper';
 import {
@@ -21,6 +21,8 @@ import {
   initToolBridge,
   initPluginVoiceBridge,
   getPluginBridge,
+  toast,
+  useI18n,
 } from '@pi/ui';
 import { AppShell } from '@pi/ui';
 import { LayoutToggles, PanelTabs } from '@pi/ui';
@@ -67,6 +69,7 @@ const HOST_PANELS: PanelEntry[] = [
 function AppContent() {
   useTheme();
   const sdk = useSDK();
+  const { t } = useI18n();
 
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const rightPanelOpen = useUIStore((s) => s.rightPanelOpen);
@@ -264,6 +267,26 @@ function AppContent() {
     useAskStore.getState().sync(sessionId);
     useTodoStore.getState().sync(sessionId);
   }, [activeSessionId]);
+
+  // Background approvals/questions render inside that conversation's timeline.
+  // When one arrives for a conversation that is not on screen, say so — the
+  // run is blocked until someone answers.
+  const pendingPermissions = usePermissionStore((s) => s.pendingByToolCall);
+  const pendingAsks = useAskStore((s) => s.requests);
+  const announcedRef = useRef(new Set<string>());
+  useEffect(() => {
+    const active = useUIStore.getState().activeSessionId;
+    for (const request of Object.values(pendingPermissions)) {
+      if (request.sessionId === active || announcedRef.current.has(request.requestId)) continue;
+      announcedRef.current.add(request.requestId);
+      toast(t('后台会话需要审批：{summary}', { summary: request.summary }));
+    }
+    for (const request of Object.values(pendingAsks)) {
+      if (request.sessionId === active || announcedRef.current.has(request.requestId)) continue;
+      announcedRef.current.add(request.requestId);
+      toast(t('后台会话有一个问题在等你'));
+    }
+  }, [pendingPermissions, pendingAsks, t]);
 
   // ── Tell main which conversation is on screen ──
   // Same view-fact reasoning as the workspace above: only the renderer knows.

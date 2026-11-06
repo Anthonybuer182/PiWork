@@ -128,8 +128,12 @@ function makeStreamingMessage(
  */
 function PendingApprovalFallback({ hostedToolCallIds }: { hostedToolCallIds: Set<string> }) {
   const pendingByToolCall = usePermissionStore((s) => s.pendingByToolCall);
+  const activeSessionId = useUIStore((s) => s.activeSessionId);
+  // Only this conversation's requests: a background run's approval must not
+  // appear — or be answerable — from another conversation's page.
   const orphaned = Object.values(pendingByToolCall).filter(
-    (req) => !hostedToolCallIds.has(req.toolCallId),
+    (req) =>
+      req.sessionId === activeSessionId && !hostedToolCallIds.has(req.toolCallId),
   );
   if (orphaned.length === 0) return null;
   return (

@@ -183,6 +183,12 @@ export const EN_MESSAGES = {
   重命名会话: 'Rename session',
   会话列表: 'Session list',
   新建会话: 'New session',
+  正在运行: 'Running',
+  等待你的操作: 'Waiting for you',
+  '权限模式（全局，重启后恢复默认）': 'Permission mode (global; resets on restart)',
+  '后台会话需要审批：{summary}': 'A background session needs approval: {summary}',
+  后台会话有一个问题在等你: 'A background session has a question for you',
+  后台会话已完成: 'A background session finished',
   重命名: 'Rename',
   搜索会话: 'Search sessions',
   '搜索会话...': 'Search sessions…',
@@ -205,10 +211,7 @@ export const EN_MESSAGES = {
   高危操作逐条批准: 'Approve high-risk actions one by one',
   完全访问: 'Full access',
   '不拦截，仅记录审计日志': 'Do not block; only write an audit log',
-  '会话创建后可设置权限模式': 'Permission mode can be changed after the session starts',
-  '权限模式（新会话沿用上次选择，重启后恢复默认）':
-    'Permission mode (new sessions keep the last choice; resets on restart)',
-  当前: 'Current',
+ 当前: 'Current',
   正在加载: 'loading',
 
   // ── Plugins ──

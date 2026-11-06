@@ -3,7 +3,7 @@ import { APP_NAME } from '@main/branding';
 import { registerIpcHandlers } from '@main/ipc/index';
 import { registerNativeIpcHandlers } from '@main/ipc/native';
 import { registerWindowIpcHandlers } from '@main/ipc/windows';
-import { SettingsManager, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { SettingsManager, ModelRegistry, ModelRuntime, getAgentDir } from '@earendil-works/pi-coding-agent';
 import { setSharedModelRuntime } from '@pi/sdk-wrapper/adapters';
 import { copyFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { join } from 'path';
@@ -16,6 +16,7 @@ import { registerPluginIpcHandlers } from '@main/ipc/plugins';
 import { registerLiveSlotIpcHandlers } from '@main/plugins/slots';
 import { createHostAgentTools, type AgentCustomTool } from '@main/agent-tools';
 import { PermissionService, installPermissionGate, registerPermissionIpc } from '@main/permissions';
+import { readPermissionMode, writePermissionMode } from '@main/permissions/mode-store';
 import { AskService, registerAskIpc } from '@main/asks';
 import { TodoService, registerTodoIpc } from '@main/todos';
 import { ToolSettingsService, registerToolSettingsIpc } from '@main/preferences/tools';
@@ -180,15 +181,19 @@ if (!gotLock) {
     const sendToSession = (sessionId: string | null | undefined, channel: string, payload: unknown) =>
       windows.sendToSession(sessionId, channel, payload);
 
-    // Permission modes (默认 / 完全访问). Per-session choices live in main,
-    // keyed by session; the last picked mode seeds every session with no
-    // explicit choice, and a restart resets everything to 'default' — 完全访问
-    // stays a per-run decision. High-risk calls in default mode block the
-    // agent until the renderer's inline approval card answers; 完全访问 lets
-    // everything through but leaves an audit line behind.
+    // Permission mode (默认 / 完全访问): one global setting, stored in pi's
+    // settings.json under `permissionMode` (unknown keys survive pi's own
+    // saves). High-risk calls in default mode block the agent until the
+    // renderer's inline approval card answers; 完全访问 lets everything
+    // through but leaves an audit line behind.
+    const permissionSettingsFile = join(getAgentDir(), 'settings.json');
     const permissionService = new PermissionService(
       (payload) => sendToSession(payload.sessionId, 'pi:permission:request', payload),
       (payload) => sendToSession(payload.sessionId, 'pi:permission:cancelled', payload),
+      {
+        initialMode: readPermissionMode(permissionSettingsFile),
+        onModeChange: (mode) => writePermissionMode(permissionSettingsFile, mode),
+      },
     );
     registerPermissionIpc(permissionService, windows);
     const permissionModeFor = (sessionId: string) => permissionService.getMode(sessionId);

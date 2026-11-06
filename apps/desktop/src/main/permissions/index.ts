@@ -50,10 +50,12 @@ const READ_ONLY_TOOLS = new Set([
 ]);
 
 export class PermissionService {
-  /** session key → mode. Missing key = the last mode picked this run. */
-  private modes = new Map<string, PermissionMode>();
-  /** Seeds sessions with no explicit choice; stays 'default' until someone picks. */
-  private fallbackMode: PermissionMode = 'default';
+  /**
+   * One mode for every conversation, like the model and thinking-level
+   * settings: the permission posture is a global choice, not a per-tab one.
+   * The host persists it in pi's settings.json (`permissionMode`).
+   */
+  private mode: PermissionMode = 'default';
   /** session key → rule keys approved with 总是允许 (this session only). */
   private remembered = new Map<string, Set<string>>();
   /** request id → payload + resolver, for every call currently waiting. */
@@ -62,23 +64,32 @@ export class PermissionService {
     { payload: PermissionRequestPayload; resolve: (decision: PermissionDecision) => void }
   >();
   private requestCounter = 0;
+  /** Persists the global mode (the host writes it into settings.json). */
+  private readonly onModeChange?: (mode: PermissionMode) => void;
 
   constructor(
     /** Delivers an approval request to the renderer that owns the session. */
     private sendRequest: (payload: PermissionRequestPayload) => void,
     /** Notifies the renderer that a pending request died without a verdict (abort). */
     private sendCancelled: (payload: { requestId: string; sessionId?: string }) => void = () => {},
-  ) {}
-
-  getMode(sessionKey: string): PermissionMode {
-    return this.modes.get(sessionKey) ?? this.fallbackMode;
+    options: {
+      /** Restored at launch; a missing value is the safe default. */
+      initialMode?: PermissionMode;
+      /** Called after every change, so the choice survives a restart. */
+      onModeChange?: (mode: PermissionMode) => void;
+    } = {},
+  ) {
+    this.mode = options.initialMode ?? 'default';
+    this.onModeChange = options.onModeChange;
   }
 
-  setMode(sessionKey: string, mode: PermissionMode): void {
-    this.modes.set(sessionKey, mode);
-    // Sessions created afterwards (and the keyless 'default' bucket) follow
-    // the last pick — in-memory only, so a restart resets the seed too.
-    this.fallbackMode = mode;
+  getMode(_sessionKey?: string): PermissionMode {
+    return this.mode;
+  }
+
+  setMode(_sessionKey: string | undefined, mode: PermissionMode): void {
+    this.mode = mode;
+    this.onModeChange?.(mode);
   }
 
   /**

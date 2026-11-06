@@ -648,7 +648,11 @@ export function createRealSessionService(): SessionService {
     async list(workspaceId: string): Promise<Session[]> {
       try {
         const sessions = await SessionManager.list(workspaceId);
-        return sessions.map(toSession);
+        // Order by creation, not by last activity: a long run finishing must
+        // not move its conversation to the top of the list.
+        return sessions
+          .map(toSession)
+          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       } catch (err) {
         // `SessionManager.list` already returns [] for a workspace whose
         // session directory is missing, so reaching here means something

@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import { setPanelLayoutWorkspace, usePanelStore } from './panel-store';
+import { useComposerStore } from './composer-store';
 import { windowScopedStorage, hasDesktopWindowApi } from '@/lib/window-identity';
 import { openWithSystemApp } from '@/lib/utils';
 
@@ -102,10 +103,12 @@ export const useUIStore = create<UIState>()(
       // A workspace change also switches which saved panel layout applies —
       // layouts belong to the folder, not to the window.
       setActiveWorkspace: (id) => {
+        useComposerStore.getState().enterSession(null);
         set({ activeWorkspaceId: id, activeSessionId: null });
         setPanelLayoutWorkspace(id);
       },
       setActiveWorkspaceAndSession: (workspaceId, sessionId) => {
+        useComposerStore.getState().enterSession(sessionId);
         set({ activeWorkspaceId: workspaceId, activeSessionId: sessionId });
         setPanelLayoutWorkspace(workspaceId);
       },
@@ -118,6 +121,10 @@ export const useUIStore = create<UIState>()(
       // render before any of them can observe the new session.
       setActiveSession: (id) => {
         usePanelStore.getState().enterSession(id);
+        // Swap the visible live-run slot and draft in the same synchronous
+        // step, so the first frame of the new conversation is idle unless it
+        // has a run of its own.
+        useComposerStore.getState().enterSession(id);
         set({ activeSessionId: id });
       },
       // File selection routes through the filePreview contribution chain:
