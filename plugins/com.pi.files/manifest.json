@@ -2,7 +2,7 @@
   "id": "com.pi.files",
   "name": "文件查看器",
   "description": "文件查看器 — 在右栏查看 docx/pptx/xlsx/pdf、markdown、html、纯文本（txt/json/log），以及图片、视频、音频；文档由内置的 GenOffice 引擎渲染（Apache-2.0），无需外部工具或联网安装",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "apiVersion": 5,
   "engines": {
     "pi-desktop": ">=0.1.0"

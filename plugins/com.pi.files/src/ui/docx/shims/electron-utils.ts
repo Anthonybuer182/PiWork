@@ -48,6 +48,36 @@ export function documentFontsSettled(timeoutMs = 30_000): Promise<unknown> {
   return Promise.race([document.fonts.ready, headlessSleep(timeoutMs)]);
 }
 
+export interface SafeExternalUrlOptions {
+  /** Protocol allowlist (with trailing colon). Defaults to http/https only. */
+  allowedProtocols?: readonly string[];
+}
+
+const SAFE_URL_PROTOCOLS: readonly string[] = ['http:', 'https:'];
+
+/**
+ * Stand-in for `@genoffice/electron-utils/safe-external-url` — the single gate
+ * every `shell.openExternal` call in GenOffice goes through (the slides PDF
+ * export uses it to emit link annotations, docs uses it for sanitized
+ * markdown). Pure by construction, so it is implemented faithfully rather than
+ * stubbed; a permissive stub would let `file:`/`javascript:` URLs through.
+ */
+export function safeExternalUrl(
+  url: unknown,
+  options?: SafeExternalUrlOptions,
+): string | null {
+  if (typeof url !== 'string') return null;
+  const text = url.trim();
+  let parsed: URL;
+  try {
+    parsed = new URL(text);
+  } catch {
+    return null;
+  }
+  const allowed = options?.allowedProtocols ?? SAFE_URL_PROTOCOLS;
+  return allowed.includes(parsed.protocol) ? text : null;
+}
+
 export async function runHeadlessRendererExport(
   outPath: string,
   waitUntilReady: () => Promise<void>,

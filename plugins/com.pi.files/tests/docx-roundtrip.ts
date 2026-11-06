@@ -6,7 +6,8 @@
  *
  *   - blocks marked 'original' are copied as the exact substring of the
  *     original word/document.xml
- *   - every other zip entry is copied unmodified
+ *   - every other zip entry is copied unmodified, except docProps/core.xml,
+ *     whose dcterms:modified / cp:revision are stamped on a real save
  *   - if nothing changed at all, the ORIGINAL BYTES are returned untouched
  *
  * If that regresses, silent corruption reaches users' documents. So this runs
@@ -100,7 +101,8 @@ const edited = originalBlocksOf(parsed).map((blk, i) =>
       }
     : blk,
 );
-const editedBytes = await saveDocx(parsed, edited, {});
+const SAVED_AT = '2026-01-01T00:00:00.000Z';
+const editedBytes = await saveDocx(parsed, edited, { savedAt: SAVED_AT });
 
 check('an edit produces different bytes', sha(editedBytes) !== sha(fixture));
 
@@ -110,10 +112,23 @@ const changed = [...after.keys()].filter((k) => before.get(k) !== after.get(k));
 const added = [...after.keys()].filter((k) => !before.has(k));
 const removed = [...before.keys()].filter((k) => !after.has(k));
 
+// The body part is the edit; core.xml is the engine stamping the save. Nothing
+// else may move — a rewrite of styles, numbering or media would be the silent
+// corruption this test exists to catch.
 check(
-  'only word/document.xml changed',
-  changed.length === 1 && changed[0] === 'word/document.xml' && added.length === 0 && removed.length === 0,
+  'only word/document.xml and docProps/core.xml changed',
+  changed.includes('word/document.xml') &&
+    changed.every((k) => k === 'word/document.xml' || k === 'docProps/core.xml') &&
+    added.length === 0 &&
+    removed.length === 0,
   `changed: ${JSON.stringify(changed)}  added: ${JSON.stringify(added)}  removed: ${JSON.stringify(removed)}`,
+);
+
+const coreXml = await partText(editedBytes, 'docProps/core.xml');
+// dcterms:modified drops milliseconds (`2026-01-01T00:00:00.000Z` → `…:00Z`).
+check(
+  'the save stamp is written to core.xml',
+  typeof coreXml === 'string' && coreXml.includes(SAVED_AT.replace(/\.\d{3}Z$/, 'Z')),
 );
 
 const editedXml = await partText(editedBytes, 'word/document.xml');

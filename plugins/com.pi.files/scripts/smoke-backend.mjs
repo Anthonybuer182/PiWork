@@ -508,7 +508,7 @@ console.log(`  fixture: ${deckPath} (${original.length} bytes)\n`);
   const byFolder = await callTool('files_search', { root: dir, query: 'reports' });
   check(
     'files_search matches folder names, so siblings are discoverable',
-    (byFolder.content?.[0]?.text ?? '').includes(mdPath),
+    (byFolder.content?.[0]?.text ?? '').includes(docxPath),
     byFolder.content?.[0]?.text,
   );
 
@@ -518,25 +518,41 @@ console.log(`  fixture: ${deckPath} (${original.length} bytes)\n`);
   check('details carry absolute paths for office_read', newest.details?.results?.every((r) => r.path.startsWith(dir)), JSON.stringify(newest.details?.results?.[0]));
 
   // The freshness contract: an edit outside the app must show up in the next
-  // answer. Changing the text AND the size rules out a same-mtime edge.
-  writeFileSync(mdPath, '# 会议记录（修订版）\n\n正文加了一行。\n');
-  const edited = await callTool('files_search', { root: dir, query: '修订版' });
+  // answer. Rebuild the sharedStrings workbook with new cell text; the size and
+  // mtime both change, ruling out a same-mtime edge.
+  const revisedBook = new JSZip();
+  revisedBook.file(
+    'xl/workbook.xml',
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets><sheet name="预算表" sheetId="1"/></sheets></workbook>',
+  );
+  revisedBook.file(
+    'xl/sharedStrings.xml',
+    '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>修订版预算</t></si></sst>',
+  );
+  revisedBook.file(
+    'xl/worksheets/sheet1.xml',
+    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>',
+  );
+  writeFileSync(sharedPath, await revisedBook.generateAsync({ type: 'nodebuffer' }));
+  const edited = await callTool('files_search', { root: dir, query: '修订版预算' });
   check(
     'an external edit is reflected on the next search',
-    (edited.content?.[0]?.text ?? '').includes('会议记录（修订版）'),
+    (edited.content?.[0]?.text ?? '').includes(sharedPath),
     edited.content?.[0]?.text,
   );
 
+  // Plain text is deliberately outside the index (PLUGIN.md: use grep).
   const mdBody = await callTool('files_search', { root: dir, query: '加了一行' });
   check(
-    'files_search matches md body text, not just the heading',
-    (mdBody.content?.[0]?.text ?? '').includes(mdPath),
+    'plain-text bodies stay out of the index',
+    !(mdBody.content?.[0]?.text ?? '').includes(mdPath),
     mdBody.content?.[0]?.text,
   );
 
   rmSync(mdPath);
-  const afterDelete = await callTool('files_search', { root: dir, query: '修订版' });
-  check('a deleted file disappears from the index', !(afterDelete.content?.[0]?.text ?? '').includes(mdPath), afterDelete.content?.[0]?.text);
+  rmSync(sharedPath);
+  const afterDelete = await callTool('files_search', { root: dir, query: '修订版预算' });
+  check('a deleted file disappears from the index', !(afterDelete.content?.[0]?.text ?? '').includes(sharedPath), afterDelete.content?.[0]?.text);
 }
 
 rmSync(dir, { recursive: true, force: true });

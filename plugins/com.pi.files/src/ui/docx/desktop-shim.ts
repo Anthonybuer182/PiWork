@@ -285,10 +285,24 @@ async function openDocxPath(path: string): Promise<unknown> {
   const data = await res.arrayBuffer();
   const meta = await backend<{ mtime?: number }>('file.stat', { path }).catch(() => ({ mtime: undefined }));
   if (typeof meta?.mtime === 'number') openMtimes.set(path, meta.mtime);
+
+  // Newer GenOffice opens through a ONE-SHOT URL (`dataUrl`) and fetches it
+  // exactly once, rather than handing the renderer an ArrayBuffer over IPC.
+  // A blob URL is the equivalent in this host: same-origin under the plugin
+  // page and fetchable by the renderer. Release it after the open has had
+  // time to read it — a document replaced in place must not keep its old
+  // bytes alive for the panel's whole lifetime.
+  const dataUrl = URL.createObjectURL(
+    new Blob([data], {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }),
+  );
+  setTimeout(() => URL.revokeObjectURL(dataUrl), 60_000);
+
   return {
     path,
     name: baseName(path),
-    data,
+    dataUrl,
     hash: await sha256Hex(data),
   };
 }

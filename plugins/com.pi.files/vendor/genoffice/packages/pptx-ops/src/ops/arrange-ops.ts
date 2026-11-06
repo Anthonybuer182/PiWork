@@ -190,16 +190,32 @@ const EMU_PER_PT = 12700
 
 function sideMid(el: SlideElement, side: ConnectionSide): { x: number; y: number } {
   const o = el.transform.offset
+  const cx = o.x + o.cx / 2
+  const cy = o.y + o.cy / 2
+  const hx = o.cx / 2
+  const hy = o.cy / 2
+  let dx = 0
+  let dy = 0
   switch (side) {
     case 'top':
-      return { x: o.x + o.cx / 2, y: o.y }
+      dy = -hy
+      break
     case 'left':
-      return { x: o.x, y: o.y + o.cy / 2 }
+      dx = -hx
+      break
     case 'bottom':
-      return { x: o.x + o.cx / 2, y: o.y + o.cy }
+      dy = hy
+      break
     case 'right':
-      return { x: o.x + o.cx, y: o.y + o.cy / 2 }
+      dx = hx
+      break
   }
+  const rot = el.transform.rot ?? 0
+  if (!rot) return { x: cx + dx, y: cy + dy }
+  const rad = ((rot / 60000) * Math.PI) / 180
+  const cos = Math.cos(rad)
+  const sin = Math.sin(rad)
+  return { x: cx + dx * cos - dy * sin, y: cy + dx * sin + dy * cos }
 }
 
 function sideOf(op: Op, field: 'fromSide' | 'toSide'): ConnectionSide | undefined {
@@ -251,6 +267,22 @@ function resolveEndpoint(op: Op, slide: Slide, field: 'from' | 'to', index: numb
   return el
 }
 
+/** Resolve a connector line width to EMU, rejecting overflow to Infinity. Exported for tests. */
+export function resolveConnectorWidthEmu(line: { widthPt?: unknown; widthEmu?: unknown }): number {
+  const widthEmu =
+    line.widthEmu !== undefined
+      ? Math.round(line.widthEmu as number)
+      : line.widthPt !== undefined
+        ? Math.round((line.widthPt as number) * EMU_PER_PT)
+        : EMU_PER_PT
+  // A huge but finite widthPt (e.g. 1e308) overflows to Infinity EMU here;
+  // Infinity is not <= 0, so it would slip through and corrupt the OOXML.
+  if (!Number.isFinite(widthEmu) || widthEmu <= 0) {
+    throw new GuidedError('op "addConnector": line width must be a finite number > 0.')
+  }
+  return widthEmu
+}
+
 function connectorLine(op: Op): { color: string; widthEmu: number; dash?: string } {
   const line = (op.line ?? {}) as {
     color?: unknown
@@ -264,13 +296,7 @@ function connectorLine(op: Op): { color: string; widthEmu: number; dash?: string
   if (line.dash !== undefined && !DASHES.has(String(line.dash))) {
     throw new GuidedError(`op "addConnector": "line.dash" must be one of ${[...DASHES].join('/')}.`)
   }
-  const widthEmu =
-    line.widthEmu !== undefined
-      ? Math.round(line.widthEmu as number)
-      : line.widthPt !== undefined
-        ? Math.round((line.widthPt as number) * EMU_PER_PT)
-        : EMU_PER_PT
-  if (widthEmu <= 0) throw new GuidedError('op "addConnector": line width must be > 0.')
+  const widthEmu = resolveConnectorWidthEmu(line)
   return {
     color: typeof line.color === 'string' ? line.color : '#000000',
     widthEmu,

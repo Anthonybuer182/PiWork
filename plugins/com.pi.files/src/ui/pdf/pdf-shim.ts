@@ -47,6 +47,20 @@ const renamed = emitter<{ oldPath: string; newPath: string }>();
 /** Baselines for the save path's conflict check, keyed by path. */
 const openMtimes = new Map<string, number>();
 
+/** Whole-file bytes, so the chunked reader fetches a document only once. */
+const bytesByPath = new Map<string, Uint8Array>();
+
+async function fileBytes(path: string): Promise<Uint8Array> {
+  const cached = bytesByPath.get(path);
+  if (cached) return cached;
+  const doc = await readDocument(path);
+  const bytes = new Uint8Array(doc.data);
+  bytesByPath.set(path, bytes);
+  if (doc.mtime !== null) openMtimes.set(path, doc.mtime);
+  currentPath = path;
+  return bytes;
+}
+
 installThemeBridge();
 
 window.piSDK?.onMessage((payload) => {
@@ -100,10 +114,28 @@ const api: Record<string, unknown> = {
 
   /** Raw bytes. The renderer paints them with pdf.js; no parsing here. */
   readFile: async (path: string): Promise<ArrayBuffer> => {
-    const doc = await readDocument(path);
-    if (doc.mtime !== null) openMtimes.set(path, doc.mtime);
-    currentPath = path;
-    return doc.data;
+    const bytes = await fileBytes(path);
+    return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+  },
+
+  /**
+   * One slice of a file, with its size.
+   *
+   * GenOffice's reader loops over these instead of asking for one big
+   * ArrayBuffer (a 42 MB clone over IPC could kill the renderer). The bytes are
+   * fetched once and kept in this renderer, so the "chunks" stay cheap without
+   * a second IPC route into the plugin backend.
+   */
+  readFileChunk: async (
+    path: string,
+    start: number,
+    end: number,
+  ): Promise<{ data: Uint8Array; fileSize: number }> => {
+    const bytes = await fileBytes(path);
+    return {
+      data: bytes.slice(Math.max(0, start), Math.max(0, end)),
+      fileSize: bytes.byteLength,
+    };
   },
 
   isUntitled: async (path: string) => !path || path.endsWith('/未命名.pdf'),
@@ -137,6 +169,8 @@ const api: Record<string, unknown> = {
       // Re-baseline: `filesystem.write` compares against the mtime read at open,
       // so without this the second save reports a conflict against our own write.
       if (typeof res?.mtime === 'number') openMtimes.set(path, res.mtime);
+      // The cached copy is the pre-edit file; the next open must re-read it.
+      bytesByPath.delete(path);
       return res?.ok ? { ok: true, path } : { ok: false, error: res?.error ?? '保存失败' };
     } catch (err) {
       return { ok: false, error: err instanceof Error ? err.message : String(err) };

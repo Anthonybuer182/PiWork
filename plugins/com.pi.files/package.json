@@ -1,6 +1,6 @@
 {
   "name": "com.pi.files",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "private": true,
   "description": "文件查看器插件 — 右栏查看 docx/pptx/xlsx/pdf、markdown、html 和纯文本，并提供文档检索与编辑工具；文档由 vendor 的 GenOffice 引擎渲染（Apache-2.0）",
   "type": "module",
@@ -22,6 +22,7 @@
     "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/commands": "^6.11.0",
     "@codemirror/lang-html": "^6.4.12",
+    "@codemirror/lang-json": "^6.0.2",
     "@codemirror/language": "^6.12.4",
     "@codemirror/search": "^6.7.2",
     "@codemirror/state": "^6.7.4",
@@ -82,6 +83,7 @@
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "react-konva": "^19.3.0",
+    "three": "^0.186.1",
     "utif2": "^4.1.0",
     "wavedrom": "^3.7.0",
     "word-extractor": "^1.0.4",

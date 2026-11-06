@@ -72,3 +72,57 @@ export interface GenSparkAccountStatus {
 export function imageGenerationAvailable(..._args: unknown[]): boolean {
   return false;
 }
+
+// ── Provider-selection helpers ───────────────────────────────────────────
+// Newer GenOffice builds move these out of the AI panel and call them from
+// `App.tsx` / `desktop-api.ts` while building the panel's initial state. The
+// plugin has no provider layer at all (the host owns model choice), so the
+// selection helpers are identity operations and the labeller falls back.
+
+export interface AiCustomProfile {
+  id?: string;
+  name?: string;
+  api?: string;
+  apiKey?: string;
+  apiKeyEnv?: string;
+  baseUrl?: string;
+  model?: string;
+  models?: string[];
+  headers?: Record<string, string>;
+  [key: string]: unknown;
+}
+
+export interface AiCustomEndpoint extends AiCustomProfile {
+  id: string;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+}
+
+/** The configured provider id, if there is one; the host owns the real default. */
+export function activeProvider(settings: AiSettings): AiProviderId {
+  const provider = settings.activeProvider;
+  return typeof provider === 'string' && provider ? provider : 'host';
+}
+
+export function normalizeCustomProfile(raw: unknown): AiCustomProfile | undefined {
+  return raw && typeof raw === 'object' ? (raw as AiCustomProfile) : undefined;
+}
+
+/** No custom endpoints exist here; settings pass through untouched. */
+export function resolveCustomEndpoints(settings: AiSettings): AiSettings {
+  return settings;
+}
+
+export function upsertCustomEndpoint(
+  settings: AiSettings,
+  _endpoint: AiCustomEndpoint,
+  _activate = false,
+): AiSettings {
+  return settings;
+}
+
+export function customEndpointLabel(endpoint: AiCustomEndpoint, fallback: string): string {
+  return endpoint?.name || endpoint?.baseUrl || fallback;
+}
