@@ -9,9 +9,9 @@ import { Check, Plus, Search, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { isOsFileDrag, useOsFileDropTarget } from '@/lib/os-drop';
 import { openDroppedPaths } from '@/lib/open-dropped';
-import { showPopupMenu, type PopupMenuItem } from '@/lib/native-menu';
 import { usePanelStore, panelIdOfTab, type PanelEntry, type PanelRegion } from '@/stores/panel-store';
 import { useUIStore } from '@/stores/ui-store';
+import { useTabMenuStore } from '@/stores/tab-menu-store';
 import { useI18n } from '@/i18n';
 import { panelTitle } from './panel-title';
 import { RailIcon } from './panel-rail';
@@ -100,25 +100,11 @@ export function PanelTabs({ region = 'right' }: { region?: PanelRegion }) {
   // Split mode: the per-pane bars replace this strip entirely.
   if (groups.length >= 2) return null;
 
-  const openTabMenu = async (
-    e: ReactMouseEvent,
-    key: string,
-    panel: PanelEntry,
-  ) => {
+  const openTabMenu = (e: ReactMouseEvent, key: string) => {
     e.preventDefault();
-    const items: PopupMenuItem[] = [];
-    if (panel.multiInstance) {
-      items.push({ id: 'split-right', label: t('向右拆分') });
-    }
-    items.push({ id: 'close', label: t('关闭'), separatorBefore: items.length > 0 });
-    items.push({ id: 'close-others', label: t('关闭其他') });
-    const picked = await showPopupMenu(items, { x: e.clientX, y: e.clientY });
-    if (!picked) return;
-    if (picked === 'split-right') splitTab(region, key);
-    else if (picked === 'close') closeTab(region, key);
-    else if (picked === 'close-others') {
-      for (const other of tabs) if (other.key !== key) closeTab(region, other.key);
-    }
+    // PanelHost renders the menu inline above the pane: no floating DOM
+    // popup (covered by the native view) and no hiding of the content.
+    useTabMenuStore.getState().open(region, key);
   };
 
   const picker = (
@@ -186,7 +172,7 @@ export function PanelTabs({ region = 'right' }: { region?: PanelRegion }) {
                     closeTab(region, key);
                   }
                 }}
-                onContextMenu={(e) => void openTabMenu(e, key, panel)}
+                onContextMenu={(e) => openTabMenu(e, key)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault();

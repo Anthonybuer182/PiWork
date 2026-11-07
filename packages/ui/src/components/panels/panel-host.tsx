@@ -1,10 +1,10 @@
 import {
   Fragment,
+  useEffect,
   useMemo,
   useRef,
   useState,
   type DragEvent as ReactDragEvent,
-  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react';
@@ -23,8 +23,8 @@ import {
 } from '@/stores/panel-store';
 import { useOsFileDropTarget } from '@/lib/os-drop';
 import { openDroppedPaths } from '@/lib/open-dropped';
-import { showPopupMenu, type PopupMenuItem } from '@/lib/native-menu';
 import { useI18n } from '@/i18n';
+import { useTabMenuStore } from '@/stores/tab-menu-store';
 import { cn } from '@/lib/utils';
 
 export { PanelRail };
@@ -65,6 +65,8 @@ export function PanelHost({
   const moveTabBetweenGroups = usePanelStore((s) => s.moveTabBetweenGroups);
   const unsplitTab = usePanelStore((s) => s.unsplitTab);
   const setGroupWeights = usePanelStore((s) => s.setGroupWeights);
+  const tabMenuTarget = useTabMenuStore((s) => s.target);
+  const closeTabMenu = useTabMenuStore((s) => s.close);
   const splitRef = useRef<HTMLDivElement>(null);
   const draggingRef = useRef(false);
   const [resizing, setResizing] = useState(false);
@@ -95,6 +97,19 @@ export function PanelHost({
       ),
     [panels, panelOrder, region],
   );
+
+  const tabMenuKey =
+    tabMenuTarget && tabMenuTarget.region === region ? tabMenuTarget.key : null;
+  const tabMenuPanel = tabMenuKey ? byId.get(panelIdOfTab(tabMenuKey)) : undefined;
+
+  useEffect(() => {
+    if (!tabMenuKey) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') closeTabMenu();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [tabMenuKey, closeTabMenu]);
 
   // ── LEFT region: single-view rail + active pane ──
   if (region === 'left') {
@@ -254,27 +269,79 @@ export function PanelHost({
 
   // ── No split: the single tab bed ──
   return (
-    <div
-      className="relative flex h-full w-full"
-      data-panel-slots={region}
-      {...osDropHandlers}
-    >
-      {osDropActive && (
-        <div className="pointer-events-none absolute inset-0 z-30 m-2 flex items-center justify-center rounded-lg border-2 border-dashed border-primary/50 bg-background/80">
-          <span className="px-3 text-xs font-medium text-foreground">
-            {t('松开以在右栏打开')}
-          </span>
+    <div className="flex h-full w-full flex-col">
+      {tabMenuKey && tabMenuPanel && (
+        <div
+          className="flex h-8 shrink-0 items-center gap-1 overflow-x-auto border-b bg-muted/30 px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          role="menu"
+          data-tab-inline-menu
+        >
+          {tabMenuPanel.multiInstance && (
+            <button
+              type="button"
+              className="shrink-0 rounded-sm px-2 py-1 text-[12px] hover:bg-accent"
+              onClick={() => {
+                splitTab(region, tabMenuKey);
+                closeTabMenu();
+              }}
+            >
+              {t('向右拆分')}
+            </button>
+          )}
+          <button
+            type="button"
+            className="shrink-0 rounded-sm px-2 py-1 text-[12px] hover:bg-accent"
+            onClick={() => {
+              closeTab(region, tabMenuKey);
+              closeTabMenu();
+            }}
+          >
+            {t('关闭')}
+          </button>
+          <button
+            type="button"
+            className="shrink-0 rounded-sm px-2 py-1 text-[12px] hover:bg-accent"
+            onClick={() => {
+              for (const key of [...openIds]) {
+                if (key !== tabMenuKey) closeTab(region, key);
+              }
+              closeTabMenu();
+            }}
+          >
+            {t('关闭其他')}
+          </button>
+          <button
+            type="button"
+            aria-label={t('关闭')}
+            className="ml-auto shrink-0 rounded-sm px-2 py-1 text-[12px] text-muted-foreground hover:bg-accent"
+            onClick={closeTabMenu}
+          >
+            <X className="h-3 w-3" />
+          </button>
         </div>
       )}
-      {open.length === 0 ? (
-        <PanelWelcome region={region} />
-      ) : (
-        open.map(({ key, panel }) => {
-          const active = activeId === key;
-          if (!active && !mounted.has(key)) return null;
-          return <PaneView key={key} panel={panel} tabKey={key} active={active} hidden={!active} />;
-        })
-      )}
+      <div
+        className="relative flex min-h-0 flex-1"
+        data-panel-slots={region}
+        {...osDropHandlers}
+      >
+        {osDropActive && (
+          <div className="pointer-events-none absolute inset-0 z-30 m-2 flex items-center justify-center rounded-lg border-2 border-dashed border-primary/50 bg-background/80">
+            <span className="px-3 text-xs font-medium text-foreground">
+              {t('松开以在右栏打开')}
+            </span>
+          </div>
+        )}
+        {open.length === 0 ? (
+          <PanelWelcome region={region} />
+        ) : (
+          open.map(({ key, panel }) => {
+            const active = activeId === key;
+            if (!active && !mounted.has(key)) return null;
+            return <PaneView key={key} panel={panel} tabKey={key} active={active} hidden={!active} />;
+          })
+        )}
+      </div>
     </div>
   );
 }
@@ -315,6 +382,9 @@ function GroupTabBar({
 }) {
   const { t } = useI18n();
   const [dropTarget, setDropTarget] = useState<string | null>(null);
+  const [menu, setMenu] = useState<
+    { type: 'tab'; key: string } | { type: 'bar' } | null
+  >(null);
 
   // `+` adds a tab immediately: a new tab of the group's active panel type
   // (viewer column → viewer tab, browser column → browser tab). It never
@@ -327,29 +397,8 @@ function GroupTabBar({
     if (preferred) onAdd(preferred.id);
   };
 
-  const openTabMenu = async (
-    e: ReactMouseEvent,
-    key: string,
-    panel: PanelEntry,
-  ) => {
-    e.preventDefault();
-    const items: PopupMenuItem[] = [];
-    if (panel.multiInstance) {
-      items.push({ id: 'split-right', label: t('向右拆分') });
-    }
-    items.push({ id: 'close', label: t('关闭'), separatorBefore: items.length > 0 });
-    items.push({ id: 'close-others', label: t('关闭其他') });
-    items.push({ id: 'close-group', label: t('关闭该栏'), separatorBefore: true });
-    const picked = await showPopupMenu(items, { x: e.clientX, y: e.clientY });
-    if (!picked) return;
-    if (picked === 'split-right') onSplit(key);
-    else if (picked === 'close') onClose(key);
-    else if (picked === 'close-others') {
-      for (const other of group.tabs) if (other !== key) onClose(other);
-    } else if (picked === 'close-group') {
-      for (const other of [...group.tabs]) onClose(other);
-    }
-  };
+  const menuPanel =
+    menu?.type === 'tab' ? byId.get(panelIdOfTab(menu.key)) : undefined;
 
   const onDrop = (e: ReactDragEvent, beforeKey?: string) => {
     e.preventDefault();
@@ -360,26 +409,23 @@ function GroupTabBar({
   };
 
   return (
-    <div
-      className="flex h-8 shrink-0 items-center gap-1 overflow-x-auto border-b bg-background px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-      role="tablist"
-      aria-label={t('窗格标签')}
-      data-group-tabs={group.id}
-      onDragOver={(e) => {
-        e.preventDefault();
-        setDropTarget(group.id);
-      }}
-      onDragLeave={() => setDropTarget(null)}
-      onDrop={(e) => onDrop(e)}
-      onContextMenu={async (e) => {
-        e.preventDefault();
-        const picked = await showPopupMenu(
-          [{ id: 'unsplit', label: t('取消拆分') }],
-          { x: e.clientX, y: e.clientY },
-        );
-        if (picked === 'unsplit') onUnsplit();
-      }}
-    >
+    <div className="flex shrink-0 flex-col">
+      <div
+        className="flex h-8 shrink-0 items-center gap-1 overflow-x-auto border-b bg-background px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+        role="tablist"
+        aria-label={t('窗格标签')}
+        data-group-tabs={group.id}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDropTarget(group.id);
+        }}
+        onDragLeave={() => setDropTarget(null)}
+        onDrop={(e) => onDrop(e)}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          setMenu({ type: 'bar' });
+        }}
+      >
       {group.tabs.map((key) => {
         const panel = byId.get(panelIdOfTab(key));
         if (!panel) return null;
@@ -414,8 +460,9 @@ function GroupTabBar({
               }
             }}
             onContextMenu={(e) => {
+              e.preventDefault();
               e.stopPropagation();
-              void openTabMenu(e, key, panel);
+              setMenu({ type: 'tab', key });
             }}
             onDragStart={(e) => {
               e.dataTransfer.effectAllowed = 'move';
@@ -464,6 +511,83 @@ function GroupTabBar({
       >
         <Plus className="h-3.5 w-3.5" />
       </button>
+      </div>
+      {menu && (
+        <div
+          className="flex h-8 shrink-0 items-center gap-1 overflow-x-auto border-b bg-muted/30 px-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+          role="menu"
+          data-tab-inline-menu
+        >
+          {menu.type === 'tab' && menuPanel && (
+            <>
+              {menuPanel.multiInstance && (
+                <button
+                  type="button"
+                  className="shrink-0 rounded-sm px-2 py-1 text-[12px] hover:bg-accent"
+                  onClick={() => {
+                    onSplit(menu.key);
+                    setMenu(null);
+                  }}
+                >
+                  {t('向右拆分')}
+                </button>
+              )}
+              <button
+                type="button"
+                className="shrink-0 rounded-sm px-2 py-1 text-[12px] hover:bg-accent"
+                onClick={() => {
+                  onClose(menu.key);
+                  setMenu(null);
+                }}
+              >
+                {t('关闭')}
+              </button>
+              <button
+                type="button"
+                className="shrink-0 rounded-sm px-2 py-1 text-[12px] hover:bg-accent"
+                onClick={() => {
+                  for (const other of group.tabs) {
+                    if (other !== menu.key) onClose(other);
+                  }
+                  setMenu(null);
+                }}
+              >
+                {t('关闭其他')}
+              </button>
+              <button
+                type="button"
+                className="shrink-0 rounded-sm px-2 py-1 text-[12px] hover:bg-accent"
+                onClick={() => {
+                  for (const other of [...group.tabs]) onClose(other);
+                  setMenu(null);
+                }}
+              >
+                {t('关闭该栏')}
+              </button>
+            </>
+          )}
+          {menu.type === 'bar' && (
+            <button
+              type="button"
+              className="shrink-0 rounded-sm px-2 py-1 text-[12px] hover:bg-accent"
+              onClick={() => {
+                onUnsplit();
+                setMenu(null);
+              }}
+            >
+              {t('取消拆分')}
+            </button>
+          )}
+          <button
+            type="button"
+            aria-label={t('关闭')}
+            className="ml-auto shrink-0 rounded-sm px-2 py-1 text-[12px] text-muted-foreground hover:bg-accent"
+            onClick={() => setMenu(null)}
+          >
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      )}
     </div>
   );
 }
