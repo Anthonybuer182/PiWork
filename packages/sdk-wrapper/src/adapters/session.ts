@@ -1,4 +1,4 @@
-import type { Session, SessionWithMessages, Message, ContentBlock, AssistantMessage, SessionTreeNode, SessionTreeResult, TreeNodeToolCall, ToolCallBlock, ToolResultBlock } from '@pi/types';
+import type { Session, SessionWithMessages, Message, ContentBlock, AssistantMessage, SessionTreeNode, SessionTreeResult, TreeNodeToolCall, ToolCallBlock, ToolResultBlock, TokenUsage } from '@pi/types';
 import { SKILL_REFERENCE_MARKER } from '@pi/types';
 import type { SessionService } from '../services/session.js';
 import {
@@ -458,6 +458,51 @@ function agentMessageToBlocks(msg: any, cwd?: string): ContentBlock[] {
 }
 
 // === Conversion: AgentMessage → our Message type ===
+
+/**
+ * Map the SDK's `Usage` onto our `TokenUsage`.
+ *
+ * `totalTokens` from the SDK already includes cached prompt tokens. The old
+ * fallback (`input + output`) did not, so any payload without an explicit
+ * total under-reported a cache-heavy turn by an order of magnitude.
+ */
+function sdkUsageToTokenUsage(usage: any): TokenUsage | undefined {
+  if (!usage) return undefined;
+  const input = usage.input ?? usage.inputTokens ?? 0;
+  const output = usage.output ?? usage.outputTokens ?? 0;
+  const cacheRead = usage.cacheRead ?? usage.cacheReadTokens ?? 0;
+  const cacheWrite = usage.cacheWrite ?? usage.cacheWriteTokens ?? 0;
+  const cost = typeof usage.cost === 'number' ? usage.cost : usage.cost?.total;
+  return {
+    inputTokens: input,
+    outputTokens: output,
+    totalTokens: usage.totalTokens ?? input + output + cacheRead + cacheWrite,
+    cacheReadTokens: cacheRead,
+    cacheWriteTokens: cacheWrite,
+    cost: typeof cost === 'number' ? cost : 0,
+  };
+}
+
+/**
+ * Sum one entry's usage into a merged message.
+ *
+ * A single UI message can contain several assistant entries (one per model
+ * call in a tool loop). Keeping only the first entry's usage made a reloaded
+ * conversation report a fraction of its tokens and cost.
+ */
+function addTokenUsage(target: TokenUsage | undefined, extra: TokenUsage | undefined): TokenUsage | undefined {
+  if (!extra) return target;
+  if (!target) return { ...extra };
+  return {
+    inputTokens: target.inputTokens + extra.inputTokens,
+    outputTokens: target.outputTokens + extra.outputTokens,
+    totalTokens: target.totalTokens + extra.totalTokens,
+    cacheReadTokens: (target.cacheReadTokens ?? 0) + (extra.cacheReadTokens ?? 0),
+    cacheWriteTokens: (target.cacheWriteTokens ?? 0) + (extra.cacheWriteTokens ?? 0),
+    cost: (target.cost ?? 0) + (extra.cost ?? 0),
+  };
+}
+
 function toMessage(msg: any, sessionId: string, index: number, entryId?: string, cwd?: string): Message | null {
   const blocks = agentMessageToBlocks(msg, cwd);
   if (blocks.length === 0) return null;
@@ -492,14 +537,7 @@ function toMessage(msg: any, sessionId: string, index: number, entryId?: string,
       createdAt: timestamp,
       updatedAt: timestamp,
       entryId,
-      usage: msg.usage ? {
-        inputTokens: msg.usage.input ?? msg.usage.inputTokens ?? 0,
-        outputTokens: msg.usage.output ?? msg.usage.outputTokens ?? 0,
-        totalTokens: msg.usage.totalTokens ?? (msg.usage.input ?? 0) + (msg.usage.output ?? 0),
-        cacheReadTokens: msg.usage.cacheRead ?? msg.usage.cacheReadTokens ?? 0,
-        cacheWriteTokens: msg.usage.cacheWrite ?? msg.usage.cacheWriteTokens ?? 0,
-        cost: msg.usage.cost?.total ?? 0,
-      } : undefined,
+      usage: sdkUsageToTokenUsage(msg.usage),
     } as AssistantMessage;
   }
 
@@ -718,6 +756,11 @@ export function createRealSessionService(): SessionService {
               .filter((b) => b.type === 'text')
               .map((b) => b.content)
               .join('');
+            // Each entry is one model call in this tool loop and carries its
+            // own usage. Keep only the first and a reloaded conversation
+            // reports a fraction of its tokens and cost.
+            const merged = lastMsg as AssistantMessage;
+            merged.usage = addTokenUsage(merged.usage, sdkUsageToTokenUsage(rawMsg.usage));
             if (rawMsg.timestamp) {
               lastMsg.updatedAt = new Date(rawMsg.timestamp).toISOString();
             }
