@@ -890,12 +890,13 @@ export const usePanelStore = create<PanelStoreState>()(
         }),
 
       /**
-       * Move `key` into the right pane (VS Code "Split & Move").
+       * Move `key` into a new column on its right (the tab's split button).
        *
-       * The selected tab itself goes right — no second instance is created.
-       * The left pane takes the most recently used remaining tab; when the
-       * moved tab was the only one, the left group gets an empty tab of the
-       * same plugin so it still has somewhere to open a file from.
+       * Any tab can be split, including singleton panels: splitting MOVES the
+       * tab, it never duplicates it. A panel that declares `multiInstance`
+       * gets a fresh empty tab backfilled into its old column (so the column
+       * still has somewhere to open a file from); a singleton cannot exist
+       * twice, so its old column is left empty with its `+`.
        */
       splitTab: (region, key) =>
         set((s) => {
@@ -903,7 +904,7 @@ export const usePanelStore = create<PanelStoreState>()(
           const panelId = panelIdOfTab(key);
           const entry = s.panels.find((p) => p.id === panelId);
           const selected = s.openPanelIds[region];
-          if (!entry?.multiInstance || !selected.includes(key)) return s;
+          if (!entry || !selected.includes(key)) return s;
 
           const groups = s.splitGroups[region] ?? [];
           let nextSelected = selected;
@@ -911,10 +912,11 @@ export const usePanelStore = create<PanelStoreState>()(
 
           if (groups.length < 2) {
             // First split: the moved tab becomes the new right group; the
-            // left group keeps the other tabs (or gets a fresh empty one).
+            // left group keeps the other tabs (or gets a fresh empty one when
+            // the panel supports more instances).
             const sourceTabs = selected.filter((k) => k !== key);
             let sourceActive = recentTab(s.recency, sourceTabs);
-            if (!sourceActive) {
+            if (!sourceActive && entry.multiInstance) {
               const fresh = tabKeyOf(panelId, newInstanceId());
               sourceTabs.push(fresh);
               sourceActive = fresh;
@@ -926,9 +928,9 @@ export const usePanelStore = create<PanelStoreState>()(
               makeGroup([key], key),
             ];
           } else {
-            // New column to the right of the source group. Moving the last tab
-            // out of a group backfills it with a fresh empty tab so the column
-            // (and the split) survives.
+            // New column to the right of the source group. Emptying the
+            // source column backfills a fresh tab only when the panel can
+            // have another instance; otherwise the column stays empty.
             nextGroups = groups.map((g) => ({ ...g, tabs: [...g.tabs] }));
             const gi = groupIndexContaining(nextGroups, key);
             if (gi === -1) {
@@ -937,11 +939,15 @@ export const usePanelStore = create<PanelStoreState>()(
               const source = nextGroups[gi];
               source.tabs = source.tabs.filter((k) => k !== key);
               if (source.tabs.length === 0) {
-                const fresh = tabKeyOf(panelId, newInstanceId());
-                source.tabs = [fresh];
-                source.active = fresh;
-                nextSelected = [...selected];
-                nextSelected.splice(selected.indexOf(key), 0, fresh);
+                if (entry.multiInstance) {
+                  const fresh = tabKeyOf(panelId, newInstanceId());
+                  source.tabs = [fresh];
+                  source.active = fresh;
+                  nextSelected = [...selected];
+                  nextSelected.splice(selected.indexOf(key), 0, fresh);
+                } else {
+                  source.active = null;
+                }
               } else if (source.active === key) {
                 source.active = recentTab(s.recency, source.tabs);
               }
@@ -1009,7 +1015,7 @@ export const usePanelStore = create<PanelStoreState>()(
           };
         }),
 
-      /** Open a fresh tab of `panelId` inside one editor group (its `+`). */
+      /** Open a fresh tab of `panelId` inside one editor group (its `+` menu). */
       addTabToGroup: (region, groupId, panelId) =>
         set((s) => {
           const groups = s.splitGroups[region] ?? [];
@@ -1020,7 +1026,28 @@ export const usePanelStore = create<PanelStoreState>()(
           const key = entry.multiInstance
             ? tabKeyOf(panelId, newInstanceId())
             : panelId;
-          if (selected.includes(key)) return s; // a singleton exists once
+          if (selected.includes(key)) {
+            // A singleton already lives somewhere: focus it in place instead
+            // of pretending to open a second copy.
+            const splitGroups = {
+              ...s.splitGroups,
+              [region]: groups.map((g) =>
+                g.tabs.includes(key) ? { ...g, active: key } : g,
+              ),
+            };
+            const focusedId = { ...s.focusedId, [region]: key };
+            return {
+              splitGroups,
+              focusedId,
+              mountedIds: computeMounted(
+                s.panels,
+                focusedId,
+                s.openPanelIds,
+                s.recency,
+                splitGroups,
+              ),
+            };
+          }
           const openPanelIds = { ...s.openPanelIds, [region]: [...selected, key] };
           const splitGroups = {
             ...s.splitGroups,

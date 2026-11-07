@@ -3,7 +3,11 @@ import type { BrowserWindow, WebContents } from 'electron';
 import { WebContentsView, shell } from 'electron';
 import { panelUrl } from '@pi/types';
 import type { BrowserManager } from '@main/browser/browser-manager';
-import type { LiveSlotHandler, LiveSlotRegistry } from './slots';
+import type {
+  LiveSlotHandler,
+  LiveSlotRegistry,
+  LiveSlotSnapshotLayer,
+} from './slots';
 import type { PluginRegistry } from './registry';
 
 /**
@@ -55,6 +59,8 @@ export class PluginWebViews {
   private readonly engineRegistered = new Set<string>();
   /** Engine slots per host tab (`page` / `page-b`), so hiding one pane leaves the other alone. */
   private readonly engineSlotsByTab = new Map<string, Set<string>>();
+  /** Engine slot → the engine tab it currently shows (snapshot target). */
+  private readonly engineTagBySlot = new Map<string, string>();
   /** Host tab key ↔ the panel slot that hosts its page. */
   private readonly tabByPanelSlot = new Map<string, string>();
   private readonly panelSlotByTab = new Map<string, string>();
@@ -204,6 +210,7 @@ export class PluginWebViews {
     this.registered.clear();
     this.engineRegistered.clear();
     this.engineSlotsByTab.clear();
+    this.engineTagBySlot.clear();
     this.tabByPanelSlot.clear();
     this.panelSlotByTab.clear();
   }
@@ -286,7 +293,55 @@ export class PluginWebViews {
       },
       hide: () => this.hideSlot(slotId),
       destroy: () => this.destroySlot(slotId),
+      snapshot: () => this.snapshotSlot(slotId),
     };
+  }
+
+  /**
+   * Capture a panel slot as a stack: the panel view itself, then every engine
+   * view embedded in its page at its offset. The engine views are siblings of
+   * the panel in the window's view tree, not children, so capturing the panel
+   * alone would leave a hole where the page is.
+   *
+   * Returns [] when the slot is not on screen (nothing worth freezing) or the
+   * platform returns an empty image; the caller then falls back to hiding.
+   */
+  private async snapshotSlot(slotId: string): Promise<LiveSlotSnapshotLayer[]> {
+    const view = this.views.get(slotId);
+    if (!view || view.webContents.isDestroyed() || !this.attached.has(slotId)) return [];
+    const panel = view.getBounds();
+    if (panel.width <= 0 || panel.height <= 0) return [];
+
+    const panelImage = await view.webContents.capturePage();
+    if (panelImage.isEmpty()) return [];
+    const layers: LiveSlotSnapshotLayer[] = [
+      {
+        dataUrl: panelImage.toDataURL(),
+        x: 0,
+        y: 0,
+        width: panel.width,
+        height: panel.height,
+      },
+    ];
+
+    const tabKey = this.tabByPanelSlot.get(slotId);
+    for (const engineId of (tabKey && this.engineSlotsByTab.get(tabKey)) || []) {
+      const tag = this.engineTagBySlot.get(engineId);
+      const engineView = tag ? this.opts.browserManager?.getTabView(tag) : null;
+      if (!engineView || engineView.webContents.isDestroyed()) continue;
+      const bounds = engineView.getBounds();
+      if (bounds.width <= 0 || bounds.height <= 0) continue;
+      const image = await engineView.webContents.capturePage();
+      if (image.isEmpty()) continue;
+      layers.push({
+        dataUrl: image.toDataURL(),
+        x: bounds.x - panel.x,
+        y: bounds.y - panel.y,
+        width: bounds.width,
+        height: bounds.height,
+      });
+    }
+    return layers;
   }
 
   /**
@@ -352,10 +407,12 @@ export class PluginWebViews {
           // a stale engine rectangle above the UI.
           if (lastTag) bm.hideTab(lastTag);
           lastTag = '';
+          this.engineTagBySlot.delete(slotId);
           return;
         }
         if (lastTag && lastTag !== tag) bm.hideTab(lastTag);
         lastTag = tag;
+        this.engineTagBySlot.set(slotId, tag);
         const host = view.getBounds();
         bm.showTabTile(tag, {
           x: host.x + bounds.x,
@@ -369,9 +426,10 @@ export class PluginWebViews {
         // report racing its re-show; give the show one tick to win.
         const seq = ++hideSeq;
         setTimeout(() => {
-          if (hideSeq !== seq || !lastTag) return;
-          bm.hideTab(lastTag);
+          if (hideSeq !== seq) return;
+          if (lastTag) bm.hideTab(lastTag);
           lastTag = '';
+          this.engineTagBySlot.delete(slotId);
         }, 60);
       },
     };
@@ -460,6 +518,7 @@ export class PluginWebViews {
         this.opts.liveSlots.unregister(engineId);
         this.engineRegistered.delete(engineId);
         this.registered.delete(engineId);
+        this.engineTagBySlot.delete(engineId);
       }
       this.engineSlotsByTab.delete(tabKey);
       if (this.panelSlotByTab.get(tabKey) === slotId) this.panelSlotByTab.delete(tabKey);
@@ -501,6 +560,7 @@ export class PluginWebViews {
         this.opts.liveSlots.unregister(slotId);
         this.engineRegistered.delete(slotId);
         this.registered.delete(slotId);
+        this.engineTagBySlot.delete(slotId);
       } else {
         this.destroySlot(slotId);
       }

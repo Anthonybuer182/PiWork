@@ -181,9 +181,31 @@ test('closing the last tab in a group removes that group', () => {
   assert.ok(s.openPanelIds.right.includes(a));
 });
 
-test('singleton panels cannot split', () => {
+test('singleton panels can split: the tab moves right and the source column stays empty', () => {
+  seed({ multiInstance: false });
+  const only = openFile('/only');
+  state().splitTab('right', only);
+  const s = state();
+  assert.equal(s.splitGroups.right.length, 2, 'a singleton can still create a column');
+  const [left, right] = s.splitGroups.right;
+  assert.deepEqual(left.tabs, [], 'the source column is empty, not duplicated');
+  assert.equal(left.active, null);
+  assert.deepEqual(right.tabs, [only]);
+  assert.equal(right.active, only);
+  assert.equal(s.focusedId.right, only);
+  assert.ok(s.openPanelIds.right.includes(only), 'the singleton is still open exactly once');
+});
+
+test('the + menu on an already-open singleton focuses it instead of duplicating', () => {
   seed({ multiInstance: false });
   const key = openFile('/only');
   state().splitTab('right', key);
-  assert.deepEqual(state().splitGroups.right, []);
+  const [emptyGroup, singletonGroup] = state().splitGroups.right;
+
+  state().addTabToGroup('right', emptyGroup.id, VIEWER);
+  const s = state();
+  assert.equal(s.openPanelIds.right.filter((k) => k === key).length, 1);
+  assert.equal(s.splitGroups.right.length, 2, 'the split is unchanged');
+  assert.ok(s.splitGroups.right.find((g) => g.id === singletonGroup.id).tabs.includes(key));
+  assert.equal(s.focusedId.right, key, 'the existing singleton is focused');
 });

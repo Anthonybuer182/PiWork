@@ -765,6 +765,16 @@ export class BrowserManager {
   }
 
   /**
+   * One engine tab's view by id. Used by the slot snapshot to capture the
+   * page layer that sits inside a plugin panel's own view.
+   */
+  getTabView(tabId: string | undefined): WebContentsView | null {
+    const t = this.tab(tabId);
+    if (!t || !t.alive()) return null;
+    return t.view;
+  }
+
+  /**
    * Set the ACTIVE tab's bounds (viewport-relative position and size).
    * Call from renderer via IPC to position the native overlay over the
    * placeholder div. showTab() is the multi-tab-aware writer; this stays for

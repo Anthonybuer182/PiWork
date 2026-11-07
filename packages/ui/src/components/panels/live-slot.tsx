@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { MonitorX } from 'lucide-react';
 import { useUIStore } from '@/stores/ui-store';
+import { useFreezeStore, type FreezeLayer } from '@/stores/overlay-freeze-store';
 import { t as translate } from '@/i18n';
 import { instanceIdOfTab } from '@/stores/panel-store';
 
@@ -80,15 +81,23 @@ export function LiveSlot({
   // workspace, and the panel would keep that stale value until the next
   // session switch.
   const workspaceId = useUIStore((s) => s.activeWorkspaceId);
-  // Host overlays that must cover native views. Settings and the plugin picker
-  // are the current two; a third must be OR-ed in here (or this should become
-  // a suspension counter on the slot registry) or it will be covered by every
-  // native panel and its clicks swallowed — exactly what this flag prevents.
+  // Host overlays that must cover native views. Settings hides them (the
+  // dialog covers the whole window). A menu instead freezes just its pane —
+  // see the freeze store below — so the content stays visible behind it.
   const settingsOpen = useUIStore((s) => s.settingsOpen);
-  const panelPickerOpen = useUIStore((s) => s.panelPickerOpen);
-  const occluded = settingsOpen || panelPickerOpen;
+  const occluded = settingsOpen;
   const occludedRef = useRef(occluded);
   occludedRef.current = occluded;
+  // This pane's frozen frame while a floating menu is open over it. `null`
+  // means "not frozen"; `[]` means frozen with no image (hide the view).
+  const frozenLayers = useFreezeStore((s) => s.slots[slotId] ?? null);
+  // The bitmap actually on screen. It outlives the frozen state by a short
+  // grace period while the native view is re-shown underneath it — dropping
+  // the image first would expose the host background for a frame.
+  const [displayLayers, setDisplayLayers] = useState<FreezeLayer[] | null>(null);
+  const displayLayersRef = useRef<FreezeLayer[] | null>(null);
+  displayLayersRef.current = displayLayers;
+  const thawTimer = useRef<number | null>(null);
 
   useEffect(() => {
     if (!notifyMounted) return;
@@ -149,6 +158,18 @@ export function LiveSlot({
     const reportBounds = () => {
       const el = containerRef.current;
       if (!el) return;
+      // A frozen pane is showing its bitmap; putting the real view back would
+      // cover the menu. Keyed like the settings occlusion below: the sentinel
+      // differs from the real rect, so thawing always produces a fresh report
+      // instead of being deduped away.
+      if (useFreezeStore.getState().slots[slotId] !== undefined) {
+        if (lastBounds === 'frozen') return;
+        lastBounds = 'frozen';
+        api
+          .invoke('pi:liveview:set-bounds', { slotId, x: 0, y: 0, width: 0, height: 0 })
+          .catch(() => {});
+        return;
+      }
       // Occluded by the settings dialog → hide this view (0×0 means hide to
       // the host). Keyed separately so closing the dialog produces a real
       // report rather than a deduped no-op.
@@ -232,7 +253,54 @@ export function LiveSlot({
   // must re-show the view at its real bounds.
   useLayoutEffect(() => {
     reportBoundsRef.current();
-  }, [swapped, slotId, settingsOpen, panelPickerOpen]);
+  }, [swapped, slotId, settingsOpen]);
+
+  // Frozen frame for a floating menu.
+  //
+  // Opening: the image is already decoded, but it still needs one painted
+  // frame before the native view goes away. Hiding in the same commit lets
+  // the main process remove the view before the bitmap reaches the screen —
+  // the host background flashes white for a frame. Two rAFs guarantee the
+  // image has been painted with the view still in place.
+  //
+  // Closing: keep the image for a short grace period while the real view is
+  // re-shown underneath it, then drop it. Removing it first would flash the
+  // same background.
+  useLayoutEffect(() => {
+    if (frozenLayers !== null) {
+      if (thawTimer.current !== null) {
+        window.clearTimeout(thawTimer.current);
+        thawTimer.current = null;
+      }
+      setDisplayLayers(frozenLayers);
+      let first = 0;
+      let second = 0;
+      first = requestAnimationFrame(() => {
+        second = requestAnimationFrame(() => reportBoundsRef.current());
+      });
+      return () => {
+        cancelAnimationFrame(first);
+        cancelAnimationFrame(second);
+      };
+    }
+
+    reportBoundsRef.current();
+    if (displayLayersRef.current !== null) {
+      thawTimer.current = window.setTimeout(() => {
+        thawTimer.current = null;
+        setDisplayLayers(null);
+      }, 180);
+    }
+    return undefined;
+  }, [frozenLayers, slotId]);
+
+  // Never leave a pending thaw timer behind on unmount.
+  useEffect(
+    () => () => {
+      if (thawTimer.current !== null) window.clearTimeout(thawTimer.current);
+    },
+    [],
+  );
 
   // Tab switching: the inactive pane becomes display:none. Waiting for the
   // ResizeObserver is not reliable enough — a native view left attached at its
@@ -275,7 +343,23 @@ export function LiveSlot({
       ref={containerRef}
       data-panel-kind="live-slot"
       data-live-slot={slotId}
-      className="h-full w-full bg-background"
-    />
+      className="relative h-full w-full overflow-hidden bg-background"
+    >
+      {displayLayers?.map((layer, index) => (
+        <img
+          key={index}
+          src={layer.dataUrl}
+          alt=""
+          draggable={false}
+          className="pointer-events-none absolute max-w-none select-none"
+          style={{
+            left: layer.x,
+            top: layer.y,
+            width: layer.width,
+            height: layer.height,
+          }}
+        />
+      ))}
+    </div>
   );
 }

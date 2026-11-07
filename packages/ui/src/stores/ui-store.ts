@@ -74,13 +74,6 @@ interface UIState {
    * otherwise cover the dialog and swallow its clicks.
    */
   settingsOpen: boolean;
-  /**
-   * The plugin picker is a DOM popover anchored to the tab strip's `+`. Like
-   * the settings dialog it has to hide the native panel views while open:
-   * those sit above the DOM, so the popover would otherwise be painted under
-   * the active panel and its search field would be unreachable.
-   */
-  panelPickerOpen: boolean;
   rightPanelWidth: number;
   leftPanelWidth: number;
   compactMode: boolean;
@@ -108,7 +101,6 @@ interface UIState {
   toggleChatSide: () => void;
   openSettings: () => void;
   setSettingsOpen: (open: boolean) => void;
-  setPanelPickerOpen: (open: boolean) => void;
   setSidebarOpen: (open: boolean) => void;
   setRightPanelOpen: (open: boolean) => void;
   setCenterPanelOpen: (open: boolean) => void;
@@ -130,7 +122,6 @@ export const useUIStore = create<UIState>()(
       centerPanelOpen: true,
       chatRightOfPanels: false,
       settingsOpen: false,
-      panelPickerOpen: false,
       rightPanelWidth: 600,
       // A comfortable width for the session list and file tree, and the width
       // the column is dragged from.
@@ -185,7 +176,6 @@ export const useUIStore = create<UIState>()(
       toggleChatSide: () => set((s) => ({ chatRightOfPanels: !s.chatRightOfPanels })),
       openSettings: () => set({ settingsOpen: true }),
       setSettingsOpen: (open) => set({ settingsOpen: open }),
-      setPanelPickerOpen: (open) => set({ panelPickerOpen: open }),
       setSidebarOpen: (open) => set({ sidebarOpen: open }),
       setRightPanelOpen: (open) => set({ rightPanelOpen: open }),
       setCenterPanelOpen: (open) => set({ centerPanelOpen: open }),
