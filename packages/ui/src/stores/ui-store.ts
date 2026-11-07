@@ -27,6 +27,9 @@ export async function openPreviewFile(path: string): Promise<void> {
     const panelId = (res as { panelId?: string | null } | undefined)?.panelId;
     if (panelId) {
       useUIStore.setState({ rightPanelOpen: true });
+      // The store routes this into the FOCUSED editor group: it reuses that
+      // group's empty tab or opens a new tab there, leaving every other group
+      // untouched. That is exactly the VS Code editor-group behaviour.
       usePanelStore.getState().openPanel(panelId, { focus: true, params: { file: path } });
     } else {
       // No preview plugin claims this extension — code files, and the

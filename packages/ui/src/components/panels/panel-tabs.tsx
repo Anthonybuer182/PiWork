@@ -1,8 +1,15 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from 'react';
 import { Check, Plus, Search, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { isOsFileDrag, useOsFileDropTarget } from '@/lib/os-drop';
 import { openDroppedPaths } from '@/lib/open-dropped';
+import { showPopupMenu, type PopupMenuItem } from '@/lib/native-menu';
 import { usePanelStore, panelIdOfTab, type PanelEntry, type PanelRegion } from '@/stores/panel-store';
 import { useUIStore } from '@/stores/ui-store';
 import { useI18n } from '@/i18n';
@@ -13,22 +20,10 @@ import { NO_DRAG } from '@/components/layout/title-bar';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 
 /**
- * The right column's tab strip (2026-11 redesign).
+ * The single-view tab strip for the right column.
  *
- * It is a TAB strip, not a plugin switcher: only open panels appear here, plus
- * a trailing `+` that opens the searchable plugin picker. Discovery of panels
- * that are not open lives in two places instead — the no-tabs welcome grid in
- * the body and this picker.
- *
- *  - click a tab → activate it;
- *  - `×` → close it (active falls to the next tab, then the previous);
- *  - drag a tab onto another → reorder the strip;
- *  - `+` → searchable list of installed panels; picking one opens (or, for a
- *    panel that is already open, activates) its tab.
- *
- * The old `⋯` overflow button is gone: the strip scrolls horizontally and `+`
- * stays pinned at its end. There is also no zoom button — hiding the left and
- * centre columns already gives the panel the whole window.
+ * When the column is split into editor groups, this strip DISAPPEARS: each
+ * group renders its own tab bar (+ `+`) inside its pane (see panel-host.tsx).
  */
 export function PanelTabs({ region = 'right' }: { region?: PanelRegion }) {
   const { t } = useI18n();
@@ -38,8 +33,10 @@ export function PanelTabs({ region = 'right' }: { region?: PanelRegion }) {
   const panelOrder = usePanelStore((s) => s.panelOrder);
   const runtime = usePanelStore((s) => s.runtime);
   const tabTitles = usePanelStore((s) => s.tabTitles);
+  const groups = usePanelStore((s) => s.splitGroups[region]);
   const openPanel = usePanelStore((s) => s.openPanel);
   const closeTab = usePanelStore((s) => s.closeTab);
+  const splitTab = usePanelStore((s) => s.splitTab);
   const setFocused = usePanelStore((s) => s.setFocused);
   const setTabOrder = usePanelStore((s) => s.setTabOrder);
   const setPanelPickerOpen = useUIStore((s) => s.setPanelPickerOpen);
@@ -47,9 +44,6 @@ export function PanelTabs({ region = 'right' }: { region?: PanelRegion }) {
   const [dragId, setDragId] = useState<string | null>(null);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
 
-  // Native panel views sit above the DOM; the picker is a DOM popover that
-  // extends below the header band, so the views must be silenced while it is
-  // open or they would paint over it and swallow the search field's clicks.
   useEffect(() => {
     setPanelPickerOpen(pickerOpen);
     return () => setPanelPickerOpen(false);
@@ -71,145 +65,60 @@ export function PanelTabs({ region = 'right' }: { region?: PanelRegion }) {
     [panels, panelOrder, region],
   );
 
+  // Cmd/Ctrl+\ on the single view creates the first editor group pair. Once
+  // split, each group's own bar handles tab actions.
+  useEffect(() => {
+    if (region !== 'right') return;
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey)) return;
+      if (e.key !== '\\' && e.code !== 'Backslash') return;
+      const target = e.target as HTMLElement | null;
+      if (
+        target &&
+        typeof target.closest === 'function' &&
+        target.closest('input, textarea, [contenteditable="true"]')
+      )
+        return;
+      if (!activeId || byId.get(panelIdOfTab(activeId))?.multiInstance !== true) return;
+      e.preventDefault();
+      splitTab('right', activeId);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [region, activeId, byId, splitTab]);
+
+  // OS file drops on the header strip (the body has its own targets).
+  const { active: osDropActive, handlers: osDropHandlers } = useOsFileDropTarget((paths) => {
+    void openDroppedPaths(paths);
+  });
+
   const endDrag = () => {
     setDragId(null);
     setDropTargetId(null);
   };
 
-  // ── OS file drop: open each dropped file as a panel tab ──
-  // The strip is a DOM fallback for the right column: the body of an open tab
-  // is a native view, so plugin views forward their own drops (preload →
-  // main → `pi:os:dropped-files`). Open order is drop order, so the last
-  // dropped file ends up focused.
-  const { active: osDropActive, handlers: osDropHandlers } = useOsFileDropTarget((paths) => {
-    void openDroppedPaths(paths);
-  });
+  // Split mode: the per-pane bars replace this strip entirely.
+  if (groups.length >= 2) return null;
 
-  const pick = (id: string) => {
-    openPanel(id, { focus: true });
-    setPickerOpen(false);
-  };
-
-  const renderTab = ({ key, panel }: { key: string; panel: PanelEntry }) => {
-    const title = tabTitles[key] ?? panelTitle(panel, t);
-    const active = activeId === key;
-    const rt = runtime[panel.id];
-    const badge = rt?.badge;
-    const pending = rt?.pending;
-
-    return (
-      <div
-        key={key}
-        role="tab"
-        aria-selected={active}
-        tabIndex={0}
-        title={title}
-        data-panel-tab={key}
-        data-panel-id={panel.id}
-        data-state={active ? 'active' : 'inactive'}
-        draggable
-        onClick={() => setFocused(region, key)}
-        onAuxClick={(e) => {
-          // Middle-click closes, as in every tabbed editor.
-          if (e.button === 1) {
-            e.preventDefault();
-            closeTab(region, key);
-          }
-        }}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            setFocused(region, key);
-          } else if (e.key === 'Delete' || e.key === 'Backspace') {
-            e.preventDefault();
-            closeTab(region, key);
-          } else if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-            e.preventDefault();
-            const i = tabs.findIndex((p) => p.key === key);
-            const next = tabs[i + (e.key === 'ArrowLeft' ? -1 : 1)];
-            if (next) {
-              const el = document.querySelector(
-                `[data-panel-tab="${CSS.escape(next.key)}"]`,
-              ) as HTMLElement | null;
-              el?.focus();
-            }
-          }
-        }}
-        onDragStart={(e) => {
-          setDragId(key);
-          e.dataTransfer.effectAllowed = 'move';
-          // Firefox refuses drags without payload; the key doubles as the
-          // reorder source so the drop never depends on React state.
-          e.dataTransfer.setData('text/plain', key);
-        }}
-        onDragOver={(e) => {
-          e.preventDefault();
-          setDropTargetId(key);
-        }}
-        onDrop={(e) => {
-          // OS file drops belong to the strip root: letting them bubble keeps
-          // the highlight state and open path in one place. This handler's
-          // unconditional stopPropagation would otherwise swallow them.
-          if (isOsFileDrag(e.dataTransfer)) return;
-          e.preventDefault();
-          e.stopPropagation();
-          const from = e.dataTransfer.getData('text/plain');
-          if (from && from !== key) {
-            // `from` re-seats before `key`; the store filters to open tabs.
-            const keys = tabs.map((p) => p.key).filter((x) => x !== from);
-            const at = keys.indexOf(key);
-            if (at === -1) keys.push(from);
-            else keys.splice(at, 0, from);
-            setTabOrder(region, keys);
-          }
-          endDrag();
-        }}
-        onDragEnd={endDrag}
-        className={cn(
-          'group/tab relative flex h-8 max-w-[176px] shrink-0 items-center gap-2 rounded-lg px-2.5 text-[13px] transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring',
-          active
-            ? 'bg-accent text-accent-foreground'
-            : 'text-muted-foreground hover:bg-accent/40 hover:text-foreground/80',
-          dropTargetId === key &&
-            dragId !== null &&
-            dragId !== key &&
-            'ring-1 ring-muted-foreground/40',
-          dragId === key && 'opacity-50',
-        )}
-      >
-        <RailIcon panel={panel} size={16} className="h-4 w-4 shrink-0" />
-        <span className="min-w-0 truncate">{title}</span>
-        {badge !== undefined && badge !== null && badge !== '' && (
-          <span
-            data-panel-tab-badge={key}
-            className="min-w-[16px] shrink-0 rounded-full bg-primary px-1 text-center text-[10px] font-medium leading-4 text-primary-foreground"
-          >
-            {badge}
-          </span>
-        )}
-        {pending && !badge && (
-          <span
-            data-panel-tab-pending={key}
-            className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-primary"
-          />
-        )}
-        <button
-          type="button"
-          aria-label={t('关闭 {title}', { title })}
-          data-panel-tab-close={key}
-          onClick={(e) => {
-            e.stopPropagation();
-            closeTab(region, key);
-          }}
-          className={cn(
-            'shrink-0 rounded-sm p-0.5 transition-opacity hover:bg-accent-foreground/15',
-            active ? 'opacity-70' : 'opacity-0 group-hover/tab:opacity-70',
-          )}
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
-      </div>
-    );
+  const openTabMenu = async (
+    e: ReactMouseEvent,
+    key: string,
+    panel: PanelEntry,
+  ) => {
+    e.preventDefault();
+    const items: PopupMenuItem[] = [];
+    if (panel.multiInstance) {
+      items.push({ id: 'split-right', label: t('向右拆分') });
+    }
+    items.push({ id: 'close', label: t('关闭'), separatorBefore: items.length > 0 });
+    items.push({ id: 'close-others', label: t('关闭其他') });
+    const picked = await showPopupMenu(items, { x: e.clientX, y: e.clientY });
+    if (!picked) return;
+    if (picked === 'split-right') splitTab(region, key);
+    else if (picked === 'close') closeTab(region, key);
+    else if (picked === 'close-others') {
+      for (const other of tabs) if (other.key !== key) closeTab(region, other.key);
+    }
   };
 
   const picker = (
@@ -232,10 +141,15 @@ export function PanelTabs({ region = 'right' }: { region?: PanelRegion }) {
         className="w-80 p-0"
         data-panel-picker={region}
       >
-        <PluginPickerList items={pickerItems} openIds={openIds} onPick={pick} />
+        <PluginPickerList items={pickerItems} openIds={openIds} onPick={openPickerItem} />
       </PopoverContent>
     </Popover>
   );
+
+  function openPickerItem(id: string) {
+    openPanel(id, { focus: true });
+    setPickerOpen(false);
+  }
 
   return (
     <div
@@ -243,23 +157,106 @@ export function PanelTabs({ region = 'right' }: { region?: PanelRegion }) {
         'flex h-full w-full min-w-0 select-none items-center gap-1 rounded-md px-1.5 transition-colors',
         osDropActive && 'bg-primary/5 ring-1 ring-primary/40',
       )}
-      // The header band is a window drag region, and `-webkit-app-region: drag`
-      // swallows drag events — a drop target inside it would never fire. Opting
-      // this strip out costs window dragging over the tab row only; the rest
-      // of the header still moves the window.
       style={NO_DRAG}
       role="toolbar"
       aria-label={t('插件标签')}
       data-testid={`panel-tabs-${region}`}
       {...osDropHandlers}
     >
-      {/* Tabs and `+` scroll together, with `+` immediately after the last
-          tab (not pinned to the strip's right edge). With no tabs it is the
-          first thing in the row — the cursor-style empty tab row — and the
-          body carries the plugin grid. */}
       <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         <div role="tablist" aria-label={t('已打开的标签')} className="flex shrink-0 items-center gap-1">
-          {tabs.map(renderTab)}
+          {tabs.map(({ key, panel }) => {
+            const title = tabTitles[key] ?? panelTitle(panel, t);
+            const active = activeId === key;
+            const rt = runtime[panel.id];
+            return (
+              <div
+                key={key}
+                role="tab"
+                aria-selected={active}
+                tabIndex={0}
+                title={title}
+                data-panel-tab={key}
+                data-state={active ? 'active' : 'inactive'}
+                draggable
+                onClick={() => setFocused(region, key)}
+                onAuxClick={(e) => {
+                  if (e.button === 1) {
+                    e.preventDefault();
+                    closeTab(region, key);
+                  }
+                }}
+                onContextMenu={(e) => void openTabMenu(e, key, panel)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    setFocused(region, key);
+                  } else if (e.key === 'Delete' || e.key === 'Backspace') {
+                    e.preventDefault();
+                    closeTab(region, key);
+                  }
+                }}
+                onDragStart={(e) => {
+                  setDragId(key);
+                  e.dataTransfer.effectAllowed = 'move';
+                  e.dataTransfer.setData('text/plain', key);
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault();
+                  setDropTargetId(key);
+                }}
+                onDrop={(e) => {
+                  if (isOsFileDrag(e.dataTransfer)) return;
+                  e.preventDefault();
+                  e.stopPropagation();
+                  const from = e.dataTransfer.getData('text/plain');
+                  if (from && from !== key) {
+                    const keys = tabs.map((p) => p.key).filter((x) => x !== from);
+                    const at = keys.indexOf(key);
+                    if (at === -1) keys.push(from);
+                    else keys.splice(at, 0, from);
+                    setTabOrder(region, keys);
+                  }
+                  endDrag();
+                }}
+                onDragEnd={endDrag}
+                className={cn(
+                  'group/tab relative flex h-8 max-w-[176px] shrink-0 items-center gap-2 rounded-lg px-2.5 text-[13px] transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring',
+                  active
+                    ? 'bg-accent text-accent-foreground'
+                    : 'text-muted-foreground hover:bg-accent/40 hover:text-foreground/80',
+                  dropTargetId === key && dragId !== null && dragId !== key && 'ring-1 ring-muted-foreground/40',
+                  dragId === key && 'opacity-50',
+                )}
+              >
+                <RailIcon panel={panel} size={16} className="h-4 w-4 shrink-0" />
+                <span className="min-w-0 truncate">{title}</span>
+                {rt?.badge !== undefined && rt?.badge !== null && rt?.badge !== '' && (
+                  <span className="min-w-[16px] shrink-0 rounded-full bg-primary px-1 text-center text-[10px] font-medium leading-4 text-primary-foreground">
+                    {rt.badge}
+                  </span>
+                )}
+                {rt?.pending && !rt?.badge && (
+                  <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-primary" />
+                )}
+                <button
+                  type="button"
+                  aria-label={t('关闭 {title}', { title })}
+                  data-panel-tab-close={key}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    closeTab(region, key);
+                  }}
+                  className={cn(
+                    'shrink-0 rounded-sm p-0.5 transition-opacity hover:bg-accent-foreground/15',
+                    active ? 'opacity-70' : 'opacity-0 group-hover/tab:opacity-70',
+                  )}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            );
+          })}
         </div>
         {picker}
       </div>
@@ -270,8 +267,7 @@ export function PanelTabs({ region = 'right' }: { region?: PanelRegion }) {
 /**
  * The `+` popover: a search box over the installed panels, in installed order.
  * Picking a row opens its tab (the store activates an already-open panel
- * instead of duplicating it). Keyboard: arrows move, Enter opens, Esc closes
- * (Radix handles Esc and focus restoration).
+ * instead of duplicating it). Keyboard: arrows move, Enter opens, Esc closes.
  */
 function PluginPickerList({
   items,
@@ -346,7 +342,6 @@ function PluginPickerList({
                 type="button"
                 role="option"
                 aria-selected={index === activeIndex}
-                data-plugin-picker-item={panel.id}
                 onMouseEnter={() => setActiveIndex(index)}
                 onClick={() => onPick(panel.id)}
                 className={cn(

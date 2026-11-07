@@ -476,6 +476,44 @@ export class BrowserManager {
     }
   }
 
+  /**
+   * Show one engine tab at `bounds` WITHOUT enforcing the one-visible rule.
+   *
+   * Used by per-host-tab engine slots: in a right-column split two browser
+   * panels are on screen at once and each owns a different engine tab, so
+   * hiding "all the others" on every report would make the panes fight. Hiding
+   * is explicit per tab (`hideTab`) when a panel goes away.
+   */
+  showTabTile(
+    tabId: string | undefined,
+    bounds: { x: number; y: number; width: number; height: number },
+  ): void {
+    const t = this.tab(tabId);
+    if (!t) return;
+    try {
+      t.view.setBounds(bounds);
+      t.lastBounds = { ...bounds };
+      t.lastShownAt = Date.now();
+      this.activeTabId = t.id;
+      this.retop(t);
+      void this.setDeviceMetrics(bounds.width, bounds.height, t).catch(() => {});
+    } catch (err) {
+      console.warn('[BrowserManager] showTabTile failed:', err);
+    }
+  }
+
+  /** Zero one engine tab's view, leaving every other pane alone. */
+  hideTab(tabId: string | undefined): void {
+    const t = this.tab(tabId);
+    if (!t) return;
+    try {
+      t.view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+      t.lastBounds = null;
+    } catch {
+      /* view already gone */
+    }
+  }
+
   /** Zero the secondary pane's view (split collapsed or its slot hidden). */
   hideSecondary(): void {
     this.splitPartner = null;

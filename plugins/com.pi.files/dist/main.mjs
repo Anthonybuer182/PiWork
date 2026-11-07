@@ -87466,6 +87466,8 @@ async function onUiRequest(method, params = {}, panelId, meta) {
       const path = String(params.path ?? "");
       if (!path) throw new Error("file.open: path is required");
       await openInTab(tabId, path);
+      await ctx.call("panel.focusTab", { panelId: PANEL, tabId, focus: true }).catch(() => {
+      });
       return { ok: true, path };
     }
     case "file.listDir": {

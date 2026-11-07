@@ -2707,6 +2707,35 @@ plugin({
       engineId = String(created?.tabId ?? "");
     }
     if (engineId) {
+      const owner = hostOfEngine(engineId);
+      if (owner && owner !== hostTabId) {
+        const sourceUrl = String(p.url ?? rowOfEngine(engineId)?.url ?? "");
+        const created = await ctx.call("browser.newTab", { sessionId: key });
+        const cloneId = String(created?.tabId ?? "");
+        if (cloneId) {
+          engineId = cloneId;
+          if (!b.tabs.some((t) => t.id === cloneId)) {
+            b.tabs.push({ id: cloneId, url: "", title: "" });
+          }
+          if (sourceUrl) {
+            try {
+              const result = await ctx.call(
+                "browser.navigate",
+                { url: normalizeUrl(sourceUrl), tabId: cloneId },
+                { timeoutMs: NAVIGATE_TIMEOUT_MS }
+              );
+              const row = b.tabs.find((t) => t.id === cloneId);
+              if (row) {
+                if (result?.url) row.url = result.url;
+                if (result?.title) row.title = result.title;
+              }
+            } catch {
+            }
+          }
+        }
+      }
+    }
+    if (engineId) {
       const previousEngine = engineOfHost(hostTabId);
       if (previousEngine && previousEngine !== engineId) {
         await ctx.call("browser.closeTab", { tabId: previousEngine }).catch(() => {
@@ -2778,18 +2807,23 @@ plugin({
     if (hostEngine) {
       bucketFor(key).activeTabId = hostEngine;
     }
+    const focusHostTab = /* @__PURE__ */ __name(() => {
+      void ctx.call("panel.focusTab", { panelId: "browser", tabId: hostTabId, focus: true }).catch(() => {
+      });
+    }, "focusHostTab");
     switch (method) {
       case "nav.open": {
-        const t = await ensureTab(ctx, key);
-        bindHostTab(hostTabId, t.id, sessionId);
+        focusHostTab();
+        const engineId = hostEngine ?? (await ensureTab(ctx, key)).id;
+        bindHostTab(hostTabId, engineId, sessionId);
         loadedHosts.add(hostTabId);
         const result = await ctx.call(
           "browser.navigate",
-          { url: normalizeUrl(params.url), tabId: t.id },
+          { url: normalizeUrl(params.url), tabId: engineId },
           { timeoutMs: NAVIGATE_TIMEOUT_MS }
         );
         if (result?.url) lastUrl = result.url;
-        const row = bucketFor(key).tabs.find((x) => x.id === t.id);
+        const row = bucketFor(key).tabs.find((x) => x.id === engineId);
         if (row && result?.url) row.url = result.url;
         if (row && result?.title) row.title = result.title;
         await syncHostTab(ctx, hostTabId);
@@ -2797,16 +2831,19 @@ plugin({
         return { url: result?.url ?? "", title: result?.title ?? "" };
       }
       case "nav.back": {
+        focusHostTab();
         const t = targetTabId(key);
         if (t) await ctx.call("browser.back", { tabId: t });
         return { ok: true };
       }
       case "nav.forward": {
+        focusHostTab();
         const t = targetTabId(key);
         if (t) await ctx.call("browser.forward", { tabId: t });
         return { ok: true };
       }
       case "nav.reload": {
+        focusHostTab();
         const t = targetTabId(key);
         if (t) await ctx.call("browser.reload", { tabId: t });
         return { ok: true };

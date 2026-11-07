@@ -23,6 +23,12 @@ export function LiveSlot({
   /** Whether this tab is the active one (drives `panel.activated`). */
   active = true,
   /**
+   * Whether the pane is laid out. In a split BOTH panes are visible while
+   * only one is active — the native view of the non-focused pane must stay
+   * shown, so bounds follow `visible`, not `active`.
+   */
+  visible = true,
+  /**
    * Plugin web panels: tell the backend the panel mounted, and re-tell it when
    * the open params change (switching files in the same panel). The event has
    * to travel over the panel's own MessagePort, which lives in the view's
@@ -40,6 +46,7 @@ export function LiveSlot({
   tabKey: string;
   entry?: string;
   active?: boolean;
+  visible?: boolean;
   notifyMounted?: boolean;
   params?: unknown;
 }) {
@@ -240,14 +247,14 @@ export function LiveSlot({
       }
     ).electronAPI;
     if (!api?.invoke) return;
-    if (!active) {
+    if (!visible) {
       void api
         .invoke('pi:liveview:set-bounds', { slotId, x: 0, y: 0, width: 0, height: 0 })
         .catch(() => {});
       return;
     }
     reportBoundsRef.current();
-  }, [active, slotId]);
+  }, [active, visible, slotId]);
 
   if (error) {
     return (

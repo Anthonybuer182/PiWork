@@ -50,12 +50,14 @@ function PluginWebViewPanel({
   tabKey,
   entry,
   active,
+  visible,
 }: {
   pluginId: string;
   panelId: string;
   tabKey: string;
   entry?: string;
   active: boolean;
+  visible: boolean;
 }) {
   const params = usePanelStore((s) => s.params[tabKey]);
   useEffect(() => {
@@ -68,6 +70,7 @@ function PluginWebViewPanel({
       tabKey={tabKey}
       entry={entry}
       active={active}
+      visible={visible}
       notifyMounted
       params={params}
     />
@@ -78,12 +81,18 @@ export function PanelBody({
   panel,
   tabKey,
   active = true,
+  visible = true,
 }: {
   panel: PanelEntry;
   /** This tab's key (multi-instance) — also the params lookup and native view slot identity. */
   tabKey?: string;
   /** Whether this pane is the active tab (drives `panel.activated`). */
   active?: boolean;
+  /**
+   * Whether this pane is laid out. In a split both panes are visible while
+   * only one is active; a hidden (kept-alive) tab is neither.
+   */
+  visible?: boolean;
 }) {
   const { t } = useI18n();
   // Host panel: a React component the shell owns.
@@ -109,6 +118,7 @@ export function PanelBody({
         tabKey={tabKey ?? panel.id}
         entry={panel.entry}
         active={active}
+        visible={visible}
       />
     );
   }
@@ -132,6 +142,7 @@ export function PaneView({
   tabKey,
   active,
   hidden = false,
+  visible,
 }: {
   panel: PanelEntry;
   /** The tab key this pane renders (params + native view identity). */
@@ -139,7 +150,15 @@ export function PaneView({
   active: boolean;
   /** Rendered but kept off the layout (kept-alive while another tab is active). */
   hidden?: boolean;
+  /**
+   * Override whether the native view is shown while the pane keeps its box.
+   * Used while dragging the splitter: the pane's geometry must stay intact,
+   * but the native view has to leave the window's hit-testing so the pointer
+   * events reach the shell.
+   */
+  visible?: boolean;
 }) {
+  const shown = visible ?? !hidden;
   return (
     <div
       data-panel-container={panel.id}
@@ -151,7 +170,7 @@ export function PaneView({
       )}
     >
       <div className="min-h-0 flex-1">
-        <PanelBody panel={panel} tabKey={tabKey} active={active} />
+        <PanelBody panel={panel} tabKey={tabKey} active={active} visible={shown} />
       </div>
     </div>
   );

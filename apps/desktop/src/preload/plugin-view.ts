@@ -33,6 +33,17 @@ const PLUGIN_ID =
 const TAB_KEY =
   process.argv.find((a) => a.startsWith('--pi-tab-key='))?.slice('--pi-tab-key='.length) ?? '';
 
+/**
+ * Slot id for a plugin page's embedded engine view (`piSDK.liveSlot`).
+ *
+ * Includes the host tab: one panel page exists per tab, and a split shows two
+ * of them at once. The main process parses this same shape to build a handler
+ * per tab instead of one shared `<plugin>:page` handler.
+ */
+function liveSlotId(name: string): string {
+  return `${PLUGIN_ID}:engine:${String(name)}:${encodeURIComponent(TAB_KEY)}`;
+}
+
 interface PortLike {
   on(event: 'message', listener: (ev: { data: unknown }) => void): unknown;
   start(): void;
@@ -375,16 +386,27 @@ const bridge = {
    * inside the page's layout. The slot id is composed HERE, on the plugin-id
    * prefix — the page can only name slots inside its own plugin's namespace,
    * never another plugin's or the host's.
+   *
+   * Engine slots carry THIS VIEW'S host-tab key. A multi-instance browser can
+   * have two panels on screen at once (a split), and each one drives its own
+   * engine view; a shared `<plugin>:page` slot would make both pages fight
+   * over one engine rectangle. `plugin-webview` builds the handler lazily from
+   * this id.
    */
   liveAttach: (name: string): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke('pi:liveview:attach', { slotId: `${PLUGIN_ID}:${String(name)}` }),
+    ipcRenderer.invoke('pi:liveview:attach', {
+      slotId: liveSlotId(name),
+      engine: true,
+      name: String(name),
+      tabKey: TAB_KEY,
+    }),
   liveBounds: (
     name: string,
     b: { x: number; y: number; width: number; height: number },
     tag?: string,
   ): Promise<{ ok: boolean; error?: string }> =>
     ipcRenderer.invoke('pi:liveview:set-bounds', {
-      slotId: `${PLUGIN_ID}:${String(name)}`,
+      slotId: liveSlotId(name),
       x: b.x,
       y: b.y,
       width: b.width,
@@ -395,7 +417,7 @@ const bridge = {
       tag: tag ?? '',
     }),
   liveDetach: (name: string): Promise<{ ok: boolean; error?: string }> =>
-    ipcRenderer.invoke('pi:liveview:detach', { slotId: `${PLUGIN_ID}:${String(name)}` }),
+    ipcRenderer.invoke('pi:liveview:detach', { slotId: liveSlotId(name) }),
 
   /**
    * Transport counters, for diagnosing a panel that stays blank. Cheap enough

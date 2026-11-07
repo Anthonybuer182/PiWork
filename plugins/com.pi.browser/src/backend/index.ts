@@ -2093,6 +2093,41 @@ plugin({
       engineId = String(created?.tabId ?? '');
     }
 
+    // "Split right" duplicates the source host tab, including its
+    // `engineTabId`. Two host tabs cannot share one engine view (they would
+    // fight over its rectangle), so give the newcomer its own engine tab at
+    // the same URL — the browser equivalent of duplicating the editor.
+    if (engineId) {
+      const owner = hostOfEngine(engineId);
+      if (owner && owner !== hostTabId) {
+        const sourceUrl = String(p.url ?? rowOfEngine(engineId)?.url ?? '');
+        const created = await ctx.call<{ tabId?: string }>('browser.newTab', { sessionId: key });
+        const cloneId = String(created?.tabId ?? '');
+        if (cloneId) {
+          engineId = cloneId;
+          if (!b.tabs.some((t) => t.id === cloneId)) {
+            b.tabs.push({ id: cloneId, url: '', title: '' });
+          }
+          if (sourceUrl) {
+            try {
+              const result = await ctx.call<{ url?: string; title?: string }>(
+                'browser.navigate',
+                { url: normalizeUrl(sourceUrl), tabId: cloneId },
+                { timeoutMs: NAVIGATE_TIMEOUT_MS },
+              );
+              const row = b.tabs.find((t) => t.id === cloneId);
+              if (row) {
+                if (result?.url) row.url = result.url;
+                if (result?.title) row.title = result.title;
+              }
+            } catch {
+              /* clone keeps the engine's blank page */
+            }
+          }
+        }
+      }
+    }
+
     if (engineId) {
       // A favorites host tab reused for an agent-opened page leaves its old
       // blank engine tab behind; close it rather than orphaning a background
@@ -2182,18 +2217,28 @@ plugin({
       // bucket, so point the bucket at this host tab before it runs.
       bucketFor(key).activeTabId = hostEngine;
     }
+    // A navigation typed into THIS pane makes it the host's active tab, so
+    // the agent's "current tab" follows the pane the user is actually using.
+    const focusHostTab = () => {
+      void ctx.call('panel.focusTab', { panelId: 'browser', tabId: hostTabId, focus: true }).catch(() => {});
+    };
     switch (method) {
       case 'nav.open': {
-        const t = await ensureTab(ctx, key);
-        bindHostTab(hostTabId, t.id, sessionId);
+        focusHostTab();
+        // Navigate THIS host tab's own engine. `ensureTab` would ask the
+        // session's shared bucket for its active tab, and with two browser
+        // panes on screen that can be the OTHER pane's engine — navigating
+        // one pane would replace the page in the other.
+        const engineId = hostEngine ?? (await ensureTab(ctx, key)).id;
+        bindHostTab(hostTabId, engineId, sessionId);
         loadedHosts.add(hostTabId);
         const result = await ctx.call<{ url?: string; title?: string }>(
           'browser.navigate',
-          { url: normalizeUrl(params.url), tabId: t.id },
+          { url: normalizeUrl(params.url), tabId: engineId },
           { timeoutMs: NAVIGATE_TIMEOUT_MS },
         );
         if (result?.url) lastUrl = result.url;
-        const row = bucketFor(key).tabs.find((x) => x.id === t.id);
+        const row = bucketFor(key).tabs.find((x) => x.id === engineId);
         if (row && result?.url) row.url = result.url;
         if (row && result?.title) row.title = result.title;
         await syncHostTab(ctx, hostTabId);
@@ -2201,16 +2246,19 @@ plugin({
         return { url: result?.url ?? '', title: result?.title ?? '' };
       }
       case 'nav.back': {
+        focusHostTab();
         const t = targetTabId(key);
         if (t) await ctx.call('browser.back', { tabId: t });
         return { ok: true };
       }
       case 'nav.forward': {
+        focusHostTab();
         const t = targetTabId(key);
         if (t) await ctx.call('browser.forward', { tabId: t });
         return { ok: true };
       }
       case 'nav.reload': {
+        focusHostTab();
         const t = targetTabId(key);
         if (t) await ctx.call('browser.reload', { tabId: t });
         return { ok: true };

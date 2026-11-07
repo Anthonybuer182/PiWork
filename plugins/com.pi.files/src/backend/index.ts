@@ -771,6 +771,10 @@ async function onUiRequest(
       const path = String(params.path ?? '');
       if (!path) throw new Error('file.open: path is required');
       await openInTab(tabId, path);
+      // The user picked the file in THIS pane, so it is the one they are now
+      // working in — in a split, that also makes it the agent's current
+      // document. The host re-fires panel.activated after focusing it.
+      await ctx.call('panel.focusTab', { panelId: PANEL, tabId, focus: true }).catch(() => {});
       return { ok: true, path };
     }
     case 'file.listDir': {
