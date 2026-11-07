@@ -143,14 +143,25 @@ export function PanelTabs({ region = 'right' }: { region?: PanelRegion }) {
         'flex h-full w-full min-w-0 select-none items-center gap-1 rounded-md px-1.5 transition-colors',
         osDropActive && 'bg-primary/5 ring-1 ring-primary/40',
       )}
-      style={NO_DRAG}
+      // NOT opted out as a whole: the empty stretch after the tabs must keep
+      // dragging the window, which is the macOS title-bar contract (see
+      // globals.css). Only the tab row itself opts out — that is where OS
+      // file drops land, and `-webkit-app-region: drag` swallows drop events.
       role="toolbar"
       aria-label={t('插件标签')}
       data-testid={`panel-tabs-${region}`}
       {...osDropHandlers}
     >
       <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-        <div role="tablist" aria-label={t('已打开的标签')} className="flex shrink-0 items-center gap-1">
+        <div
+          role="tablist"
+          aria-label={t('已打开的标签')}
+          // Contiguous drop target: the gaps between tabs are drop area too.
+          // Individual tabs already opt out via the global rule; this covers
+          // the padding around them.
+          style={NO_DRAG}
+          className="flex shrink-0 items-center gap-1"
+        >
           {tabs.map(({ key, panel }) => {
             const title = tabTitles[key] ?? panelTitle(panel, t);
             const active = activeId === key;
