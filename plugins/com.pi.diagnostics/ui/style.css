@@ -1,0 +1,308 @@
+/*
+ * Host theme tokens are injected as HSL *components* (e.g. "222 19% 7%"), so
+ * every colour is written as hsl(var(--token, fallback-components)). A bare
+ * var(--background) would make the whole declaration invalid — the panel would
+ * go transparent. The fallbacks keep it readable outside the host too.
+ */
+:root {
+  color-scheme: light dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif);
+  font-size: 12px;
+  line-height: 1.45;
+  color: hsl(var(--foreground, 222 47% 11%));
+  background: hsl(var(--background, 0 0% 100%));
+}
+
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px 8px;
+  border-bottom: 1px solid hsl(var(--border, 220 13% 91%));
+  background: hsl(var(--background, 0 0% 100%));
+}
+
+.titles {
+  min-width: 0;
+}
+
+h1 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+.meta {
+  margin-top: 2px;
+  overflow: hidden;
+  color: hsl(var(--muted-foreground, 220 9% 46%));
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+button {
+  padding: 3px 9px;
+  border: 1px solid hsl(var(--border, 220 13% 91%));
+  border-radius: calc(var(--radius, 8px) - 3px);
+  background: hsl(var(--card, 0 0% 100%));
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover {
+  background: hsl(var(--muted, 210 40% 96%));
+}
+
+.live {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: hsl(var(--muted, 210 40% 96%));
+  color: hsl(var(--muted-foreground, 220 9% 46%));
+  font-size: 10px;
+}
+
+.live.off {
+  opacity: 0.45;
+}
+
+.status {
+  margin: 8px 12px 0;
+  padding: 7px 9px;
+  border: 1px solid hsl(var(--border, 220 13% 91%));
+  border-radius: var(--radius, 8px);
+  background: hsl(var(--muted, 210 40% 96%));
+  color: hsl(var(--muted-foreground, 220 9% 46%));
+  word-break: break-word;
+}
+
+.status.error {
+  border-color: hsl(var(--destructive, 0 72% 51%) / 0.4);
+  color: hsl(var(--destructive, 0 72% 51%));
+}
+
+main {
+  padding: 10px 12px 18px;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.card {
+  padding: 7px 8px;
+  border: 1px solid hsl(var(--border, 220 13% 91%));
+  border-radius: var(--radius, 8px);
+  background: hsl(var(--card, 0 0% 100%));
+  min-width: 0;
+}
+
+.card .label {
+  color: hsl(var(--muted-foreground, 220 9% 46%));
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.card .value {
+  margin-top: 1px;
+  overflow: hidden;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 13px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card .sub {
+  overflow: hidden;
+  color: hsl(var(--muted-foreground, 220 9% 46%));
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.section {
+  margin-top: 14px;
+}
+
+h2 {
+  margin: 0 0 6px;
+  color: hsl(var(--muted-foreground, 220 9% 46%));
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.diagnostics {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.diagnostics li {
+  padding: 5px 7px;
+  border: 1px solid hsl(var(--border, 220 13% 91%));
+  border-left-width: 3px;
+  border-radius: var(--radius, 8px);
+  background: hsl(var(--card, 0 0% 100%));
+}
+
+.diagnostics li.warn {
+  border-left-color: hsl(var(--destructive, 0 72% 51%) / 0.75);
+}
+
+.diagnostics li.info {
+  border-left-color: hsl(var(--muted-foreground, 220 9% 46%) / 0.45);
+}
+
+.diagnostics code {
+  color: hsl(var(--muted-foreground, 220 9% 46%));
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+}
+
+.run {
+  margin-bottom: 10px;
+  border: 1px solid hsl(var(--border, 220 13% 91%));
+  border-radius: var(--radius, 8px);
+  overflow: hidden;
+}
+
+.run-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 6px 8px;
+  background: hsl(var(--muted, 210 40% 96%));
+}
+
+.run-index {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-weight: 700;
+}
+
+.run-preview {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.run-time {
+  flex-shrink: 0;
+  color: hsl(var(--muted-foreground, 220 9% 46%));
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+th {
+  padding: 4px 6px;
+  border-bottom: 1px solid hsl(var(--border, 220 13% 91%));
+  color: hsl(var(--muted-foreground, 220 9% 46%));
+  font-size: 9px;
+  font-weight: 600;
+  text-align: right;
+  white-space: nowrap;
+}
+
+th:first-child,
+th:nth-last-child(-n + 2) {
+  text-align: left;
+}
+
+td {
+  padding: 3px 6px;
+  border-bottom: 1px solid hsl(var(--border, 220 13% 91%) / 0.55);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+td:first-child,
+td:nth-last-child(-n + 2) {
+  text-align: left;
+}
+
+tr:last-child td {
+  border-bottom: 0;
+}
+
+td.num,
+.mono {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+}
+
+.muted {
+  color: hsl(var(--muted-foreground, 220 9% 46%));
+}
+
+.bad {
+  color: hsl(var(--destructive, 0 72% 51%));
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px 6px 6px;
+}
+
+.chip {
+  padding: 1px 5px;
+  border: 1px solid hsl(var(--border, 220 13% 91%));
+  border-radius: 999px;
+  background: hsl(var(--background, 0 0% 100%));
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10px;
+}
+
+.chip.error {
+  border-color: hsl(var(--destructive, 0 72% 51%) / 0.45);
+  color: hsl(var(--destructive, 0 72% 51%));
+}
+
+.chip .dur {
+  color: hsl(var(--muted-foreground, 220 9% 46%));
+}
+
+.empty {
+  padding: 18px 10px;
+  color: hsl(var(--muted-foreground, 220 9% 46%));
+  text-align: center;
+}

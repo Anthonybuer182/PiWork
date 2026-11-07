@@ -1,0 +1,18 @@
+{
+  "name": "com.pi.diagnostics",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Run diagnostics panel for PiWork — reads the current session journal and renders its trajectory.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-backend.mjs",
+    "build:backend": "node scripts/build-backend.mjs"
+  },
+  "dependencies": {
+    "@pi/plugin-sdk": "file:../../packages/plugin-sdk"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0"
+  }
+}

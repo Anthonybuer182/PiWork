@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>运行诊断</title>
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="titles">
+    <h1>运行诊断</h1>
+    <div id="meta" class="meta">正在加载…</div>
+  </div>
+  <div class="actions">
+    <span id="live" class="live" title="面板可见时每 3 秒刷新">自动</span>
+    <button id="refresh" type="button">刷新</button>
+    <button id="export" type="button">导出</button>
+  </div>
+</header>
+
+<div id="status" class="status" hidden></div>
+
+<main id="content">
+  <section id="summary" class="cards"></section>
+
+  <section id="diagnostics" class="section" hidden>
+    <h2>诊断提示</h2>
+    <ul id="diagnostic-list" class="diagnostics"></ul>
+  </section>
+
+  <section id="timeline" class="section" hidden>
+    <h2>运行时间线</h2>
+    <div id="runs"></div>
+  </section>
+
+  <section id="tools" class="section" hidden>
+    <h2>工具</h2>
+    <div id="tool-table"></div>
+  </section>
+
+  <section id="slowest" class="section" hidden>
+    <h2>最慢 span</h2>
+    <div id="slowest-table"></div>
+  </section>
+</main>
+
+<script src="./app.js"></script>
+</body>
+</html>
