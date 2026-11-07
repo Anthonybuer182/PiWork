@@ -874,6 +874,42 @@ export const EN_MESSAGES = {
   '删除 MCP 服务器？': 'Delete MCP server?',
   '将从配置文件中移除 {name}，已打开会话中的工具会在下一条消息后失效。':
     'Removes {name} from the config file. Tools in open sessions stop working after the next message.',
+  // ── 关于 (Settings → About) ──
+  关于: 'About',
+  '基于 Electron 和 React 的 AI 编程助手。':
+    'An AI coding assistant built with Electron and React.',
+  'GitHub 仓库': 'GitHub repository',
+  发布说明: 'Release notes',
+  软件更新: 'Software update',
+  '正在检查更新…': 'Checking for updates…',
+  '检查更新失败：{message}': 'Could not check for updates: {message}',
+  '发现新版本 {version}。': 'Version {version} is available.',
+  '已是最新版本。': "You're on the latest version.",
+  '正在检查…': 'Checking…',
+  检查更新: 'Check for updates',
+  '当前版本 {version}': 'Current {version}',
+  '已下载 {name}。': 'Downloaded {name}.',
+  '下载完成后退出并安装，装好后重新打开应用即可。':
+    'Quit and install once the download finishes; reopen the app for the new version.',
+  '下载完成后打开安装包，按提示更新并重新启动应用。':
+    'Open the installer after the download and follow its prompts, then restart the app.',
+  '这个版本没有提供适合当前平台的安装包，请到发布页面手动下载。':
+    'This release has no package for this platform — download it from the release page.',
+  '下载更新（{size}）': 'Download ({size})',
+  下载更新: 'Download update',
+  退出并安装: 'Quit and install',
+  '退出并安装？': 'Quit and install?',
+  '安装前会先退出 PiWork，正在运行的任务会中断。装好后重新打开应用即可。':
+    'PiWork quits first, which interrupts anything running. Reopen the app after installing.',
+  '正在退出并安装…': 'Quitting and installing…',
+  打开安装包: 'Open installer',
+  在文件夹中显示: 'Show in folder',
+  '正在下载 {name}…': 'Downloading {name}…',
+  更新内容: "What's new",
+  '在 GitHub 上查看': 'View on GitHub',
+  '发布于 {date}': 'Published {date}',
+  '更新包会下载到本机的下载文件夹，安装前需要退出 PiWork。':
+    'The installer downloads to your Downloads folder; PiWork quits before installing it.',
   // ---- END ----
 } as const;
 

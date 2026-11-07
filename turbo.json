@@ -1,7 +1,7 @@
 {
   "$schema": "https://turbo.build/schema.json",
   "globalDependencies": ["**/.env.*local"],
-  "globalEnv": ["PI_PLUGIN_REGISTRY", "PI_DEV_PLUGINS"],
+  "globalEnv": ["PI_PLUGIN_REGISTRY", "PI_DEV_PLUGINS", "PI_UPDATE_API_BASE"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],

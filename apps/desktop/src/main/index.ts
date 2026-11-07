@@ -22,6 +22,7 @@ import { TodoService, registerTodoIpc } from '@main/todos';
 import { ToolSettingsService, registerToolSettingsIpc } from '@main/preferences/tools';
 import { StorageService, registerStorageIpc, applyStorageSettings } from '@main/storage';
 import { ProxyService, registerProxyIpc } from '@main/network';
+import { UpdateService, registerUpdateIpc } from '@main/updater';
 import { VoiceSettingsService } from '@main/voice/settings';
 import { resolveVoiceProvider } from '@main/voice/registry';
 import { registerVoiceIpc, warmLocalTts } from '@main/voice/ipc';
@@ -145,6 +146,10 @@ if (!gotLock) {
     const proxyService = new ProxyService(join(app.getPath('userData'), 'network.json'));
     await proxyService.install();
     registerProxyIpc(proxyService);
+
+    // 设置 → 关于 → 检查更新. Created after the proxy so its fetch already
+    // honours the saved proxy choice; it has no startup work of its own.
+    registerUpdateIpc(new UpdateService());
 
     const settingsManager = SettingsManager.create(app.getPath('home'));
 

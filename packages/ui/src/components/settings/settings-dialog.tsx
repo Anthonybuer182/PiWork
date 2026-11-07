@@ -6,6 +6,7 @@ import {
   FileText,
   Hammer,
   HardDrive,
+  Info,
   SlidersHorizontal,
   Sparkles,
 } from 'lucide-react';
@@ -15,6 +16,7 @@ import { useI18n, type MessageKey } from '@/i18n';
 import { hasVoiceApi } from '@/lib/voice/voice-client';
 import { hasStorageApi } from '@/lib/storage-client';
 import { hasMcpApi } from '@/lib/mcp-client';
+import { hasUpdateApi } from '@/lib/update-client';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { GeneralSettingsPage } from './general-settings';
 import { ModelsSettingsPage } from './models-settings';
@@ -24,8 +26,9 @@ import { SkillsSettingsPage } from './skills-settings';
 import { ToolsSettingsPage } from './tools-settings';
 import { VoiceSettingsPage } from './voice-settings';
 import { McpSettingsPage } from './mcp-settings';
+import { AboutSettingsPage } from './about-settings';
 
-type SectionId = 'general' | 'models' | 'context' | 'storage' | 'voice' | 'tools' | 'skills' | 'mcp';
+type SectionId = 'general' | 'models' | 'context' | 'storage' | 'voice' | 'tools' | 'skills' | 'mcp' | 'about';
 
 const SECTIONS: { id: SectionId; label: MessageKey; icon: typeof Cpu }[] = [
   { id: 'general', label: '通用', icon: SlidersHorizontal },
@@ -36,6 +39,7 @@ const SECTIONS: { id: SectionId; label: MessageKey; icon: typeof Cpu }[] = [
   { id: 'tools', label: '工具', icon: Hammer },
   { id: 'skills', label: '技能', icon: Sparkles },
   { id: 'mcp', label: 'MCP', icon: Cable },
+  { id: 'about', label: '关于', icon: Info },
 ];
 
 /**
@@ -78,11 +82,13 @@ export function SettingsDialog() {
 
   // Voice is desktop-only: the web build has no microphone bridge or TTS
   // playback path, so the section is absent rather than broken. Storage is
-  // likewise about a directory the desktop app owns.
+  // likewise about a directory the desktop app owns, and 关于 is about an
+  // installed build that can be replaced.
   const sections = SECTIONS.filter(
     (s) => (s.id !== 'voice' || hasVoiceApi())
       && (s.id !== 'storage' || hasStorageApi())
-      && (s.id !== 'mcp' || hasMcpApi()),
+      && (s.id !== 'mcp' || hasMcpApi())
+      && (s.id !== 'about' || hasUpdateApi()),
   );
   const active = sections.find((s) => s.id === section) ?? sections[0];
 
@@ -146,6 +152,7 @@ export function SettingsDialog() {
               {section === 'tools' && <ToolsSettingsPage />}
               {section === 'skills' && <SkillsSettingsPage />}
               {section === 'mcp' && hasMcpApi() && <McpSettingsPage />}
+              {section === 'about' && hasUpdateApi() && <AboutSettingsPage />}
             </div>
           </div>
         </div>

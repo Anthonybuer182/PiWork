@@ -38,6 +38,10 @@ export class BrowserWindow {
     return [];
   }
 }
+export const shell = {
+  openPath: async () => '',
+  showItemInFolder() {},
+};
 export const dialog = {
   showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
   showSaveDialog: async () => ({ canceled: true }),
@@ -52,4 +56,4 @@ export const net = {
   },
 };
 
-export default { ipcMain, utilityProcess, app, BrowserWindow, dialog, Notification, net };
+export default { ipcMain, utilityProcess, app, shell, BrowserWindow, dialog, Notification, net };
