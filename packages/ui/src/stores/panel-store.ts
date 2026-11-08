@@ -84,7 +84,11 @@ export interface PanelEntry {
   /** Not shown in the picker/welcome grid; still openable via panel.open / events. */
   hidden?: boolean;
   keepAlive: PanelKeepAlive;
-  /** Whether the panel's tabs follow the session. Defaults to 'global'. */
+  /**
+   * Whether the panel's tabs follow the session. Defaults to the panel's
+   * region: the left column is the workspace as a whole ('global'), the right
+   * column is the conversation being worked on ('session').
+   */
   scope?: PanelScope;
   /** Several host tabs of this panel may be open at once. */
   multiInstance?: boolean;
@@ -605,6 +609,23 @@ const panelStorage: StateStorage = {
   },
 };
 
+/**
+ * The scope a panel gets when its descriptor does not declare one.
+ *
+ * The two columns have different subjects — the left one is the workspace as a
+ * whole (all sessions, all files), the right one is the conversation being
+ * worked on (see the `region` contract in @pi/types) — so an undeclared panel
+ * follows the column it lives in. A declaration always wins: a right-side
+ * panel that must survive a conversation switch can still say
+ * `scope: 'global'`.
+ *
+ * This is what keeps a new conversation's right column empty (the panel grid)
+ * instead of inheriting the management panel that happened to be open last.
+ */
+function defaultScope(panel: { scope?: PanelScope; region: PanelRegion }): PanelScope {
+  return panel.scope ?? (panel.region === 'left' ? 'global' : 'session');
+}
+
 export const usePanelStore = create<PanelStoreState>()(
   persist(
     (set, get) => ({
@@ -625,7 +646,15 @@ export const usePanelStore = create<PanelStoreState>()(
       pluginPanelsSynced: false,
 
       setHostPanels: (hostPanels) =>
-        set((s) => reconcile([...hostPanels, ...s.panels.filter((p) => p.source !== 'host')], s)),
+        set((s) =>
+          reconcile(
+            [
+              ...hostPanels.map((p) => ({ ...p, scope: defaultScope(p) })),
+              ...s.panels.filter((p) => p.source !== 'host'),
+            ],
+            s,
+          ),
+        ),
 
       setPluginPanels: (infos) =>
         set((s) => {
@@ -634,26 +663,29 @@ export const usePanelStore = create<PanelStoreState>()(
               // A panel is a web page. Manifest validation guarantees an entry,
               // but a malformed descriptor must not take the whole list down.
               .filter((panel) => Boolean(panel.entry))
-              .map((panel) => ({
-                id: pluginPanelId(plugin.id, panel.id),
-                title: panel.title,
-                icon: panel.icon ?? 'puzzle',
-                iconUrl: panel.iconUrl,
-                source: plugin.id,
-                pluginId: plugin.id,
-                panelId: panel.id,
-                entry: panel.entry,
-                hidden: panel.hidden === true,
-                // Default 'lru' so switching away and back does not reload
-                // the page from scratch. (Host panels carry their own
-                // keepAlive and never route through this mapping.)
-                keepAlive: panel.keepAlive ?? 'lru',
-                scope: panel.scope,
-                multiInstance: panel.multiInstance === true,
-                region: panel.region ?? 'right',
-                anchor: panel.anchor,
-                order: panel.order,
-              })),
+              .map((panel) => {
+                const region = panel.region ?? 'right';
+                return {
+                  id: pluginPanelId(plugin.id, panel.id),
+                  title: panel.title,
+                  icon: panel.icon ?? 'puzzle',
+                  iconUrl: panel.iconUrl,
+                  source: plugin.id,
+                  pluginId: plugin.id,
+                  panelId: panel.id,
+                  entry: panel.entry,
+                  hidden: panel.hidden === true,
+                  // Default 'lru' so switching away and back does not reload
+                  // the page from scratch. (Host panels carry their own
+                  // keepAlive and never route through this mapping.)
+                  keepAlive: panel.keepAlive ?? 'lru',
+                  scope: defaultScope({ scope: panel.scope, region }),
+                  multiInstance: panel.multiInstance === true,
+                  region,
+                  anchor: panel.anchor,
+                  order: panel.order,
+                };
+              }),
           );
           const hostPanels = s.panels.filter((p) => p.source === 'host');
           // The registry is now authoritative: sync BEFORE reconciling so this

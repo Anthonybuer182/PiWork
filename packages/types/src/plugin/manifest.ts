@@ -55,7 +55,12 @@ export interface PanelContribution {
    */
   entry: string;
   keepAlive?: PanelKeepAlive;
-  /** Whether the panel's tabs follow the session. Defaults to 'global'. */
+  /**
+   * Whether the panel's tabs follow the session. Defaults to the panel's
+   * region: the left column is the workspace as a whole ('global'), the right
+   * column is the conversation being worked on ('session'). A right-side panel
+   * that must stay open across conversations declares 'global' explicitly.
+   */
   scope?: PanelScope;
   /**
    * Allow several host tabs of this panel at once.
