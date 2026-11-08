@@ -70,6 +70,8 @@ interface IncomingMessage {
   eventId?: string;
   kind?: string;
   payload?: unknown;
+  /** message-action (protocol 9): the plugin's own message id. */
+  messageId?: string;
 }
 
 // ── Public API ───────────────────────────────────────────────────────────
@@ -137,6 +139,57 @@ export interface PluginContext {
   openPanel(panelId: string, options?: { focus?: boolean }): Promise<unknown>;
   /** Set (or clear, with null) the badge on a panel's rail button. */
   setBadge(panelId: string, badge: number | string | null): Promise<void>;
+  /**
+   * Post a message into a conversation timeline.
+   *
+   * The message is persisted with the session (as a pi `custom` entry) and
+   * replays with it, but it is NOT sent to the model. Use this for results,
+   * notifications and plugin-owned lists; a message the model must see should
+   * go through `chat.send` instead.
+   *
+   * `sessionId` is required: a plugin backend is process-global, so "the
+   * current conversation" is ambiguous unless the plugin names one. Learn it
+   * from `PanelMeta.sessionId` (panel hooks) or `call.sessionId` (tools).
+   */
+  messages: {
+    post(params: {
+      sessionId: string;
+      /** Declarative card tree rendered in the timeline. */
+      card?: unknown;
+      /** Plain text when a card is unnecessary. */
+      text?: string;
+      status?: 'info' | 'success' | 'warning' | 'error' | 'loading';
+      /** Absolute file paths rendered as host file-attachment cards. */
+      files?: Array<{ path: string; label?: string }>;
+      /**
+       * Default false: the message stays in the transcript and never reaches
+       * the model. True appends a pi `custom_message` entry too, so the model
+       * sees the text (cards/files are not sent, only text or a short summary).
+       */
+      agentVisible?: boolean;
+    }): Promise<{ messageId: string; entryId?: string }>;
+    /**
+     * Update a message this plugin posted. Omitted fields keep their current
+     * value; `card: null` / `text: ''` / `files: null` clear them. The update is
+     * appended as a new revision; readers fold to the latest.
+     */
+    update(params: {
+      sessionId: string;
+      messageId: string;
+      card?: unknown;
+      text?: string;
+      status?: 'info' | 'success' | 'warning' | 'error' | 'loading';
+      files?: Array<{ path: string; label?: string }> | null;
+      /** This revision also enters model context (transcript stays the source of truth). */
+      agentVisible?: boolean;
+    }): Promise<{ messageId: string; entryId?: string; revision?: number }>;
+    /** Withdraw a message this plugin posted (append-only tombstone). */
+    remove(params: { sessionId: string; messageId: string }): Promise<{
+      messageId: string;
+      entryId?: string;
+      revision?: number;
+    }>;
+  };
   log: {
     info(message: string): void;
     warn(message: string): void;
@@ -248,6 +301,19 @@ export interface PluginHandlers {
    * Requires the manifest to declare a messageRenderer for `toolName`.
    */
   onCardEvent?(toolName: string, eventId: string, kind: 'click' | 'submit', payload: unknown, ctx: PluginContext): void;
+  /**
+   * The user interacted with a card inside a message this plugin posted via
+   * `ctx.messages.post` (button click or input submit). Answer by updating or
+   * removing the same message through `ctx.messages.update/remove`.
+   */
+  onMessageAction?(
+    messageId: string,
+    eventId: string,
+    kind: 'click' | 'submit',
+    payload: unknown,
+    ctx: PluginContext,
+    meta?: { sessionId?: string },
+  ): void | Promise<void>;
 }
 
 /** How long a capability call waits before giving up. */
@@ -409,6 +475,25 @@ export function plugin(handlers: PluginHandlers): void {
     },
     async setBadge(panelId: string, badge: number | string | null): Promise<void> {
       await ctx.call('panel.setStatus', { panelId, badge: badge ?? '' }).catch(() => {});
+    },
+    messages: {
+      post: (params) =>
+        ctx.call('messages.post', params as unknown as Record<string, unknown>) as Promise<{
+          messageId: string;
+          entryId?: string;
+        }>,
+      update: (params) =>
+        ctx.call('messages.update', params as unknown as Record<string, unknown>) as Promise<{
+          messageId: string;
+          entryId?: string;
+          revision?: number;
+        }>,
+      remove: (params) =>
+        ctx.call('messages.remove', params as unknown as Record<string, unknown>) as Promise<{
+          messageId: string;
+          entryId?: string;
+          revision?: number;
+        }>,
     },
     log: {
       info: (m: string) => log('info', m),
@@ -711,6 +796,31 @@ export function plugin(handlers: PluginHandlers): void {
         } catch (err) {
           log('error', `card event "${String(msg.eventId)}" handler threw: ${describe(err)}`);
         }
+        break;
+      }
+
+      case 'message-action': {
+        if (!handlers.onMessageAction) {
+          log(
+            'warn',
+            `message action "${String(msg.eventId)}" on ${String(msg.messageId)} ignored — implement onMessageAction`,
+          );
+          break;
+        }
+        Promise.resolve()
+          .then(() =>
+            handlers.onMessageAction!(
+              msg.messageId ?? '',
+              msg.eventId ?? '',
+              msg.kind === 'submit' ? 'submit' : 'click',
+              msg.payload,
+              ctx,
+              { sessionId: msg.sessionId },
+            ),
+          )
+          .catch((err) => {
+            log('error', `message action "${String(msg.eventId)}" handler threw: ${describe(err)}`);
+          });
         break;
       }
 

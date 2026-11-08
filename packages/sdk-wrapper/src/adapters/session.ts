@@ -1,5 +1,5 @@
-import type { Session, SessionWithMessages, Message, ContentBlock, AssistantMessage, SessionTreeNode, SessionTreeResult, TreeNodeToolCall, ToolCallBlock, ToolResultBlock, TokenUsage } from '@pi/types';
-import { SKILL_REFERENCE_MARKER } from '@pi/types';
+import type { Session, SessionWithMessages, Message, ContentBlock, AssistantMessage, SessionTreeNode, SessionTreeResult, TreeNodeToolCall, ToolCallBlock, ToolResultBlock, TokenUsage, PluginMessage, PluginMessageData } from '@pi/types';
+import { PLUGIN_MESSAGE_CUSTOM_TYPE, SKILL_REFERENCE_MARKER } from '@pi/types';
 import type { SessionService } from '../services/session.js';
 import {
   SessionManager,
@@ -559,6 +559,102 @@ function isSessionMessageEntry(e: SessionEntry): e is SessionMessageEntry {
   return e.type === 'message';
 }
 
+/**
+ * The plugin payload of a custom entry.
+ *
+ * `custom` entries keep it in `data`; `custom_message` entries (the explicit
+ * agent-visible revision) keep their extension payload in `details` and their
+ * model-facing text in `content`. One reader handles both so a message keeps
+ * its identity across revisions.
+ */
+function pluginMessageDataOf(entry: SessionEntry): PluginMessageData | undefined {
+  if (entry.type !== 'custom' && entry.type !== 'custom_message') return undefined;
+  if ((entry as { customType?: string }).customType !== PLUGIN_MESSAGE_CUSTOM_TYPE) return undefined;
+  const data =
+    entry.type === 'custom'
+      ? (entry as { data?: PluginMessageData }).data
+      : (entry as { details?: PluginMessageData }).details;
+  return data && typeof data.id === 'string' ? data : undefined;
+}
+
+/** A pi custom/custom_message entry carrying a plugin-originated message. */
+function isPluginMessageEntry(
+  e: SessionEntry,
+): e is SessionEntry & { type: 'custom' | 'custom_message' } {
+  return pluginMessageDataOf(e) !== undefined;
+}
+
+/**
+ * Fold append-only plugin message entries to one message per plugin id
+ * (highest revision wins, later entry breaks a tie), dropping tombstones.
+ */
+function foldPluginMessages(entries: readonly SessionEntry[], sessionId: string): PluginMessage[] {
+  const latest = new Map<string, { entry: SessionEntry; data: PluginMessageData }>();
+  for (const entry of entries) {
+    const data = pluginMessageDataOf(entry);
+    if (!data) continue;
+    const prev = latest.get(data.id);
+    if (!prev || (data.revision ?? 0) >= (prev.data.revision ?? 0)) {
+      latest.set(data.id, { entry, data });
+    }
+  }
+
+  const messages: PluginMessage[] = [];
+  for (const { entry, data } of latest.values()) {
+    if (data.removed) continue;
+
+    const createdMs =
+      typeof data.createdAt === 'number' && Number.isFinite(data.createdAt)
+        ? data.createdAt
+        : Date.parse(entry.timestamp) || Date.now();
+    const createdAt = new Date(createdMs).toISOString();
+    const updatedAt = entry.timestamp ? new Date(entry.timestamp).toISOString() : createdAt;
+
+    const blocks: ContentBlock[] = [];
+    if (data.text) {
+      blocks.push({ id: `pm-text-${data.id}`, type: 'text', content: data.text });
+    }
+    for (const [i, file] of (data.files ?? []).entries()) {
+      const name = path.basename(file.path);
+      let size: number | undefined;
+      try {
+        size = statSync(file.path).size;
+      } catch {
+        /* missing file: the card still opens/下载s nothing */
+      }
+      blocks.push({
+        id: `pm-file-${data.id}-${i}`,
+        type: 'file',
+        content: file.label || name,
+        mimeType: getMimeType(file.path),
+        fileName: name,
+        fileSize: size,
+        workspacePath: file.path,
+      });
+    }
+
+    messages.push({
+      id: `msg-${sessionId}-plugin-${data.id}`,
+      sessionId,
+      role: 'plugin',
+      status: 'complete',
+      content: data.text ?? '',
+      blocks,
+      card: data.card,
+      files: data.files,
+      pluginId: data.pluginId,
+      pluginMessageId: data.id,
+      revision: data.revision ?? 1,
+      pluginStatus: data.status,
+      agentVisible: data.agentVisible === true,
+      createdAt,
+      updatedAt,
+      entryId: entry.id,
+    });
+  }
+  return messages;
+}
+
 // === Conversion: SDK SessionTreeNode → our SessionTreeNode ===
 function extractPreview(entry: any): string | undefined {
   if (entry.type === 'message' && entry.message) {
@@ -821,6 +917,17 @@ export function createRealSessionService(): SessionService {
         const lastMsg = messages[messages.length - 1];
         lastMsg.blocks.push(...allFileBlocks);
       }
+
+      // Plugin-originated messages share this transcript (pi `custom` entries).
+      // Fold append-only updates to the latest revision and interleave them by
+      // their own createdAt — an update must stay where the message was, not
+      // jump to the end.
+      const pluginMessages = foldPluginMessages(entries, id);
+      if (pluginMessages.length > 0) {
+        messages.push(...pluginMessages);
+        messages.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+      }
+
       const sessionName = sm.getSessionName();
       const title = (typeof sessionName === 'string' && sessionName ? sessionName : undefined)
         || (messageEntries.length > 0 ? extractTitleFromMessage(messageEntries[0].message) : undefined)

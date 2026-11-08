@@ -256,6 +256,7 @@ export const EN_MESSAGES = {
   '市场结果({count})': 'Market results ({count})',
   '市场可用({count})': 'Available ({count})',
   '插件设置({count})': 'Plugin settings ({count})',
+  '在会话里显示插件消息': 'Show plugin messages in conversations',
   '已安装({count})': 'Installed ({count})',
   '可更新({from} → {to})': 'Update available ({from} → {to})',
   '回到 v{version}': 'Back to v{version}',

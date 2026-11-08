@@ -1,4 +1,4 @@
-import type { Message, ContentBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, ToolTiming, QueueState, StreamingBehavior, AgentContextConfig, AgentContextReloadResult, GlobalContextInfo } from '@pi/types';
+import type { Message, ContentBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, ToolTiming, QueueState, StreamingBehavior, AgentContextConfig, AgentContextReloadResult, GlobalContextInfo, PluginMessageData, PluginMessagePatch } from '@pi/types';
 
 export interface SendMessageParams {
   sessionId: string;
@@ -70,6 +70,32 @@ export interface ChatService {
     signal?: AbortSignal,
   ): Promise<Message>;
   getMessages(sessionId: string, limit?: number, offset?: number): Promise<Message[]>;
+  /**
+   * Append a plugin-originated message to a session as a pi `custom` entry.
+   *
+   * The entry shares the session transcript (so it replays) but is not sent to
+   * the model. The plugin backend calls this through the host's `messages`
+   * capability; the host owns validation, targeting and persistence.
+   */
+  appendPluginMessage?(sessionId: string, data: PluginMessageData): Promise<{ entryId: string }>;
+  /**
+   * Append a new revision of a plugin message. The service verifies the message
+   * belongs to `pluginId`, merges the patch, and appends the result. Returns
+   * the new revision; throws when the message is missing, owned by another
+   * plugin, or already removed.
+   */
+  updatePluginMessage?(
+    sessionId: string,
+    messageId: string,
+    pluginId: string,
+    patch: PluginMessagePatch,
+  ): Promise<{ entryId: string; revision: number }>;
+  /** Append a tombstone revision for a plugin message (same ownership rules). */
+  removePluginMessage?(
+    sessionId: string,
+    messageId: string,
+    pluginId: string,
+  ): Promise<{ entryId: string; revision: number }>;
   stopGeneration(sessionId: string): Promise<void>;
   /**
    * Queue a steering message that is delivered after the current assistant turn's

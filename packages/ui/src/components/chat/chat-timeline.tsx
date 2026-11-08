@@ -7,14 +7,16 @@ import { useUIStore } from '@/stores/ui-store';
 import { useBuiltinModelsQuery, useVoiceSettingsQuery, hasVoiceApi } from '@/lib/voice/voice-client';
 import { stopSpeaking, useVoicePlaybackStore } from '@/stores/voice-playback-store';
 import { useComposerStore } from '@/stores/composer-store';
+import { usePluginStore } from '@/stores/plugin-store';
 import { Button } from '@/components/ui/button';
 import { stripAppendedContext } from '@/lib/quote-helpers';
 import { MessageBubble } from './message-bubble';
+import { PluginMessageBubble } from './plugin-message-bubble';
 import { EmptyChat } from './empty-chat';
 import { StreamingIndicator } from './streaming-indicator';
 import { LoadingSpinner } from '@/components/common/loading-spinner';
 import { ErrorState } from '@/components/common/error-state';
-import type { Message, ContentBlock, TokenUsage, ToolCallBlock } from '@pi/types';
+import type { Message, ContentBlock, TokenUsage, ToolCallBlock, PluginMessage } from '@pi/types';
 import type { AssistantMessage } from '@pi/types';
 import { usePermissionStore } from '@/stores/permission-store';
 import { useAskStore } from '@/stores/ask-store';
@@ -220,6 +222,7 @@ export function ChatTimeline() {
   const sdk = useSDK();
   const queryClient = useQueryClient();
   const activeSessionId = useUIStore((s) => s.activeSessionId);
+  const mutedPlugins = usePluginStore((s) => s.mutedPlugins);
   const isStreaming = useComposerStore((s) => s.isStreaming);
   const streamingBlocks = useComposerStore((s) => s.streamingBlocks);
   const streamingUsage = useComposerStore((s) => s.streamingUsage);
@@ -264,7 +267,39 @@ export function ChatTimeline() {
     placeholderData: keepPreviousData,
   });
 
-  const storedMessages = session?.messages ?? [];
+  // Plugin messages can be muted per plugin (a user preference). Muting hides
+  // them from the timeline but does not delete the session entries: unmuting
+  // restores the history, and an `agentVisible` message still reaches the model.
+  const storedMessages = useMemo(() => {
+    const all = session?.messages ?? [];
+    if (mutedPlugins.length === 0) return all;
+    const muted = new Set(mutedPlugins);
+    return all.filter(
+      (m) => m.role !== 'plugin' || !muted.has((m as PluginMessage).pluginId),
+    );
+  }, [session?.messages, mutedPlugins]);
+
+  // Plugin messages arrive outside the agent stream (a background event, a
+  // panel action). Main persists them as session entries and sends a signal;
+  // reloading the conversation is the single source of truth — the entry is
+  // already in the transcript, so no second in-memory merge path is needed.
+  useEffect(() => {
+    const api = (
+      window as unknown as {
+        electronAPI?: {
+          on: (channel: string, callback: (...args: unknown[]) => void) => void;
+          removeListener: (channel: string, callback: (...args: unknown[]) => void) => void;
+        };
+      }
+    ).electronAPI;
+    if (!api?.on) return;
+    const onPluginMessage = (payload: unknown) => {
+      const sessionId = (payload as { sessionId?: string } | null)?.sessionId;
+      if (sessionId) void queryClient.invalidateQueries({ queryKey: ['session', sessionId] });
+    };
+    api.on('pi:plugin:message', onPluginMessage);
+    return () => api.removeListener('pi:plugin:message', onPluginMessage);
+  }, [queryClient]);
 
   // Stable timestamp: capture once at the start of streaming
   if (isStreaming && !streamingStartRef.current) {
@@ -530,6 +565,9 @@ export function ChatTimeline() {
             }
 
             const message = item as Message;
+            if (message.role === 'plugin') {
+              return <PluginMessageBubble message={message as PluginMessage} />;
+            }
             const msgIndex = messages.indexOf(message);
             const isLast = msgIndex === messages.length - 1;
             const isAssistant = message.role === 'assistant';

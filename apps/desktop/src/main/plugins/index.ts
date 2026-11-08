@@ -10,6 +10,8 @@ import type {
   PluginInfo,
   PluginToolContent,
   UiNode,
+  PluginMessageData,
+  PluginMessagePatch,
 } from '@pi/types';
 import { PLUGIN_PROTOCOL_VERSION } from '@pi/types';
 import { PluginRegistry } from './registry';
@@ -86,6 +88,30 @@ export class PluginSystem {
    */
   onContextFileWrite: ((filePath: string) => void) | null = null;
   /**
+   * Append a plugin-originated message to a conversation (assigned once the
+   * chat service exists). The capability hub calls this lazily; `messages` is
+   * permission-gated and validated there.
+   */
+  appendPluginMessage:
+    | ((sessionId: string, data: PluginMessageData) => Promise<{ entryId: string }>)
+    | null = null;
+  /** Append an update/tombstone revision of a plugin message (assigned with append). */
+  updatePluginMessage:
+    | ((
+        sessionId: string,
+        messageId: string,
+        pluginId: string,
+        patch: PluginMessagePatch,
+      ) => Promise<{ entryId: string; revision: number }>)
+    | null = null;
+  removePluginMessage:
+    | ((
+        sessionId: string,
+        messageId: string,
+        pluginId: string,
+      ) => Promise<{ entryId: string; revision: number }>)
+    | null = null;
+  /**
    * A plugin's backend just (re)started — activate, re-enable, or crash
    * restart. Panel views reused across those events hold ports to the dead
    * process; the host uses this to push fresh ones (see PluginWebViews.
@@ -141,6 +167,20 @@ export class PluginSystem {
       // Lazy on purpose: the chat service is created after the kernel, and the
       // hook is only invoked by a later plugin write.
       onContextFileWrite: (filePath) => this.onContextFileWrite?.(filePath),
+      appendPluginMessage: (sessionId, data) =>
+        this.appendPluginMessage
+          ? this.appendPluginMessage(sessionId, data)
+          : Promise.reject(new Error('messages.post: no conversation store attached')),
+      updatePluginMessage: (sessionId, messageId, pluginId, patch) =>
+        this.updatePluginMessage
+          ? this.updatePluginMessage(sessionId, messageId, pluginId, patch)
+          : Promise.reject(new Error('messages.update: no conversation store attached')),
+      removePluginMessage: (sessionId, messageId, pluginId) =>
+        this.removePluginMessage
+          ? this.removePluginMessage(sessionId, messageId, pluginId)
+          : Promise.reject(new Error('messages.remove: no conversation store attached')),
+      sendToSession: (sessionId, channel, payload) =>
+        this.eventSink?.sendToSession(sessionId, channel, payload),
     });
     this.marketplace = new PluginMarketplace(this.registry);
   }
@@ -466,6 +506,21 @@ export class PluginSystem {
     const proc = this.processes.get(pluginId);
     if (!proc) return false;
     proc.sendCardEvent(toolName, eventId, kind, payload);
+    return true;
+  }
+
+  /** Route a click/submit inside a plugin-originated message's card. */
+  sendMessageAction(
+    pluginId: string,
+    messageId: string,
+    eventId: string,
+    kind: 'click' | 'submit',
+    payload?: unknown,
+    sessionId?: string,
+  ): boolean {
+    const proc = this.processes.get(pluginId);
+    if (!proc) return false;
+    proc.sendMessageAction(messageId, eventId, kind, payload, sessionId);
     return true;
   }
 

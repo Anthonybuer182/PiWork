@@ -1,7 +1,8 @@
 import * as path from 'path';
 import { statSync, readFileSync, existsSync } from 'node:fs';
 import type { ChatService, SendMessageParams, StreamChunk } from '../services/chat.js';
-import type { Message, AssistantMessage, ContentBlock, ToolResultBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, AgentContextConfig, AgentContextReloadResult, AgentToolInfo, AppendSegmentInfo, ContextFileInfo, ContextFileScope, PromptFileInfo, GlobalContextFile, GlobalContextInfo, ModelCapabilities } from '@pi/types';
+import type { Message, AssistantMessage, ContentBlock, ToolResultBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, AgentContextConfig, AgentContextReloadResult, AgentToolInfo, AppendSegmentInfo, ContextFileInfo, ContextFileScope, PromptFileInfo, GlobalContextFile, GlobalContextInfo, ModelCapabilities, PluginMessageData, PluginMessagePatch } from '@pi/types';
+import { PLUGIN_MESSAGE_CUSTOM_TYPE } from '@pi/types';
 import { ASK_TOOL_NAME, TODO_TOOL_NAME } from '@pi/types';
 import { createAgentSession, SessionManager, DefaultResourceLoader, getAgentDir, SettingsManager, formatSkillsForPrompt, createMcpExtension, createToolSearchExtension } from '@earendil-works/pi-coding-agent';
 import type { AgentSession, InlineExtension, McpExtensionOptions, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
@@ -313,6 +314,39 @@ export async function retireSession(
     await session.extensionRunner.emit({ type: 'session_shutdown', reason });
   } catch { /* best-effort */ }
   try { session.dispose(); } catch { /* best-effort */ }
+}
+
+/** Latest stored revision of one plugin message in a session, if any. */
+function findLatestPluginMessage(
+  manager: SessionManager,
+  messageId: string,
+): { entry: unknown; data: PluginMessageData } | null {
+  let latest: { entry: unknown; data: PluginMessageData } | null = null;
+  for (const entry of manager.getEntries()) {
+    if (entry.type !== 'custom' && entry.type !== 'custom_message') continue;
+    if ((entry as { customType?: string }).customType !== PLUGIN_MESSAGE_CUSTOM_TYPE) continue;
+    const data =
+      entry.type === 'custom'
+        ? (entry as { data?: PluginMessageData }).data
+        : (entry as { details?: PluginMessageData }).details;
+    if (!data || data.id !== messageId) continue;
+    if (!latest || (data.revision ?? 0) >= (latest.data.revision ?? 0)) {
+      latest = { entry, data };
+    }
+  }
+  return latest;
+}
+
+/**
+ * The text a `custom_message` entry sends to the model. Cards/files cannot be
+ * sent, so a card-only message falls back to its title (or a plain line) —
+ * enough for the model to know something happened, without inventing content.
+ */
+function pluginMessageContextText(data: PluginMessageData): string {
+  if (typeof data.text === 'string' && data.text.trim()) return data.text;
+  const title = (data.card?.props as Record<string, unknown> | undefined)?.title;
+  if (typeof title === 'string' && title.trim()) return title.trim();
+  return `Plugin message from ${data.pluginId}`;
 }
 
 export function createRealChatService(
@@ -1708,6 +1742,115 @@ export function createRealChatService(
       } catch {
         return [];
       }
+    },
+
+    /**
+     * Persist a plugin message as a pi `custom` entry.
+     *
+     * Using the live session's manager when the conversation is open keeps the
+     * append on the same writer the agent loop uses; for a closed conversation
+     * SessionManager.open() gives the file its own writer. The entry type is a
+     * display/state entry (NOT custom_message), so it never enters the model
+     * context.
+     */
+    async appendPluginMessage(
+      sessionId: string,
+      data: PluginMessageData,
+    ): Promise<{ entryId: string }> {
+      const cached = activeSessions.get(sessionId);
+      const manager = cached?.session.sessionManager ?? SessionManager.open(sessionId);
+      // `custom` = display/state only (never model context). `custom_message`
+      // participates in context, so it is an explicit opt-in on the message.
+      const entryId = data.agentVisible
+        ? manager.appendCustomMessageEntry(
+            PLUGIN_MESSAGE_CUSTOM_TYPE,
+            pluginMessageContextText(data),
+            true,
+            data,
+          )
+        : manager.appendCustomEntry(PLUGIN_MESSAGE_CUSTOM_TYPE, data);
+      return { entryId };
+    },
+
+    /**
+     * Append a new revision of a plugin message. Append-only: readers fold to
+     * the highest revision, so an update never rewrites history. Ownership is
+     * checked here (the capability layer cannot see the stored data).
+     */
+    async updatePluginMessage(
+      sessionId: string,
+      messageId: string,
+      pluginId: string,
+      patch: PluginMessagePatch,
+    ): Promise<{ entryId: string; revision: number }> {
+      const cached = activeSessions.get(sessionId);
+      const manager = cached?.session.sessionManager ?? SessionManager.open(sessionId);
+      const latest = findLatestPluginMessage(manager, messageId);
+      if (!latest) throw new Error(`messages.update: no message "${messageId}" in this session`);
+      if (latest.data.pluginId !== pluginId) {
+        throw new Error(`messages.update: message "${messageId}" belongs to another plugin`);
+      }
+      if (latest.data.removed) throw new Error(`messages.update: message "${messageId}" was removed`);
+
+      const next: PluginMessageData = {
+        ...latest.data,
+        revision: (latest.data.revision ?? 0) + 1,
+        updatedAt: Date.now(),
+      };
+      if (Object.prototype.hasOwnProperty.call(patch, 'card')) {
+        if (patch.card === null) delete next.card;
+        else next.card = patch.card;
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'text')) {
+        if (!patch.text) delete next.text;
+        else next.text = patch.text;
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'status')) {
+        if (!patch.status) delete next.status;
+        else next.status = patch.status;
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'files')) {
+        if (patch.files === null || patch.files?.length === 0) delete next.files;
+        else next.files = patch.files;
+      }
+      // Updates are UI-only unless this revision explicitly opts into context.
+      // Once a message has been shared, the flag stays true on the stored data
+      // (the model has seen it; hiding the badge later would be misleading).
+      const enterContext = patch.agentVisible === true;
+      if (enterContext || latest.data.agentVisible === true) next.agentVisible = true;
+
+      const entryId = enterContext
+        ? manager.appendCustomMessageEntry(
+            PLUGIN_MESSAGE_CUSTOM_TYPE,
+            pluginMessageContextText(next),
+            true,
+            next,
+          )
+        : manager.appendCustomEntry(PLUGIN_MESSAGE_CUSTOM_TYPE, next);
+      return { entryId, revision: next.revision };
+    },
+
+    async removePluginMessage(
+      sessionId: string,
+      messageId: string,
+      pluginId: string,
+    ): Promise<{ entryId: string; revision: number }> {
+      const cached = activeSessions.get(sessionId);
+      const manager = cached?.session.sessionManager ?? SessionManager.open(sessionId);
+      const latest = findLatestPluginMessage(manager, messageId);
+      if (!latest) throw new Error(`messages.remove: no message "${messageId}" in this session`);
+      if (latest.data.pluginId !== pluginId) {
+        throw new Error(`messages.remove: message "${messageId}" belongs to another plugin`);
+      }
+      if (latest.data.removed) throw new Error(`messages.remove: message "${messageId}" was already removed`);
+      const next: PluginMessageData = {
+        ...latest.data,
+        revision: (latest.data.revision ?? 0) + 1,
+        removed: true,
+        updatedAt: Date.now(),
+      };
+      const entryId = manager.appendCustomEntry(PLUGIN_MESSAGE_CUSTOM_TYPE, next);
+      return { entryId, revision: next.revision };
     },
 
     async stopGeneration(sessionId?: string): Promise<void> {

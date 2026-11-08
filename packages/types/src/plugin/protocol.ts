@@ -161,6 +161,24 @@ export interface PluginCardEventMessage {
   payload?: unknown;
 }
 
+/**
+ * A user interacted with a card inside a plugin-originated message (see
+ * `messages.post`). The backend can answer by updating/removing the same
+ * message through `ctx.messages.update/remove`.
+ */
+export interface PluginMessageActionMessage {
+  type: 'message-action';
+  /** The plugin's own stable message id (PluginMessageData.id). */
+  messageId: string;
+  /** The event id the card node declared. */
+  eventId: string;
+  kind: 'click' | 'submit';
+  /** Button: the node's props. Input submit: the entered value. */
+  payload?: unknown;
+  /** The conversation the message lives in; saves the backend a lookup. */
+  sessionId?: string;
+}
+
 export interface PluginLogMessage {
   type: 'log';
   level: 'debug' | 'info' | 'warn' | 'error';
@@ -180,6 +198,7 @@ export type HostToPluginMessage =
   | PluginContextRequestMessage
   | PluginHostEventMessage
   | PluginCardEventMessage
+  | PluginMessageActionMessage
   | PluginShutdownMessage;
 
 export type PluginToHostMessage =
@@ -254,6 +273,10 @@ export type CapabilityMethod =
   | 'filesystem.delete'
   /** Structured text extraction from docx / xlsx / pptx / pdf. */
   | 'office.read'
+  /** Post a plugin-originated message into a conversation timeline. */
+  | 'messages.post'
+  | 'messages.update'
+  | 'messages.remove'
   | 'browser.navigate'
   | 'browser.back'
   | 'browser.forward'

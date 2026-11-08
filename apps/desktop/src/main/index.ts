@@ -20,6 +20,7 @@ import { readPermissionMode, writePermissionMode } from '@main/permissions/mode-
 import { AskService, registerAskIpc } from '@main/asks';
 import { TodoService, registerTodoIpc } from '@main/todos';
 import { ToolSettingsService, registerToolSettingsIpc } from '@main/preferences/tools';
+import { PluginMessageSettingsService } from '@main/preferences/plugin-messages';
 import { StorageService, registerStorageIpc, applyStorageSettings } from '@main/storage';
 import { ProxyService, registerProxyIpc } from '@main/network';
 import { UpdateService, registerUpdateIpc } from '@main/updater';
@@ -347,10 +348,13 @@ if (!gotLock) {
     });
     pluginPlaybackHook = (key, playing) =>
       pluginSystem.pushHostEvent('voice.playback', 'voice', { key, playing });
+    const pluginMessageSettings = new PluginMessageSettingsService(
+      join(app.getPath('userData'), 'plugin-messages.json'),
+    );
     // Register IPC handlers BEFORE init completes — the file:// renderer loads
     // in milliseconds in packaged builds, and its first `pi:plugin:list` must
     // queue behind kernel boot (whenReady) instead of rejecting outright.
-    registerPluginIpcHandlers(pluginSystem, windows);
+    registerPluginIpcHandlers(pluginSystem, windows, pluginMessageSettings);
 
     // Host-contributed tools are built after the chat service exists, but the
     // provider is only *called* when a session is created — so the array is
@@ -399,6 +403,28 @@ if (!gotLock) {
     registerMcpIpc(mcpStore, {
       invalidateSessions: () => chatService.invalidateSessions?.(),
     });
+
+    // Plugin-originated messages share the conversation transcript as pi
+    // `custom` entries. The capability hub validates/targets them; the chat
+    // service owns the session writer.
+    pluginSystem.appendPluginMessage = async (sessionId, data) => {
+      if (!chatService.appendPluginMessage) {
+        throw new Error('messages.post: this chat service cannot persist plugin messages');
+      }
+      return chatService.appendPluginMessage(sessionId, data);
+    };
+    pluginSystem.updatePluginMessage = async (sessionId, messageId, pluginId, patch) => {
+      if (!chatService.updatePluginMessage) {
+        throw new Error('messages.update: this chat service cannot persist plugin messages');
+      }
+      return chatService.updatePluginMessage(sessionId, messageId, pluginId, patch);
+    };
+    pluginSystem.removePluginMessage = async (sessionId, messageId, pluginId) => {
+      if (!chatService.removePluginMessage) {
+        throw new Error('messages.remove: this chat service cannot persist plugin messages');
+      }
+      return chatService.removePluginMessage(sessionId, messageId, pluginId);
+    };
 
     // A plugin write/delete may have changed a .pi prompt file or an AGENTS.md
     // the agent already loaded. Rebuild the affected live sessions so the save

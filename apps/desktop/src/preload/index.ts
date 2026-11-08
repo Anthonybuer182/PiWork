@@ -358,6 +358,14 @@ const pluginBridge = (() => {
     setSetting: (pluginId: string, key: string, value: unknown): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('pi:plugin:set-setting', { pluginId, key, value }),
     listTools: (): Promise<unknown[]> => ipcRenderer.invoke('pi:plugin:list-tools'),
+    messages: {
+      muted: (): Promise<string[]> => ipcRenderer.invoke('pi:plugin:messages:muted'),
+      setMuted: (
+        pluginId: string,
+        muted: boolean,
+      ): Promise<{ ok: boolean; muted?: string[]; error?: string }> =>
+        ipcRenderer.invoke('pi:plugin:messages:set-muted', { pluginId, muted }),
+    },
     executeTool: (pluginId: string, name: string, params?: Record<string, unknown>): Promise<{ ok: boolean; content?: unknown[]; details?: unknown; error?: string }> =>
       ipcRenderer.invoke('pi:plugin:execute-tool', { pluginId, name, params }),
     send: (pluginId: string, payload: unknown): void => {
