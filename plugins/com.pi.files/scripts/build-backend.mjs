@@ -12,7 +12,7 @@
  * Run from the plugin root:  node scripts/build-backend.mjs
  */
 import { build } from 'esbuild';
-import { readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -56,6 +56,25 @@ const electronShim = {
 };
 
 /** Resolve @genoffice/<pkg>[/<sub>] against the vendored mirror. */
+/**
+ * Point GenOffice's PDF wasm lookup at this plugin's dist folder.
+ *
+ * `apps/pdf/src/main/wasm-path.ts` resolves node_modules in dev and Electron's
+ * Resources/wasm in the packaged app. A plugin has neither: its wasm sits
+ * beside dist/main.mjs. Swapping the module for `src/backend/pdf-wasm-path.ts`
+ * keeps vendor code unmodified and makes the plugin self-contained.
+ */
+const pdfWasmShim = {
+  name: 'pdf-wasm-shim',
+  setup(b) {
+    b.onResolve({ filter: /^\.\/wasm-path$/ }, (args) => {
+      const dir = args.resolveDir.replace(/\\/g, '/');
+      if (!dir.endsWith('/apps/pdf/src/main')) return null;
+      return { path: join(ROOT, 'src/backend/pdf-wasm-path.ts') };
+    });
+  },
+};
+
 const genofficeResolver = {
   name: 'genoffice',
   setup(b) {
@@ -116,9 +135,36 @@ const result = await build({
   banner: {
     js: "import { createRequire as __piCreateRequire } from 'node:module'; const require = __piCreateRequire(import.meta.url);",
   },
-  plugins: [electronShim, genofficeResolver, rawText],
+  plugins: [pdfWasmShim, electronShim, genofficeResolver, rawText],
   logLevel: 'warning',
 });
 
 const bytes = Object.values(result.metafile.outputs)[0]?.bytes ?? 0;
 console.log(`bundled → dist/main.mjs (${(bytes / 1024).toFixed(0)} KB)`);
+
+// ── pdfium / harfbuzz wasm (PDF text, render, conversion) ──────────────
+//
+// GenOffice's pdf2docx rebuild and its PDF text-insert layer are pure, but
+// they need pdfium to rasterize/extract and harfbuzz to subset the font they
+// embed. The app normally finds them in node_modules or in its packaged
+// resources directory; a plugin ships neither, so the backend loads them from
+// beside dist/main.mjs. Copying them here makes a plugin install
+// self-contained (and the market zip picks up dist/ wholesale).
+const distDir = join(ROOT, 'dist');
+mkdirSync(distDir, { recursive: true });
+const wasmAssets = [
+  { from: join(ROOT, 'node_modules', '@embedpdf', 'pdfium', 'dist', 'pdfium.wasm'), to: 'pdfium.wasm' },
+  {
+    from: join(ROOT, 'node_modules', 'harfbuzzjs', 'dist', 'harfbuzz-subset.wasm'),
+    to: 'hb-subset.wasm',
+  },
+];
+for (const asset of wasmAssets) {
+  if (existsSync(asset.from)) {
+    copyFileSync(asset.from, join(distDir, asset.to));
+    console.log(`copied → dist/${asset.to}`);
+  } else {
+    console.warn(`warning: ${asset.from} not found — the matching PDF feature will fail at runtime`);
+  }
+}
+

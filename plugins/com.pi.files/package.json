@@ -2,7 +2,7 @@
   "name": "com.pi.files",
   "version": "0.5.0",
   "private": true,
-  "description": "文件查看器插件 — 右栏查看 docx/pptx/xlsx/pdf、markdown、html 和纯文本，并提供文档检索与编辑工具；文档由 vendor 的 GenOffice 引擎渲染（Apache-2.0）",
+  "description": "文件查看器插件 — 右栏查看 docx/pptx/xlsx/pdf、markdown、html 和纯文本，并提供文档检索、新建、编辑、PDF 页操作与 PDF→Office 转换工具；文档由 vendor 的 GenOffice 引擎渲染（Apache-2.0）",
   "type": "module",
   "scripts": {
     "build": "node scripts/build-backend.mjs && node scripts/build-panel.mjs",
@@ -69,6 +69,7 @@
     "buffer": "^6.0.3",
     "fast-xml-parser": "^5.3.4",
     "fflate": "^0.8.3",
+    "harfbuzzjs": "^1.6.4",
     "json5": "^2.2.3",
     "jszip": "^3.10.1",
     "katex": "^0.16.47",

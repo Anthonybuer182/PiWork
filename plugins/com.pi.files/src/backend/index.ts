@@ -26,10 +26,24 @@
 import { plugin, type PluginContext, type ToolResult } from '@pi/plugin-sdk';
 import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { basename, extname, join, resolve as resolvePath } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, resolve as resolvePath } from 'node:path';
 import { createBlankPptx, openPptx, savePptx } from '@genoffice/pptx-engine';
+import { buildBlankDocx } from '@genoffice/docx-engine';
+import { blankXlsxBuffer, sheetCsvToXlsxBuffer } from '@genoffice/xlsx-gateway/gateway/csv-import';
 import { applyXlsxEdits, planXlsxEdits, readXlsxStructure, type CellOp } from './xlsx';
 import { DOCX_OP_GROUPS, docxGuide, planDocxCommands, type DocxOp } from './docx';
+import {
+  PDF_PAPER,
+  applyPdfOps,
+  blankPdf,
+  convertPdfToOffice,
+  insertPdfText,
+  pdfGuide,
+  pdfPageCount,
+  pdfPageInfo,
+  renderPdfPages,
+  type PdfOp,
+} from './pdf';
 import { searchWorkspace } from './file-index';
 import {
   OP_GROUPS,
@@ -322,13 +336,45 @@ async function readOfficeBytes(path: string): Promise<Uint8Array> {
   return new Uint8Array(await readFile(path));
 }
 
+/**
+ * Tell every viewer tab showing `path` that its bytes changed on disk.
+ *
+ * A renderer loads the document once and keeps the parsed form in memory; a
+ * write made HERE (office_edit runs in this process) leaves the panel drawing
+ * the pre-edit copy until its tab is reopened — which is exactly the "preview
+ * is stale after an edit" bug. `ui.render` cannot say it: every renderer treats
+ * a repeat of the path it already shows as a no-op, precisely so a re-mount
+ * cannot reload in a loop. So this is a separate signal, and the page re-reads
+ * the file itself.
+ */
+function notifyFileChanged(path: string): void {
+  let shown = false;
+  for (const [tabId, file] of tabFiles) {
+    if (!file || !samePath(file, path)) continue;
+    shown = true;
+    ctx.send(PANEL, 'ui.fileChanged', { path: file }, tabId);
+  }
+  // A page that is actually being reloaded loses its editor's "ready" claim.
+  // Without this, a docx create over a document that is already open could let
+  // the next bridged command go to a page that is navigating away. Only when a
+  // tab shows the file: with none, nothing reloads and the claim still holds.
+  if (shown && mcpReadyPath !== null && samePath(mcpReadyPath, path)) {
+    mcpReadyPath = null;
+    mcpReady = false;
+  }
+}
+
 /** Save engine output back to disk through the host, keeping the conflict check. */
 async function writeOfficeBytes(path: string, bytes: Uint8Array, expectedMtime?: number): Promise<unknown> {
-  return ctx.call('filesystem.write', {
+  const written = await ctx.call('filesystem.write', {
     path,
     contentB64: Buffer.from(bytes).toString('base64'),
     expectedMtime: typeof expectedMtime === 'number' ? expectedMtime : undefined,
   });
+  // After a successful write only: a refused write leaves the panel's copy
+  // correct, and reloading it then would look like the edit had landed.
+  notifyFileChanged(path);
+  return written;
 }
 
 // ── Tools ────────────────────────────────────────────────────────────
@@ -339,15 +385,21 @@ const text = (t: string, details?: unknown): ToolResult => ({
 });
 
 /**
- * Declarative card for office_edit (messageRenderer): what changed, plus a
- * one-click open in the viewer. The file path rides in the Button's props —
- * the click event loops it back as the payload — so each card opens ITS
- * document even when several edits are stacked in one conversation. Cards
- * render only what the host can draw from data; the plugin ships no UI code.
+ * Declarative card for office_edit / office_create (messageRenderer): what
+ * changed, plus a one-click open in the viewer. The file path rides in the
+ * Button's props — the click event loops it back as the payload — so each card
+ * opens ITS document even when several edits are stacked in one conversation.
+ * Cards render only what the host can draw from data; the plugin ships no UI
+ * code.
  */
-const docCard = (filePath: string, opCount: number, ext: string): unknown => ({
+const docCard = (
+  filePath: string,
+  opCount: number,
+  ext: string,
+  mode: 'updated' | 'created' = 'updated',
+): unknown => ({
   component: 'Card',
-  props: { title: '文档已更新' },
+  props: { title: mode === 'created' ? '文档已创建' : '文档已更新' },
   children: [
     {
       component: 'Row',
@@ -357,7 +409,16 @@ const docCard = (filePath: string, opCount: number, ext: string): unknown => ({
         { component: 'Badge', props: { text: ext.toUpperCase() } },
       ],
     },
-    { component: 'Text', props: { text: `已应用 ${opCount} 个操作并保存`, variant: 'muted' } },
+    {
+      component: 'Text',
+      props: {
+        text:
+          mode === 'created'
+            ? `已新建${opCount > 0 ? `并应用 ${opCount} 个操作` : ''}`
+            : `已应用 ${opCount} 个操作并保存`,
+        variant: 'muted',
+      },
+    },
     {
       component: 'Button',
       props: { label: '在查看器中打开', path: filePath },
@@ -400,8 +461,11 @@ async function toolGuide(p: Record<string, unknown>): Promise<ToolResult> {
     // the document is open in, which is why the guide leads with that.
     return text(docxGuide(), { domain, ops: DOCX_OP_GROUPS });
   }
+  if (domain === 'pdf') {
+    return text(pdfGuide(), { domain, tool: 'pdf_edit' });
+  }
   if (domain !== 'pptx') {
-    return text(`domain "${domain}" is not wired yet — pptx, xlsx and docx are. Do not retry with another argument; tell the user this format has no structural editing yet.`);
+    return text(`domain "${domain}" is not wired yet — pptx, docx, xlsx and pdf are. Do not retry with another argument; tell the user this format has no structural editing yet.`);
   }
   const group = p.group === undefined ? undefined : String(p.group);
   if (group !== undefined) {
@@ -700,6 +764,463 @@ async function toolEdit(p: Record<string, unknown>, sessionId?: string | null): 
   };
 }
 
+/**
+ * Show a file the agent just created, and switch the right column to it.
+ *
+ * Creation is a foreground request: the user asked for this file and expects
+ * to see it. (Background edits still go through `notifyFileChanged`, which
+ * reloads a tab without changing focus.) Best-effort: the file is already on
+ * disk, so a host that refuses the open must not turn a successful create into
+ * a failed tool call.
+ */
+async function revealCreated(path: string): Promise<void> {
+  try {
+    await openInViewer(path, true);
+  } catch (err) {
+    ctx.log.warn(
+      `could not reveal ${path}: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * Create a NEW Office document, optionally with its first content.
+ *
+ * Why this exists: without it the agent reaches for Python (python-pptx,
+ * python-docx, openpyxl) when the user asks for a new deck/sheet/doc — and a
+ * machine with this app installed has no reason to have a Python toolchain.
+ * The engines are the same ones the read/edit paths already use, so a created
+ * file is exactly the kind of file `office_edit` can edit afterwards:
+ *
+ *   pptx  createBlankPptx() + the office_edit op registry (one blank slide)
+ *   xlsx  GenOffice's blank workbook + the cell ops office_edit uses
+ *   docx  GenOffice's blank document; content ops run in the live editor,
+ *         exactly as office_edit does (the document opens in the viewer)
+ *
+ * Two safety rules: an existing path is refused unless `overwrite: true`, and
+ * a rejected pptx/xlsx batch writes NOTHING (validation happens in memory
+ * before the write). docx is the one exception — its editor needs the file to
+ * exist before it can open it, so a rejected content batch leaves the blank
+ * document behind and says so.
+ */
+async function toolCreate(p: Record<string, unknown>, sessionId?: string | null): Promise<ToolResult> {
+  const path = String(p.path ?? '');
+  if (!path) throw new Error('office_create: path is required');
+  if (!isAbsolute(path)) {
+    throw new Error(
+      `office_create: path must be absolute — "${path}" would resolve against the app's own ` +
+        "directory, not the user's workspace. Join the workspace root in first.",
+    );
+  }
+  const ext = path.toLowerCase().split('.').pop() ?? '';
+  if (ext !== 'pptx' && ext !== 'docx' && ext !== 'xlsx' && ext !== 'pdf' && ext !== 'csv') {
+    throw new Error(
+      `office_create: "${ext}" is not supported — .pptx, .docx, .xlsx, .pdf and .csv can be created. ` +
+        'For markdown or plain text, write the file with the ordinary file tools.',
+    );
+  }
+  const ops = Array.isArray(p.ops) ? (p.ops as Record<string, unknown>[]) : [];
+  const csv = typeof p.csv === 'string' ? p.csv : '';
+  const textContent = typeof p.text === 'string' ? p.text : '';
+  if (csv.trim() && ext !== 'xlsx' && ext !== 'csv') {
+    throw new Error(
+      'office_create: "csv" only applies to .xlsx (a sheet grid) and .csv (the file itself) — ' +
+        'for pptx/docx/pdf use "ops" (or text/pages/pageSize for pdf).',
+    );
+  }
+  if (textContent.trim() && ext !== 'pdf') {
+    throw new Error(
+      `office_create: "text" only applies to .pdf — for .${ext} use "ops" (or "csv" for xlsx).`,
+    );
+  }
+  if (ops.length > 0 && (ext === 'pdf' || ext === 'csv')) {
+    throw new Error(
+      `office_create: .${ext} takes no "ops" — ` +
+        (ext === 'pdf' ? 'use "pages" and "pageSize", then pdf_edit for page surgery.' : 'use the "csv" text.'),
+    );
+  }
+  const existing = await stat(path).catch(() => null);
+  if (existing?.isDirectory()) throw new Error(`office_create: ${path} is a directory`);
+  if (existing && p.overwrite !== true) {
+    throw new Error(
+      `${path} already exists — office_create only writes a new file. ` +
+        'Pass overwrite: true to replace it, or use office_edit to change the existing document.',
+    );
+  }
+
+  if (ext === 'csv') {
+    // GenOffice's CSV create path prefixes a UTF-8 BOM so Excel reopens the
+    // file as UTF-8 instead of the local ANSI code page.
+    const bytes = new TextEncoder().encode(`﻿${csv}`);
+    const written = await writeOfficeBytes(path, bytes);
+    await revealCreated(path);
+    return {
+      ...text(`created ${path} (CSV, ${bytes.length} bytes)`, {
+        created: true,
+        path,
+        mtime: (written as { mtime?: number })?.mtime,
+      }),
+      card: docCard(path, 0, ext, 'created'),
+    };
+  }
+
+  if (ext === 'pdf') {
+    // GenOffice's "New PDF": a blank A4, repeated to the requested page count.
+    const rawPages = Number(p.pages);
+    const pages = Math.min(Math.max(Number.isFinite(rawPages) ? Math.floor(rawPages) : 1, 1), 200);
+    const rawPaper = typeof p.pageSize === 'string' ? p.pageSize : 'A4';
+    const paper = rawPaper in PDF_PAPER ? (rawPaper as keyof typeof PDF_PAPER) : 'A4';
+    let bytes = await blankPdf(pages, paper);
+    let textLines = 0;
+    if (textContent.trim()) {
+      // GenOffice's text-insert layer: system font resolution (CJK included),
+      // harfbuzz subsetting, real searchable text objects.
+      const info = await pdfPageInfo(bytes, 0);
+      const rawSize = Number(p.fontSize);
+      const fontSize = Number.isFinite(rawSize) && rawSize > 0 ? rawSize : 18;
+      const font = typeof p.font === 'string' && p.font.trim() ? p.font.trim() : undefined;
+      const inserted = await insertPdfText(bytes, [
+        {
+          pageIndex: 0,
+          origin: [72, info.height - 72],
+          text: textContent,
+          fontSize,
+          color: [0, 0, 0],
+          rotate: info.rotation,
+          ...(font ? { font } : {}),
+        },
+      ]);
+      if (inserted.skipped.length > 0) {
+        throw new Error(
+          `office_create: could not place the text — ${inserted.skipped[0].reason}. ` +
+            'Try a different font, or pass fontSize; no file was written.',
+        );
+      }
+      bytes = inserted.bytes;
+      textLines = textContent.split('\n').length;
+    }
+    const written = await writeOfficeBytes(path, bytes);
+    await revealCreated(path);
+    return {
+      ...text(
+        `created ${path} (PDF, ${pages} page(s), ${paper}${textLines > 0 ? `, text: ${textLines} line(s)` : ''}, ${bytes.length} bytes)`,
+        {
+          created: true,
+          path,
+          pages,
+          pageSize: paper,
+          ...(textLines > 0 ? { textLines } : {}),
+          mtime: (written as { mtime?: number })?.mtime,
+        },
+      ),
+      card: docCard(path, textLines, ext, 'created'),
+    };
+  }
+
+  if (ext === 'xlsx') {
+    const sheetName =
+      typeof p.sheetName === 'string' && p.sheetName.trim() ? p.sheetName.trim() : 'Sheet1';
+    const fromCsv = csv.trim().length > 0;
+    // GenOffice's own grid → workbook path (the one its AI create_document
+    // uses): comma-fixed, numeric cells detected, quoted fields honoured.
+    let bytes: Uint8Array = new Uint8Array(
+      fromCsv ? await sheetCsvToXlsxBuffer(csv, sheetName) : await blankXlsxBuffer(sheetName),
+    );
+    // Applied in memory first: a bad cell op must not leave a half-created file.
+    if (ops.length > 0) bytes = await applyXlsxEdits(bytes, ops as unknown as CellOp[]);
+    const written = await writeOfficeBytes(path, bytes);
+    await revealCreated(path);
+    return {
+      ...text(
+        `created ${path} (sheet "${sheetName}"${fromCsv ? ', from CSV' : ''}, ` +
+          `${ops.length} cell op(s), ${bytes.length} bytes)`,
+        {
+          created: true,
+          path,
+          mtime: (written as { mtime?: number })?.mtime,
+        },
+      ),
+      card: docCard(path, ops.length, ext, 'created'),
+    };
+  }
+
+  if (ext === 'docx') {
+    // The document must exist before its editor can open it, so the blank
+    // lands first and content ops run second through the same bridge
+    // office_edit uses.
+    const written = await writeOfficeBytes(path, await buildBlankDocx());
+    if (ops.length === 0) {
+      await revealCreated(path);
+      return {
+        ...text(`created ${path} (blank document)`, {
+          created: true,
+          path,
+          mtime: (written as { mtime?: number })?.mtime,
+        }),
+        card: docCard(path, 0, ext, 'created'),
+      };
+    }
+    const commands = planDocxCommands(ops as unknown as DocxOp[], false);
+    const steps: unknown[] = [];
+    const saved = await withMcpLock(async () => {
+      for (const step of commands) {
+        await ensureDocxActive(path, sessionId);
+        steps.push(await mcpCommand(step.command, step.payload, undefined, tabForPath(path) ?? undefined));
+      }
+      return (await mcpCommand('save_document', { path, overwrite: true }, undefined, tabForPath(path) ?? undefined)) as
+        | { ok?: boolean }
+        | undefined;
+    });
+    if (saved?.ok !== true) {
+      throw new Error(
+        `office_create: ${path} was created but its content batch could not be saved — ` +
+          'open it and use office_edit, or overwrite: true to retry the whole batch',
+      );
+    }
+    const info = await stat(path).catch(() => null);
+    return {
+      ...text(`created ${path} and applied ${ops.length} op(s)`, {
+        created: true,
+        path,
+        mtime: info?.mtimeMs,
+        steps,
+      }),
+      card: docCard(path, ops.length, ext, 'created'),
+    };
+  }
+
+  // pptx
+  const opened = await openPptx(await createBlankPptx());
+  let records: unknown[] = [];
+  if (ops.length > 0) {
+    const result = runTxn(opened, { ops: ops as unknown as Op[] });
+    if (result.failures && result.failures.length > 0) {
+      const lines = result.failures.map((f) => `  [${f.index}] ${f.error}`);
+      return text(
+        `nothing created — ${result.failures.length} op(s) rejected:\n${lines.join('\n')}\n\n` +
+          'Fix the listed op(s) and resend the whole batch. No file was written.',
+        { created: false, failures: result.failures, opsAvailable: opNames().length },
+      );
+    }
+    records = result.records ?? [];
+  }
+  const bytes = await savePptx(opened);
+  const written = await writeOfficeBytes(path, bytes);
+  await revealCreated(path);
+  return {
+    ...text(
+      `created ${path} (${opened.deck.slides.length} slide(s), ${records.length} op(s), ${bytes.length} bytes)`,
+      {
+        created: true,
+        path,
+        slides: opened.deck.slides.length,
+        records,
+        mtime: (written as { mtime?: number })?.mtime,
+      },
+    ),
+    card: docCard(path, ops.length, ext, 'created'),
+  };
+}
+
+/**
+ * PDF page surgery, on GenOffice's own pdf-lib helpers.
+ *
+ * The source is only ever READ: the result goes to `outputPath`, and an
+ * existing target is refused unless `overwrite` is set. An in-place edit
+ * (`outputPath === path`) therefore needs both `overwrite: true` and passes
+ * the source's mtime through the host's compare-and-swap write.
+ */
+async function toolPdfEdit(p: Record<string, unknown>): Promise<ToolResult> {
+  const path = String(p.path ?? '');
+  if (!path) throw new Error('pdf_edit: path is required');
+  if (!isAbsolute(path)) throw new Error('pdf_edit: path must be absolute');
+  const ops = Array.isArray(p.ops) ? (p.ops as PdfOp[]) : [];
+  if (ops.length === 0) throw new Error('pdf_edit: ops is required and must be non-empty');
+  const outputPath = String(p.outputPath ?? '').trim();
+  if (!outputPath) {
+    throw new Error(
+      'pdf_edit: outputPath is required — it writes a NEW file. For an in-place edit, pass the ' +
+        'same path plus overwrite: true.',
+    );
+  }
+  if (!isAbsolute(outputPath)) throw new Error('pdf_edit: outputPath must be absolute');
+  const overwrite = p.overwrite === true;
+  const inputStat = await stat(path);
+  const sourceBytes = new Uint8Array(await readFile(path));
+  const sourcePages = await pdfPageCount(sourceBytes);
+  const result = await applyPdfOps(sourceBytes, ops, async (src) => {
+    if (!isAbsolute(src)) throw new Error(`pdf_edit: referenced PDF path must be absolute: ${src}`);
+    return new Uint8Array(await readFile(src));
+  });
+
+  if (result.splitParts) {
+    // `split` writes several files; outputPath is their DIRECTORY.
+    const base = basename(path).replace(/\.pdf$/i, '');
+    const files: string[] = [];
+    for (let i = 0; i < result.splitParts.length; i++) {
+      const out = join(outputPath, `${base}-${i + 1}.pdf`);
+      const info = await stat(out).catch(() => null);
+      if (info && !overwrite) {
+        throw new Error(`${out} already exists — pass overwrite: true to replace the set`);
+      }
+      await writeOfficeBytes(out, result.splitParts[i]);
+      files.push(out);
+    }
+    return text(
+      `split ${path} (${sourcePages} page(s)) into ${files.length} file(s):\n  ${files.join('\n  ')}`,
+      { applied: true, source: path, files, records: result.records },
+    );
+  }
+
+  const inPlace = samePath(outputPath, path);
+  const info = await stat(outputPath).catch(() => null);
+  if (info?.isDirectory()) throw new Error(`pdf_edit: ${outputPath} is a directory`);
+  if (info && !overwrite) {
+    throw new Error(
+      `${outputPath} already exists — pass overwrite: true to replace it, or choose a new outputPath`,
+    );
+  }
+  const written = await writeOfficeBytes(outputPath, result.bytes, inPlace ? inputStat.mtimeMs : undefined);
+  const outPages = await pdfPageCount(result.bytes);
+  await revealCreated(outputPath);
+  return {
+    ...text(
+      `wrote ${outputPath} (${outPages} page(s)):\n  ` +
+        result.records.map((r) => `${r.op}${r.detail ? ` — ${r.detail}` : ''}`).join('\n  '),
+      {
+        applied: true,
+        path: outputPath,
+        source: path,
+        sourcePages,
+        pages: outPages,
+        records: result.records,
+        mtime: (written as { mtime?: number })?.mtime,
+      },
+    ),
+    card: docCard(outputPath, ops.length, 'pdf'),
+  };
+}
+
+/**
+ * PDF → DOCX / PPTX / XLSX, on GenOffice's pure-local pdf2docx rebuild.
+ *
+ * Pages with no text layer (scans) come through as full-page images; the
+ * result says so rather than pretending the text was recovered.
+ */
+async function toolPdfConvert(p: Record<string, unknown>): Promise<ToolResult> {
+  const path = String(p.path ?? '');
+  if (!path) throw new Error('pdf_convert: path is required');
+  if (!isAbsolute(path)) throw new Error('pdf_convert: path must be absolute');
+  const to = String(p.to ?? '').toLowerCase();
+  if (to !== 'docx' && to !== 'pptx' && to !== 'xlsx') {
+    throw new Error('pdf_convert: "to" must be "docx", "pptx" or "xlsx"');
+  }
+  const outputPath = String(p.outputPath ?? '').trim() || path.replace(/\.[^./\\]+$/, '') + `.${to}`;
+  if (!isAbsolute(outputPath)) throw new Error('pdf_convert: outputPath must be absolute');
+  if (!outputPath.toLowerCase().endsWith(`.${to}`)) {
+    throw new Error(`pdf_convert: outputPath must end with .${to}`);
+  }
+  if (samePath(outputPath, path)) throw new Error('pdf_convert: outputPath must differ from the source PDF');
+  const overwrite = p.overwrite === true;
+  const info = await stat(outputPath).catch(() => null);
+  if (info?.isDirectory()) throw new Error(`pdf_convert: ${outputPath} is a directory`);
+  if (info && !overwrite) {
+    throw new Error(`${outputPath} already exists — pass overwrite: true to replace it`);
+  }
+
+  const sourceBytes = new Uint8Array(await readFile(path));
+  // An encrypted PDF cannot be counted without its password; the converter
+  // takes the password, so a failed count is not a failed conversion.
+  const sourcePages = await pdfPageCount(sourceBytes).catch(() => 0);
+  const password = typeof p.password === 'string' && p.password ? p.password : undefined;
+  const result = await convertPdfToOffice(sourceBytes, to, password);
+  const written = await writeOfficeBytes(outputPath, result.bytes);
+  await revealCreated(outputPath);
+  const note = result.scannedDocument
+    ? ' — this PDF has no usable text layer; scanned pages were exported as images'
+    : '';
+  const warnings = result.warnings.length > 0 ? `\nNotes:\n  ${result.warnings.join('\n  ')}` : '';
+  return {
+    ...text(
+      `converted ${path} (${sourcePages} page(s)) → ${outputPath} [${to.toUpperCase()}] ` +
+        `(${result.bytes.length} bytes)${note}${warnings}`,
+      {
+        converted: true,
+        source: path,
+        path: outputPath,
+        pages: result.pages,
+        warnings: result.warnings,
+        scannedDocument: result.scannedDocument,
+        mtime: (written as { mtime?: number })?.mtime,
+      },
+    ),
+    card: docCard(outputPath, result.pages, to, 'created'),
+  };
+}
+
+/**
+ * PDF pages → PNG, on GenOffice's pdfium page renderer + PNG encoder.
+ *
+ * Nothing here needs a canvas: pdfium rasterizes, the vendored encoder writes
+ * the image, and the export naming is GenOffice's own (`<base>-p<n>.png`).
+ * `pages` are 0-based source indexes; omitted renders every page.
+ */
+async function toolPdfRender(p: Record<string, unknown>): Promise<ToolResult> {
+  const path = String(p.path ?? '');
+  if (!path) throw new Error('pdf_render: path is required');
+  if (!isAbsolute(path)) throw new Error('pdf_render: path must be absolute');
+  const rawPages = Array.isArray(p.pages) ? p.pages : null;
+  const pages = rawPages
+    ? [
+        ...new Set(
+          rawPages.map((v) => {
+            const n = Number(v);
+            if (!Number.isInteger(n) || n < 0) {
+              throw new Error(
+                `pdf_render: pages contains "${String(v)}" — page indexes are 0-based integers`,
+              );
+            }
+            return n;
+          }),
+        ),
+      ]
+    : null;
+  const rawScale = Number(p.scale);
+  const scale = Math.min(Math.max(Number.isFinite(rawScale) ? rawScale : 2, 0.5), 4);
+  const base = basename(path).replace(/\.pdf$/i, '');
+  const rawDir = String(p.outputDir ?? '').trim();
+  const outputDir = rawDir || join(dirname(path), `${base}-pages`);
+  if (!isAbsolute(outputDir)) throw new Error('pdf_render: outputDir must be absolute');
+  const overwrite = p.overwrite === true;
+  const password = typeof p.password === 'string' && p.password ? p.password : undefined;
+
+  const rendered = await renderPdfPages(new Uint8Array(await readFile(path)), pages, scale, password);
+  const { buildExportImagePaths } = await import(
+    '../../vendor/genoffice/apps/pdf/src/main/export-images'
+  );
+  const files = buildExportImagePaths(outputDir, base, rendered.map((r) => r.index + 1), 'png');
+  // Preflight every target: a half-written set is worse than a clean refusal.
+  for (const out of files) {
+    const info = await stat(out).catch(() => null);
+    if (info && !overwrite) throw new Error(`${out} already exists — pass overwrite: true to replace the set`);
+  }
+  for (let i = 0; i < rendered.length; i++) await writeOfficeBytes(files[i], rendered[i].data);
+  if (files[0]) await revealCreated(files[0]);
+  return text(
+    `rendered ${rendered.length} page(s) from ${path} to PNG @${scale}x:\n  ${files.join('\n  ')}`,
+    {
+      applied: true,
+      source: path,
+      files,
+      pages: rendered.map((r) => ({
+        page: r.index,
+        width: r.pixelWidth,
+        height: r.pixelHeight,
+      })),
+    },
+  );
+}
+
 // ── Tool dispatch ────────────────────────────────────────────────────
 
 /** One tool call. The SDK turns the return value into the tool result. */
@@ -714,6 +1235,14 @@ async function runTool(name: string, p: Record<string, unknown>, call: { session
       return await toolRead(p, sessionId);
     case 'office_edit':
       return await toolEdit(p, sessionId);
+    case 'office_create':
+      return await toolCreate(p, sessionId);
+    case 'pdf_edit':
+      return await toolPdfEdit(p);
+    case 'pdf_convert':
+      return await toolPdfConvert(p);
+    case 'pdf_render':
+      return await toolPdfRender(p);
 
     // ── opening files in the viewer ──
     //

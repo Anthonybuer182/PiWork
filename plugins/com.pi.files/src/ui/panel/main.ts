@@ -55,6 +55,42 @@ window.piSDK?.onMessage((payload) => {
   for (const w of waiters.splice(0)) w(payload);
 });
 
+/** Same file, forgiving separators and Windows drive casing. */
+function sameFile(a: string, b: string): boolean {
+  const norm = (p: string): string => p.replace(/\\/g, '/').replace(/\/+$/, '');
+  const x = norm(a);
+  const y = norm(b);
+  // Win32 paths are case-insensitive; POSIX ones are not.
+  return /^[a-zA-Z]:/.test(x) || /^[a-zA-Z]:/.test(y)
+    ? x.toLowerCase() === y.toLowerCase()
+    : x === y;
+}
+
+/**
+ * A TOOL rewrote the document this page is showing (office_edit runs in the
+ * plugin backend, not in this renderer). Every renderer reads the file once
+ * and keeps the parsed result in memory, and it deliberately ignores a repeat
+ * of the path it already shows — so nothing would re-read it, and the panel
+ * kept displaying the pre-edit document until the tab was closed and opened
+ * again.
+ *
+ * Reloading the page is the one mechanism every renderer already supports:
+ * it is what a format switch does, and the dispatcher comes back with the
+ * persisted path. No renderer keeps in-panel state worth preserving here —
+ * the state it holds is now stale by definition. Writes initiated by the
+ * panel itself (save) do NOT arrive here; that state is already current.
+ */
+window.piSDK?.onMessage((payload) => {
+  const msg = payload as { event?: string; data?: { path?: string } } | null;
+  if (msg?.event !== 'ui.fileChanged') return;
+  const changed = msg.data?.path;
+  if (!changed) return;
+  const showing =
+    (window as unknown as { __PI_OPEN_PATH__?: string }).__PI_OPEN_PATH__ || readPersistedPath();
+  if (!showing || !sameFile(showing, changed)) return;
+  location.reload();
+});
+
 function awaitRender(timeoutMs: number): Promise<unknown> {
   if (lastPayload) return Promise.resolve(lastPayload);
   return new Promise((resolve) => {

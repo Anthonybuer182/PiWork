@@ -1,7 +1,7 @@
 {
   "id": "com.pi.files",
   "name": "文件查看器",
-  "description": "文件查看器 — 在右栏查看 docx/pptx/xlsx/pdf、markdown、html、纯文本（txt/json/log），以及图片、视频、音频；文档由内置的 GenOffice 引擎渲染（Apache-2.0），无需外部工具或联网安装",
+  "description": "文件查看器 — 在右栏查看 docx/pptx/xlsx/pdf、markdown、html、纯文本（txt/json/log），以及图片、视频、音频；agent 可以直接新建和编辑 docx/pptx/xlsx、新建 PDF/CSV、做 PDF 合并/拆分/裁剪、把 PDF 转成 Office 或 PNG，无需 Python 或外部 Office 软件。文档由内置的 GenOffice 引擎渲染（Apache-2.0）",
   "version": "0.5.0",
   "apiVersion": 5,
   "engines": {
@@ -27,7 +27,7 @@
     "tools": [
       {
         "name": "office_guide",
-        "description": "The op vocabulary for this engine (pptx / docx / xlsx). Call before writing office_edit ops; pass group for that group's field tables, examples and common mistakes.",
+        "description": "The op vocabulary for this engine (pptx / docx / xlsx / pdf). Call before writing office_edit or pdf_edit ops; pass group for one pptx group's field tables, examples and common mistakes.",
         "readOnly": true,
         "inputSchema": {
           "type": "object",
@@ -37,9 +37,10 @@
               "enum": [
                 "pptx",
                 "docx",
-                "xlsx"
+                "xlsx",
+                "pdf"
               ],
-              "description": "Which document family. pptx, docx and xlsx are wired; pdf is not, and answers with a plain \"not wired yet\"."
+              "description": "Which document family. pptx, docx, xlsx and pdf are wired. pdf returns the pdf_edit page-surgery vocabulary."
             },
             "group": {
               "type": "string",
@@ -105,6 +106,177 @@
         }
       },
       {
+        "name": "office_create",
+        "description": "Create a NEW .pptx / .docx / .xlsx / .pdf / .csv file, optionally with its first content in the same call. Use this whenever the user asks to create, generate or make a presentation, Word document, spreadsheet, PDF or CSV — never Python (python-pptx / python-docx / openpyxl / reportlab / pypdf), cupsfilter, LibreOffice or hand-written OOXML: the app ships its own engines, and the user's machine may have no Python. pptx and docx take the office_edit op vocabulary (call office_guide first); xlsx takes cell ops or a CSV grid; .pdf takes pages/pageSize and text (written on the first page); .csv takes the csv text. Refuses to overwrite an existing file unless overwrite is true.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Absolute path of the new file. The extension picks the format: .pptx, .docx, .xlsx, .pdf or .csv."
+            },
+            "ops": {
+              "type": "array",
+              "description": "Optional initial content, applied atomically. pptx/docx: the office_edit op shapes from office_guide. xlsx: { sheet, cell, value } cell ops. Not used by .pdf/.csv. A rejected pptx/xlsx batch writes no file at all.",
+              "items": {
+                "type": "object"
+              }
+            },
+            "csv": {
+              "type": "string",
+              "description": "xlsx: the first sheet's grid as comma-separated rows, one row per line (quoted fields supported, numeric cells become numbers) — cheaper than one cell op per value for a table. .csv: the file's text (a UTF-8 BOM is added for Excel). Applied before ops."
+            },
+            "text": {
+              "type": "string",
+              "description": "pdf only: text to place on the first page ('\\n' stacks lines). GenOffice picks a system font covering the text (CJK included) and writes real searchable text; 1-inch top-left margin, 18pt by default. Use pdf_edit's insertText for other pages/positions."
+            },
+            "fontSize": {
+              "type": "number",
+              "description": "pdf text only: font size in points. Defaults to 18."
+            },
+            "font": {
+              "type": "string",
+              "description": "pdf text only: preferred system font family. Omit to let GenOffice pick one that covers the text."
+            },
+            "sheetName": {
+              "type": "string",
+              "description": "xlsx only: name of the first sheet. Defaults to Sheet1. Use the same name in xlsx ops."
+            },
+            "pages": {
+              "type": "number",
+              "description": "pdf only: number of blank pages. Defaults to 1 (max 200). Use pdf_edit for anything beyond blank pages."
+            },
+            "pageSize": {
+              "type": "string",
+              "enum": [
+                "A4",
+                "Letter",
+                "Legal",
+                "A3"
+              ],
+              "description": "pdf only: paper size. Defaults to A4."
+            },
+            "overwrite": {
+              "type": "boolean",
+              "description": "Replace an existing file. Defaults to false, which refuses and tells you to use office_edit."
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      },
+      {
+        "name": "pdf_edit",
+        "description": "Page surgery and text insertion on a PDF, on GenOffice's own pdf-lib + text-edit layers: merge PDFs, insert/delete/extract/replace pages, insert a blank page, resize, crop, N-up or grid-split pages, split into several files, or place new searchable text on a page (system font, CJK supported). Runs in the backend and writes a NEW file (outputPath); the source is never touched unless outputPath === path and overwrite is true. Call office_guide({ domain: \"pdf\" }) for the op shapes.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Absolute path of the source PDF."
+            },
+            "outputPath": {
+              "type": "string",
+              "description": "Absolute path of the PDF to write, or (for op \"split\") the directory that receives the parts. Required: these ops never modify the source implicitly."
+            },
+            "ops": {
+              "type": "array",
+              "description": "Ordered page ops. Shapes: office_guide({ domain: \"pdf\" }).",
+              "items": {
+                "type": "object"
+              }
+            },
+            "overwrite": {
+              "type": "boolean",
+              "description": "Replace an existing output (or the source, for an in-place edit). Defaults to false."
+            }
+          },
+          "required": [
+            "path",
+            "outputPath",
+            "ops"
+          ]
+        }
+      },
+      {
+        "name": "pdf_convert",
+        "description": "Convert a PDF into an editable .docx / .pptx / .xlsx, on GenOffice's pure-local pdf2docx rebuild. Text stays editable; pages with no text layer (scans) come through as full-page images and the result says so. Use it when the user wants to turn a PDF into Word/PowerPoint/Excel — do not reach for Python or external converters.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Absolute path of the source PDF."
+            },
+            "to": {
+              "type": "string",
+              "enum": [
+                "docx",
+                "pptx",
+                "xlsx"
+              ],
+              "description": "Target format."
+            },
+            "outputPath": {
+              "type": "string",
+              "description": "Absolute path of the new document. Defaults to the source path with the extension replaced. Must end with the target extension."
+            },
+            "password": {
+              "type": "string",
+              "description": "Password for an encrypted source PDF, when it has one."
+            },
+            "overwrite": {
+              "type": "boolean",
+              "description": "Replace an existing output file. Defaults to false."
+            }
+          },
+          "required": [
+            "path",
+            "to"
+          ]
+        }
+      },
+      {
+        "name": "pdf_render",
+        "description": "Render PDF pages to PNG images, on GenOffice's own pdfium renderer and PNG encoder. No Electron: it runs in the backend. `pages` are 0-based source indexes; omitted renders every page. Files are written as <outputDir>/<name>-p<n>.png.",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "path": {
+              "type": "string",
+              "description": "Absolute path of the source PDF."
+            },
+            "pages": {
+              "type": "array",
+              "description": "0-based page indexes to render. Omitted = every page.",
+              "items": {
+                "type": "number"
+              }
+            },
+            "scale": {
+              "type": "number",
+              "description": "Pixels per PDF point, 0.5..4. Defaults to 2 (about 144 dpi)."
+            },
+            "outputDir": {
+              "type": "string",
+              "description": "Absolute directory for the PNGs. Defaults to a sibling <name>-pages/ directory."
+            },
+            "password": {
+              "type": "string",
+              "description": "Password for an encrypted source PDF, when it has one."
+            },
+            "overwrite": {
+              "type": "boolean",
+              "description": "Replace files already in the output directory. Defaults to false (the whole set is refused before anything is written)."
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      },
+      {
         "name": "files_search",
         "description": "Find documents in a workspace by what they are about — Office files (docx/pptx/xlsx), legacy Word/PowerPoint (doc/ppt) and PDFs. Use it when the user refers to a document without giving its path (\"the Q3 report\", \"the proposal that mentions the budget\"): it matches file names, folders, extracted titles and a short digest of each document's opening text. Returns absolute paths plus the matched snippet. The index re-checks every file before answering, so edits made outside the app are seen. Plain-text files (md/txt/csv and code) are not indexed — search those with grep.",
         "readOnly": true,
@@ -154,6 +326,18 @@
     "messageRenderers": [
       {
         "type": "office_edit",
+        "streaming": false
+      },
+      {
+        "type": "office_create",
+        "streaming": false
+      },
+      {
+        "type": "pdf_edit",
+        "streaming": false
+      },
+      {
+        "type": "pdf_convert",
         "streaming": false
       }
     ],
