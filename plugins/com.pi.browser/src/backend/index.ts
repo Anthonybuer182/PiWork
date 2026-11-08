@@ -1519,6 +1519,54 @@ function zhError(message: string): string {
     ],
     [/^No option matching "([\s\S]*?)" found in dropdown[\s\S]*$/, (m) => `下拉框里没有 "${m[1]}"`],
     [/^Page load timed out$/, () => '页面加载超时'],
+    [
+      // What browser-manager's navigate() reports when Chromium says why the
+      // page cannot load. The proxy named here is the one the app's network
+      // settings resolved for this URL — it is the usual culprit, and the
+      // caller has no other way to see it.
+      /^Navigation failed: (ERR_[A-Z0-9_]+) \((-?\d+)\) loading '([^']*)'(?: via proxy (\S+))?$/,
+      (m) => {
+        const [, name, code, url, proxy] = m;
+        const where = proxy ? `经代理 ${proxy}` : url;
+        switch (name) {
+          case 'ERR_PROXY_CONNECTION_FAILED':
+            return `连不上代理 ${proxy ?? ''}（${code}）：代理没在运行，或端口填错了。检查 设置 → 网络代理，或先把代理启动起来。`;
+          case 'ERR_TUNNEL_CONNECTION_FAILED':
+            return `代理 ${proxy ?? ''} 没能为 ${url} 建立 HTTPS 隧道（${code}）。可以换个节点，或在 设置 → 网络代理 里改走直连。`;
+          case 'ERR_PROXY_AUTH_REQUIRED':
+          case 'ERR_PROXY_AUTH_UNSUPPORTED':
+            return `代理要求认证（${code}）：${proxy ?? url}`;
+          case 'ERR_CONNECTION_TIMED_OUT':
+          case 'ERR_TIMED_OUT':
+            return `连接 ${where} 超时（${code}）：一直没有响应。网络或代理可能不通。`;
+          case 'ERR_CONNECTION_REFUSED':
+            return `连接被拒绝（${code}）：${proxy ? `代理 ${proxy}` : url} 上没有服务在监听。`;
+          case 'ERR_CONNECTION_RESET':
+          case 'ERR_CONNECTION_CLOSED':
+          case 'ERR_EMPTY_RESPONSE':
+            return `连接被对端断开（${code}）：${where}。代理或站点不稳定，可以重试一次。`;
+          case 'ERR_NAME_NOT_RESOLVED':
+            return `域名解析失败（${code}）：${url}。代理或 DNS 没能给出地址。`;
+          case 'ERR_INTERNET_DISCONNECTED':
+            return '系统网络已断开，先检查网络连接。';
+          case 'ERR_BLOCKED_BY_CLIENT':
+            return `这个地址被拦下了（${code}）：${url}`;
+          default:
+            if (name.startsWith('ERR_CERT_')) {
+              return `HTTPS 证书不被接受（${name}）：${where}。若是代理在做中间人解密，需要先装好它的根证书。`;
+            }
+            return `打开页面失败：${name}（${code}）${proxy ? `，经代理 ${proxy}` : ''}`;
+        }
+      },
+    ],
+    [
+      /^Navigation timed out after (\d+)s loading '([^']*)'(?: via proxy (\S+))?$/,
+      (m) => {
+        const [, seconds, url, proxy] = m;
+        const via = proxy ? `，经代理 ${proxy}` : '';
+        return `页面加载超时（${seconds}s${via}）：${url} 一直没有加载完。网络或代理太慢，可以重试一次。`;
+      },
+    ],
     [/^setFileInputFiles failed: ([\s\S]*)$/, (m) => `写入文件框失败：${m[1]}`],
     [/^Upload failed: ([\s\S]*)$/, (m) => `上传失败：${m[1]}`],
   ];
@@ -2761,11 +2809,22 @@ plugin({
         // Open on the conversation's focused tab; create one when it has none
         // (a fresh conversation's first navigate is its first tab).
         const tab = tid ? { id: tid } : await ensureTab(ctx, bucketKey(sessionKey));
-        const result = await ctx.call<{
+        let result: {
           url?: string;
           title?: string;
           page?: { authKind?: 'captcha' | 'login' | null };
-        }>('browser.navigate', { url, tabId: tab.id }, { timeoutMs: NAVIGATE_TIMEOUT_MS });
+          /** Set when the page rendered but no load-finished event arrived. */
+          slowMs?: number;
+        };
+        try {
+          result = await ctx.call('browser.navigate', { url, tabId: tab.id }, {
+            timeoutMs: NAVIGATE_TIMEOUT_MS,
+          });
+        } catch (error) {
+          // The host names Chromium's net error; the panel and the agent read
+          // Chinese. See zhError for the mapping.
+          throw new Error(zhError(error instanceof Error ? error.message : String(error)));
+        }
         const finalUrl = result?.url ?? url;
         // Keep the mirror row in step (the urlChanged event does it too, but
         // the direct answer is here now).
@@ -2774,7 +2833,13 @@ plugin({
         await showEngine(ctx, tab.id, true, sessionKey ?? panelSession);
         const viaHost = hostOfEngine(tab.id);
         if (viaHost) syncHostTab(ctx, viaHost);
-        const head = `已打开 ${finalUrl}${result?.title ? ` — ${result.title}` : ''}`;
+        // A page that took its time is still a page: say so instead of letting
+        // the agent believe the navigation failed.
+        const slowNote =
+          typeof result?.slowMs === 'number' && result.slowMs >= 3000
+            ? `\n\n（页面到 ${(result.slowMs / 1000).toFixed(1)}s 才就绪，网络偏慢，但内容已经加载，可以直接继续操作。）`
+            : '';
+        const head = `已打开 ${finalUrl}${result?.title ? ` — ${result.title}` : ''}${slowNote}`;
         if (result?.page?.authKind === 'captcha') {
           return `${head}\n\n⚠️ 这个页面需要人工完成人机验证。请在右侧浏览器面板里由用户完成；不要尝试点击或绕过。用户完成后再继续。`;
         }

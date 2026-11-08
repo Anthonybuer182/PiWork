@@ -2,6 +2,14 @@ import { WebContentsView, BrowserWindow, session, nativeImage } from 'electron';
 import { readFile } from 'node:fs/promises';
 import { BROWSER_HELPERS_JS } from './browser-helpers';
 import {
+  isAbortedNavigation,
+  isDocumentUsable,
+  navigationFailureMessage,
+  navigationTimeoutMessage,
+  netErrorOf,
+  type PageSnapshot,
+} from './navigation';
+import {
   ensureBrowserSessionCookieWatcher,
   persistBrowserSessionCookies,
   scheduleBrowserSessionCookiePersist,
@@ -1125,6 +1133,7 @@ export class BrowserManager {
     t: BrowserTab,
     method: string,
     params: Record<string, unknown> = {},
+    timeoutMs = 30000,
   ): Promise<Record<string, unknown>> {
     if (!t.debuggerAttached) {
       await this.connect(t.id);
@@ -1133,7 +1142,6 @@ export class BrowserManager {
       throw new Error('Debugger not attached');
     }
     // Wrap with timeout
-    const timeoutMs = 30000;
     return Promise.race([
       t.wc.debugger.sendCommand(method, params),
       new Promise<never>((_, reject) =>
@@ -1154,7 +1162,7 @@ export class BrowserManager {
     url: string,
     options?: { autoHandleGate?: boolean; maxGateRetries?: number },
     tabId?: string,
-  ): Promise<{ url: string; title: string; page: PageAnalysis }> {
+  ): Promise<{ url: string; title: string; page: PageAnalysis; slowMs?: number }> {
     const t = this.requireTab(tabId);
     const autoHandleGate = options?.autoHandleGate !== false;
     const maxGateRetries = options?.maxGateRetries ?? 2;
@@ -1164,9 +1172,14 @@ export class BrowserManager {
     try {
       // Use webContents.loadURL() for navigation — handles redirects natively
       if (!t.alive()) throw new Error('Browser tab not available');
-      t.wc.loadURL(url);
-      // Wait for page to load (DOM complete)
-      await this.waitForPageLoad(t);
+      // Listeners go on before the request leaves: a page that finishes or
+      // fails in the first milliseconds must still be seen, and Chromium's own
+      // answer (proxy down, DNS, refused) reaches the caller immediately
+      // instead of at the end of a fixed budget.
+      const startHref = await this.getCurrentUrl(t);
+      const nav = this.waitForNavigation(t, url, startHref);
+      t.wc.loadURL(url).catch((error) => nav.rejectWith(error));
+      const { slowMs } = await nav.done;
       // Extra wait for SPA rendering (JS-heavy pages like WeChat, DingTalk)
       await this.waitForSpaReady(t);
       let title = await this.getTitle(t);
@@ -1214,7 +1227,7 @@ export class BrowserManager {
       this.injectHelpers(t);
       await this.computeAutoZoom(t);
 
-      return { url: currentUrl, title, page };
+      return { url: currentUrl, title, page, ...(slowMs == null ? {} : { slowMs }) };
     } finally {
       t.isNavigating = false;
     }
@@ -1258,10 +1271,12 @@ export class BrowserManager {
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
       try {
-        const result = await this.sendCommand(t, 'Runtime.evaluate', {
-          expression: 'document.readyState',
-          returnByValue: true,
-        });
+        const result = await this.sendCommand(
+          t,
+          'Runtime.evaluate',
+          { expression: 'document.readyState', returnByValue: true },
+          3000,
+        );
         const state = (result?.result as { value?: string })?.value;
         if (state === 'complete' || state === 'interactive') {
           // Extra small delay for rendering
@@ -1274,6 +1289,192 @@ export class BrowserManager {
       await new Promise((r) => setTimeout(r, 500));
     }
     throw new Error('Page load timed out');
+  }
+
+  /**
+   * Wait for one navigation to settle.
+   *
+   * Rejects the moment Chromium says why the page cannot load — a proxy that is
+   * down, a name that does not resolve, a connection that is refused. Those
+   * used to be invisible: the old code polled `document.readyState` for a fixed
+   * 30s and then called every one of them "Page load timed out".
+   *
+   * Resolves on `did-finish-load`, or earlier when the new document's DOM is
+   * already parsed (`readyState` interactive) — the load event waits for every
+   * image, and a page whose content is up should not wait with it. Any signal
+   * from a document still showing the previous href is ignored; see `committed`.
+   *
+   * `loadURL()`'s own rejection is folded in (`rejectWith`): it carries the
+   * same net error, only earlier. A page that never finishes but did render —
+   * a slow network, not a broken one — resolves with `slowMs` set, so the
+   * caller can act on it instead of losing the turn.
+   */
+  private waitForNavigation(
+    t: BrowserTab,
+    url: string,
+    startHref: string,
+    timeoutMs = 20000,
+  ): { done: Promise<{ slowMs: number | null }>; rejectWith: (error: unknown) => void } {
+    const wc = t.wc;
+    const started = Date.now();
+    let settled = false;
+    /**
+     * Chromium reported why this navigation failed. The error page it renders
+     * afterwards still fires `did-finish-load`, and that must not be mistaken
+     * for a successful load.
+     */
+    let failed = false;
+    /**
+     * The new document has committed. Until then the page in the tab is still
+     * the previous one — and it is sitting at readyState "complete", so a
+     * readiness check that ignored this would hand back the old page.
+     */
+    let committed = false;
+    let resolveDone!: (value: { slowMs: number | null }) => void;
+    let rejectDone!: (error: Error) => void;
+    const done = new Promise<{ slowMs: number | null }>((resolve, reject) => {
+      resolveDone = resolve;
+      rejectDone = reject;
+    });
+
+    let poller: ReturnType<typeof setInterval> | null = null;
+    const finish = (error: Error | null, slowMs: number | null): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (poller) clearInterval(poller);
+      wc.off('did-finish-load', onFinish);
+      wc.off('did-fail-load', onFail);
+      wc.off('did-navigate', onCommit);
+      if (error) rejectDone(error);
+      else resolveDone({ slowMs });
+    };
+
+    // Which proxy this URL resolves through is the first thing a stuck load is
+    // about, and the one fact the caller has no way to see. Asked on failure
+    // only — it costs a round trip to the network stack.
+    const failWith = async (failure: {
+      code: number | null;
+      netError?: string | null;
+      url: string;
+    }): Promise<void> => {
+      const proxyRule = await this.resolveProxyFor(t, failure.url);
+      finish(new Error(navigationFailureMessage({ ...failure, proxyRule })), null);
+    };
+
+    /** Is the tab showing *this* navigation's document yet? */
+    const showingNewDocument = (href: string): boolean =>
+      committed || (startHref !== '' && href !== startHref);
+
+    const onFinish = (): void => {
+      if (failed) return;
+      finish(null, null);
+    };
+
+    const onCommit = (_event: Electron.Event, navigatedUrl: string): void => {
+      if (navigatedUrl) committed = true;
+    };
+
+    const onFail = (
+      _event: Electron.Event,
+      code: number,
+      description: string,
+      failedUrl: string,
+      isMainFrame: boolean,
+    ): void => {
+      if (!isMainFrame) return;
+      // Redirects abort the load they replace; that is normal, not a failure.
+      if (isAbortedNavigation(code)) return;
+      failed = true;
+      void failWith({ code, netError: description, url: failedUrl || url });
+    };
+
+    // The load event waits for every subresource; `document.readyState` turns
+    // "interactive" at DOMContentLoaded, long before that. Poll the cheaper
+    // signal as well: a page whose DOM is parsed is handed over at once,
+    // instead of waiting on one slow image the caller does not need.
+    let probing = false;
+    poller = setInterval(() => {
+      if (settled || failed || probing) return;
+      probing = true;
+      void (async () => {
+        try {
+          const doc = await this.probeDocument(t);
+          if (settled || !doc || !showingNewDocument(doc.href)) return;
+          if (doc.readyState === 'complete' || doc.readyState === 'interactive') {
+            finish(null, null);
+            return;
+          }
+          // Parsed but still "loading": the content is there, subresources are
+          // not. Usable — say how long it took when that is worth mentioning.
+          if (isDocumentUsable(doc, url)) {
+            const elapsed = Date.now() - started;
+            finish(null, elapsed >= 3000 ? elapsed : null);
+          }
+        } finally {
+          probing = false;
+        }
+      })();
+    }, 1000);
+
+    const timer = setTimeout(() => {
+      void (async () => {
+        const doc = await this.probeDocument(t);
+        if (doc && showingNewDocument(doc.href) && isDocumentUsable(doc, url)) {
+          finish(null, Date.now() - started);
+          return;
+        }
+        const proxyRule = await this.resolveProxyFor(t, url);
+        finish(
+          new Error(navigationTimeoutMessage({ url, proxyRule, elapsedMs: Date.now() - started })),
+          null,
+        );
+      })();
+    }, timeoutMs);
+
+    wc.on('did-finish-load', onFinish);
+    wc.on('did-fail-load', onFail);
+    wc.on('did-navigate', onCommit);
+
+    return {
+      done,
+      rejectWith: (error) => {
+        const { code, name } = netErrorOf(error);
+        if (isAbortedNavigation(code)) return;
+        failed = true;
+        void failWith({ code, netError: name, url });
+      },
+    };
+  }
+
+  /** Read what the page currently is, in one short CDP call. */
+  private async probeDocument(t: BrowserTab): Promise<PageSnapshot | null> {
+    try {
+      const result = await this.sendCommand(
+        t,
+        'Runtime.evaluate',
+        {
+          expression:
+            'JSON.stringify({readyState: document.readyState, href: location.href,' +
+            ' title: document.title, nodes: document.body ? document.body.children.length : 0})',
+          returnByValue: true,
+        },
+        2000,
+      );
+      const raw = (result?.result as { value?: string })?.value;
+      return raw ? (JSON.parse(raw) as PageSnapshot) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The proxy rule Chromium would use for this URL, for the error message. */
+  private async resolveProxyFor(t: BrowserTab, url: string): Promise<string | null> {
+    try {
+      return await t.wc.session.resolveProxy(url);
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -1302,10 +1503,12 @@ export class BrowserManager {
 
     while (Date.now() - start < timeoutMs) {
       try {
-        const result = await this.sendCommand(t, 'Runtime.evaluate', {
-          expression: 'document.body ? document.body.children.length : 0',
-          returnByValue: true,
-        });
+        const result = await this.sendCommand(
+          t,
+          'Runtime.evaluate',
+          { expression: 'document.body ? document.body.children.length : 0', returnByValue: true },
+          5000,
+        );
         const count = (result?.result as { value?: number })?.value ?? 0;
 
         if (count === lastCount) {

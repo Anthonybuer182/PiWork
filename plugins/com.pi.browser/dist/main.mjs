@@ -2247,6 +2247,54 @@ function zhError(message) {
     ],
     [/^No option matching "([\s\S]*?)" found in dropdown[\s\S]*$/, (m) => `\u4E0B\u62C9\u6846\u91CC\u6CA1\u6709 "${m[1]}"`],
     [/^Page load timed out$/, () => "\u9875\u9762\u52A0\u8F7D\u8D85\u65F6"],
+    [
+      // What browser-manager's navigate() reports when Chromium says why the
+      // page cannot load. The proxy named here is the one the app's network
+      // settings resolved for this URL — it is the usual culprit, and the
+      // caller has no other way to see it.
+      /^Navigation failed: (ERR_[A-Z0-9_]+) \((-?\d+)\) loading '([^']*)'(?: via proxy (\S+))?$/,
+      (m) => {
+        const [, name, code, url, proxy] = m;
+        const where = proxy ? `\u7ECF\u4EE3\u7406 ${proxy}` : url;
+        switch (name) {
+          case "ERR_PROXY_CONNECTION_FAILED":
+            return `\u8FDE\u4E0D\u4E0A\u4EE3\u7406 ${proxy ?? ""}\uFF08${code}\uFF09\uFF1A\u4EE3\u7406\u6CA1\u5728\u8FD0\u884C\uFF0C\u6216\u7AEF\u53E3\u586B\u9519\u4E86\u3002\u68C0\u67E5 \u8BBE\u7F6E \u2192 \u7F51\u7EDC\u4EE3\u7406\uFF0C\u6216\u5148\u628A\u4EE3\u7406\u542F\u52A8\u8D77\u6765\u3002`;
+          case "ERR_TUNNEL_CONNECTION_FAILED":
+            return `\u4EE3\u7406 ${proxy ?? ""} \u6CA1\u80FD\u4E3A ${url} \u5EFA\u7ACB HTTPS \u96A7\u9053\uFF08${code}\uFF09\u3002\u53EF\u4EE5\u6362\u4E2A\u8282\u70B9\uFF0C\u6216\u5728 \u8BBE\u7F6E \u2192 \u7F51\u7EDC\u4EE3\u7406 \u91CC\u6539\u8D70\u76F4\u8FDE\u3002`;
+          case "ERR_PROXY_AUTH_REQUIRED":
+          case "ERR_PROXY_AUTH_UNSUPPORTED":
+            return `\u4EE3\u7406\u8981\u6C42\u8BA4\u8BC1\uFF08${code}\uFF09\uFF1A${proxy ?? url}`;
+          case "ERR_CONNECTION_TIMED_OUT":
+          case "ERR_TIMED_OUT":
+            return `\u8FDE\u63A5 ${where} \u8D85\u65F6\uFF08${code}\uFF09\uFF1A\u4E00\u76F4\u6CA1\u6709\u54CD\u5E94\u3002\u7F51\u7EDC\u6216\u4EE3\u7406\u53EF\u80FD\u4E0D\u901A\u3002`;
+          case "ERR_CONNECTION_REFUSED":
+            return `\u8FDE\u63A5\u88AB\u62D2\u7EDD\uFF08${code}\uFF09\uFF1A${proxy ? `\u4EE3\u7406 ${proxy}` : url} \u4E0A\u6CA1\u6709\u670D\u52A1\u5728\u76D1\u542C\u3002`;
+          case "ERR_CONNECTION_RESET":
+          case "ERR_CONNECTION_CLOSED":
+          case "ERR_EMPTY_RESPONSE":
+            return `\u8FDE\u63A5\u88AB\u5BF9\u7AEF\u65AD\u5F00\uFF08${code}\uFF09\uFF1A${where}\u3002\u4EE3\u7406\u6216\u7AD9\u70B9\u4E0D\u7A33\u5B9A\uFF0C\u53EF\u4EE5\u91CD\u8BD5\u4E00\u6B21\u3002`;
+          case "ERR_NAME_NOT_RESOLVED":
+            return `\u57DF\u540D\u89E3\u6790\u5931\u8D25\uFF08${code}\uFF09\uFF1A${url}\u3002\u4EE3\u7406\u6216 DNS \u6CA1\u80FD\u7ED9\u51FA\u5730\u5740\u3002`;
+          case "ERR_INTERNET_DISCONNECTED":
+            return "\u7CFB\u7EDF\u7F51\u7EDC\u5DF2\u65AD\u5F00\uFF0C\u5148\u68C0\u67E5\u7F51\u7EDC\u8FDE\u63A5\u3002";
+          case "ERR_BLOCKED_BY_CLIENT":
+            return `\u8FD9\u4E2A\u5730\u5740\u88AB\u62E6\u4E0B\u4E86\uFF08${code}\uFF09\uFF1A${url}`;
+          default:
+            if (name.startsWith("ERR_CERT_")) {
+              return `HTTPS \u8BC1\u4E66\u4E0D\u88AB\u63A5\u53D7\uFF08${name}\uFF09\uFF1A${where}\u3002\u82E5\u662F\u4EE3\u7406\u5728\u505A\u4E2D\u95F4\u4EBA\u89E3\u5BC6\uFF0C\u9700\u8981\u5148\u88C5\u597D\u5B83\u7684\u6839\u8BC1\u4E66\u3002`;
+            }
+            return `\u6253\u5F00\u9875\u9762\u5931\u8D25\uFF1A${name}\uFF08${code}\uFF09${proxy ? `\uFF0C\u7ECF\u4EE3\u7406 ${proxy}` : ""}`;
+        }
+      }
+    ],
+    [
+      /^Navigation timed out after (\d+)s loading '([^']*)'(?: via proxy (\S+))?$/,
+      (m) => {
+        const [, seconds, url, proxy] = m;
+        const via = proxy ? `\uFF0C\u7ECF\u4EE3\u7406 ${proxy}` : "";
+        return `\u9875\u9762\u52A0\u8F7D\u8D85\u65F6\uFF08${seconds}s${via}\uFF09\uFF1A${url} \u4E00\u76F4\u6CA1\u6709\u52A0\u8F7D\u5B8C\u3002\u7F51\u7EDC\u6216\u4EE3\u7406\u592A\u6162\uFF0C\u53EF\u4EE5\u91CD\u8BD5\u4E00\u6B21\u3002`;
+      }
+    ],
     [/^setFileInputFiles failed: ([\s\S]*)$/, (m) => `\u5199\u5165\u6587\u4EF6\u6846\u5931\u8D25\uFF1A${m[1]}`],
     [/^Upload failed: ([\s\S]*)$/, (m) => `\u4E0A\u4F20\u5931\u8D25\uFF1A${m[1]}`]
   ];
@@ -3269,14 +3317,24 @@ plugin({
       case "browser_navigate": {
         const url = normalizeUrl(params.url);
         const tab = tid ? { id: tid } : await ensureTab(ctx, bucketKey(sessionKey));
-        const result = await ctx.call("browser.navigate", { url, tabId: tab.id }, { timeoutMs: NAVIGATE_TIMEOUT_MS });
+        let result;
+        try {
+          result = await ctx.call("browser.navigate", { url, tabId: tab.id }, {
+            timeoutMs: NAVIGATE_TIMEOUT_MS
+          });
+        } catch (error) {
+          throw new Error(zhError(error instanceof Error ? error.message : String(error)));
+        }
         const finalUrl = result?.url ?? url;
         const row = bucketFor(bucketKey(sessionKey)).tabs.find((t) => t.id === tab.id);
         if (row) row.url = finalUrl;
         await showEngine(ctx, tab.id, true, sessionKey ?? panelSession);
         const viaHost = hostOfEngine(tab.id);
         if (viaHost) syncHostTab(ctx, viaHost);
-        const head = `\u5DF2\u6253\u5F00 ${finalUrl}${result?.title ? ` \u2014 ${result.title}` : ""}`;
+        const slowNote = typeof result?.slowMs === "number" && result.slowMs >= 3e3 ? `
+
+\uFF08\u9875\u9762\u5230 ${(result.slowMs / 1e3).toFixed(1)}s \u624D\u5C31\u7EEA\uFF0C\u7F51\u7EDC\u504F\u6162\uFF0C\u4F46\u5185\u5BB9\u5DF2\u7ECF\u52A0\u8F7D\uFF0C\u53EF\u4EE5\u76F4\u63A5\u7EE7\u7EED\u64CD\u4F5C\u3002\uFF09` : "";
+        const head = `\u5DF2\u6253\u5F00 ${finalUrl}${result?.title ? ` \u2014 ${result.title}` : ""}${slowNote}`;
         if (result?.page?.authKind === "captcha") {
           return `${head}
 
