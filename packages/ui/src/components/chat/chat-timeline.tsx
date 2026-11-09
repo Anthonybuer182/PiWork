@@ -177,7 +177,7 @@ function PendingAskFallback({ hostedToolCallIds }: { hostedToolCallIds: Set<stri
         <div
           key={req.requestId}
           data-ask-fallback={req.requestId}
-          className="overflow-hidden rounded-md border border-sky-400/50 shadow-xs"
+          className="overflow-hidden rounded-lg border border-border bg-card shadow-xs"
         >
           <AskCard request={req} />
         </div>

@@ -610,6 +610,7 @@ export const EN_MESSAGES = {
   任务清单: 'Task list',
   暂无任务: 'No tasks yet',
   等待回答: 'Waiting for an answer',
+  提问: 'Question',
   '第 {current}/{total} 题': 'Question {current} of {total}',
   '跳到第 {current} 题': 'Go to question {current}',
   '输入其他答案…': 'Type another answer…',
