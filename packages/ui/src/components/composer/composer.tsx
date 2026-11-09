@@ -27,7 +27,8 @@ import { useI18n, type MessageKey } from '@/i18n';
 import { useCommandStore, commandDescription, type RegisteredCommand } from '@/stores/command-store';
 import { toast } from '@/stores/toast-store';
 import { usePluginStore } from '@/stores/plugin-store';
-import type { Attachment, ContentBlock, Config, Skill } from '@pi/types';
+import { canSaveAttachment, pathForFile, saveAttachmentToWorkspace } from '@/lib/os-drop';
+import type { Attachment, ContentBlock, Config, SavedAttachment, Skill } from '@pi/types';
 import { SKILL_REFERENCE_MARKER } from '@pi/types';
 
 interface SendVariables {
@@ -250,6 +251,9 @@ export function Composer() {
           size: file.size,
           mimeType: file.type || 'application/octet-stream',
           status: 'uploading',
+          // Persisted only long enough to copy the file when the message is
+          // sent (see sendMutation.onMutate).
+          sourcePath: pathForFile(file),
           createdAt: new Date().toISOString(),
         });
         // Read file content as base64 for sending to vision models
@@ -382,6 +386,9 @@ export function Composer() {
 
   // Store last user message for potential retry
   const lastUserMessageRef = useRef<string>('');
+  // Attachment id → where the send copied it. Filled in onMutate, read by
+  // mutationFn to build the prompt and the optimistic blocks.
+  const savedAttachmentsRef = useRef(new Map<string, SavedAttachment>());
   const sendMutation = useMutation({
     onMutate: async ({ content, sessionId, attachments }: SendVariables) => {
       // The conversation is part of the variables, not read again later:
@@ -391,6 +398,35 @@ export function Composer() {
       useComposerStore.getState().setSessionPending(sessionId, true);
       // Cancel outgoing refetches so they don't overwrite our optimistic update
       await queryClient.cancelQueries({ queryKey: ['session', sessionId] });
+
+      // Give every file attachment a real path before it reaches the
+      // conversation: the card can then open the right panel, a reload can
+      // find it again, and the model can read it without searching the disk.
+      const saved = new Map<string, SavedAttachment>();
+      if (canSaveAttachment()) {
+        await Promise.all(
+          attachments.map(async (att) => {
+            if (att.type === 'image') return;
+            try {
+              saved.set(
+                att.id,
+                await saveAttachmentToWorkspace({
+                  name: att.name,
+                  ...(att.sourcePath ? { sourcePath: att.sourcePath } : {}),
+                  ...(!att.sourcePath && att.data ? { dataBase64: att.data } : {}),
+                }),
+              );
+            } catch (err) {
+              // A failed copy never blocks the send; the message simply loses
+              // its preview path for this attachment.
+              console.warn(`[composer] failed to save attachment ${att.name}:`, err);
+            }
+          }),
+        );
+      }
+      // Merge by attachment id, never replace: two conversations can be
+      // sending at once, and each mutationFn must read its own entries.
+      for (const [id, info] of saved) savedAttachmentsRef.current.set(id, info);
 
       // Build user message blocks from attachments for inline preview
       const userBlocks: ContentBlock[] = [];
@@ -418,14 +454,16 @@ export function Composer() {
             // finishes loading. This matches the reload path
             // (stripAttachmentSections) which creates file blocks purely
             // from the [Attached: ...] placeholder text.
+            const stored = saved.get(att.id);
             userBlocks.push({
               id: `b-file-opt-${att.id}`,
               type: 'file',
-              content: att.name,
+              content: stored?.name ?? att.name,
               mimeType: att.mimeType,
               data: att.data || undefined,
-              fileName: att.name,
+              fileName: stored?.name ?? att.name,
               fileSize: att.size,
+              workspacePath: stored?.path,
             });
           }
         }
@@ -487,6 +525,12 @@ export function Composer() {
 
         const fileSections: string[] = [];
         for (const att of nonImageAtts) {
+          const stored = savedAttachmentsRef.current.get(att.id);
+          const name = stored?.name ?? att.name;
+          // The path suffix is what lets the model open the attachment
+          // directly. The session reader strips it for display (and uses it
+          // to rebuild the file block after a reload).
+          const pathSuffix = stored ? ` -> ${stored.relativePath}` : '';
           if (att.data && TEXT_MIMES.has(att.mimeType)) {
             try {
               // atob returns binary string; decode UTF-8 bytes properly
@@ -496,14 +540,14 @@ export function Composer() {
                 bytes[j] = binary.charCodeAt(j);
               }
               const text = new TextDecoder().decode(bytes);
-              const ext = (att.name || '').split('.').pop() || '';
+              const ext = (name || '').split('.').pop() || '';
               const fenceExt = ext === 'tsx' ? 'tsx' : ext === 'jsx' ? 'jsx' : ext === 'md' ? 'md' : ext;
-              fileSections.push(`File: ${att.name}\n\`\`\`${fenceExt}\n${text}\n\`\`\``);
+              fileSections.push(`File: ${name}\n\`\`\`${fenceExt}\n${text}\n\`\`\`${pathSuffix}`);
             } catch {
-              fileSections.push(`[Attached: ${att.name} (${att.type}) - could not decode]`);
+              fileSections.push(`[Attached: ${name} (${att.type}) - could not decode]${pathSuffix}`);
             }
           } else {
-            fileSections.push(`[Attached: ${att.name} (${att.type})]`);
+            fileSections.push(`[Attached: ${name} (${att.type})]${pathSuffix}`);
           }
         }
         promptContent = `${content}\n\n${fileSections.join('\n\n')}`;
@@ -733,7 +777,8 @@ export function Composer() {
       void queryClient.invalidateQueries({ queryKey: ['session', sessionId] });
     },
     onSettled: (_data, _error, variables) => {
-      const { sessionId } = variables;
+      const { sessionId, attachments } = variables;
+      for (const att of attachments) savedAttachmentsRef.current.delete(att.id);
       if (sessionId) {
         useComposerStore.getState().setSessionPending(sessionId, false);
         abortControllersRef.current.delete(sessionId);

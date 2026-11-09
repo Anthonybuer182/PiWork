@@ -6,6 +6,7 @@ import { TITLE_BAR_HEIGHT } from '../window-manager.js';
 import { setApplicationLanguage } from '../menu.js';
 import type { WindowRegistry } from '../windows.js';
 import { registerImportFilesIpc } from './import-files.js';
+import { registerAttachmentIpc } from './attachments.js';
 
 /**
  * The window a call came from. `fromWebContents` covers shell renderers and
@@ -26,6 +27,7 @@ function senderWindow(windows: WindowRegistry, event: IpcMainInvokeEvent): Brows
 
 export function registerNativeIpcHandlers(windows: WindowRegistry): void {
   registerImportFilesIpc();
+  registerAttachmentIpc();
 
   // ── Window Management ──
 

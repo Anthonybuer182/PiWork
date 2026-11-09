@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type {
   BuiltinModelId,
   ImportFilesResult,
+  SaveAttachmentInput,
+  SavedAttachment,
   VoiceBuiltinModel,
   VoiceCapability,
   VoiceModelProgress,
@@ -104,6 +106,11 @@ export interface ElectronAPI {
     pathForFile: (file: File) => string;
     /** Copy OS-dropped paths into this window's workspace root. */
     importFiles: (sources: string[]) => Promise<ImportFilesResult>;
+    /**
+     * Copy a composer attachment into the workspace
+     * (`.piwork/attachments/`), returning the path the chat and the model use.
+     */
+    saveAttachment: (input: SaveAttachmentInput) => Promise<SavedAttachment>;
   };
 
   // ── Shell ──
@@ -233,6 +240,7 @@ const electronAPI: ElectronAPI = {
     rename: (oldPath, newPath) => ipcRenderer.invoke('pi:fs:rename', oldPath, newPath),
     pathForFile: (file) => webUtils.getPathForFile(file),
     importFiles: (sources) => ipcRenderer.invoke('pi:fs:importFiles', sources),
+    saveAttachment: (input) => ipcRenderer.invoke('pi:fs:saveAttachment', input),
   },
 
   shell: {

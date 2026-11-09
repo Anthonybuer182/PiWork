@@ -23,7 +23,15 @@ function titleFromText(text: string): string | undefined {
   const withoutRefs = marker >= 0 ? text.slice(0, marker) : text;
   for (const line of withoutRefs.split('\n')) {
     const trimmed = line.trim();
-    if (trimmed) return trimmed.slice(0, 60);
+    if (!trimmed) continue;
+    // Attachment-only sends title themselves by file name. The saved path
+    // after `->` is plumbing for the reader, never something a list row
+    // should show.
+    const nameOnly = trimmed.replace(
+      /^\[Attached:\s*(.+?)\s*\([^)]*\)(?:\s*-\s*could not decode)?\]\s*->.*$/,
+      '$1',
+    );
+    return nameOnly.slice(0, 60);
   }
   return undefined;
 }
@@ -88,23 +96,39 @@ type AgentMessage = SessionMessageEntry['message'];
  * Composer appends two kinds of sections:
  *  - Text files:   `File: <name>\n```<ext>\n...\n````\n`
  *  - Binary/error: `[Attached: <name> (<type>)]` or `[Attached: <name> (<type>) - could not decode]`
+ *
+ * Newer sends also append ` -> <workspace-relative path>`: outside files are
+ * copied under `.piwork/attachments/`, files already in the workspace are
+ * referenced in place. That path is what makes the card previewable after a
+ * reload and lets the model open the attachment directly.
  */
 function stripAttachmentSections(text: string, cwd?: string): { content: string; files: Array<{ fileName: string; fileSize?: number; workspacePath?: string }> } {
   const files: Array<{ fileName: string; fileSize?: number; workspacePath?: string }> = [];
   let content = text;
 
-  const recordFile = (name: string) => {
+  const recordFile = (name: string, savedPath?: string) => {
     const fileName = String(name).trim();
     const entry: { fileName: string; fileSize?: number; workspacePath?: string } = { fileName };
-    // Try to resolve the file on disk relative to cwd
+    // Try to resolve the file on disk. The saved-path hint wins (it is what
+    // the composer wrote); older messages only carry the file name, so fall
+    // back to the attachment folder and then to the workspace root.
+    const candidates: string[] = [];
+    if (cwd && savedPath) {
+      const hinted = String(savedPath).trim();
+      candidates.push(path.isAbsolute(hinted) ? hinted : path.resolve(cwd, hinted));
+    }
     if (cwd) {
-      const candidate = path.resolve(cwd, fileName);
+      candidates.push(path.resolve(cwd, '.piwork', 'attachments', fileName));
+      candidates.push(path.resolve(cwd, fileName));
+    }
+    for (const candidate of candidates) {
       try {
         if (existsSync(candidate)) {
           const stat = statSync(candidate);
           if (stat.isFile()) {
             entry.fileSize = stat.size;
             entry.workspacePath = candidate;
+            break;
           }
         }
       } catch { /* file may not exist or not be accessible */ }
@@ -112,20 +136,21 @@ function stripAttachmentSections(text: string, cwd?: string): { content: string;
     files.push(entry);
   };
 
-  // Text-file sections: `File: <name>\n```...``` `
+  // Text-file sections: `File: <name>\n```...``` ` (optionally followed by
+  // ` -> <saved path>` on the closing-fence line).
   content = content.replace(
-    /\n*File:\s*(.+?)\n```[\w]*\n[\s\S]*?```/g,
-    (_m, name) => {
-      recordFile(name);
+    /\n*File:\s*(.+?)\n```[\w]*\n[\s\S]*?```(?:\s*->\s*([^\n]+))?/g,
+    (_m, name, savedPath) => {
+      recordFile(name, savedPath);
       return '';
     },
   );
 
   // Binary/error placeholders: `[Attached: <name> (<type>)]`
   content = content.replace(
-    /\n*\[Attached:\s*(.+?)\s*\([^)]*\)(?:\s*-\s*could not decode)?\]/g,
-    (_m, name) => {
-      recordFile(name);
+    /\n*\[Attached:\s*(.+?)\s*\([^)]*\)(?:\s*-\s*could not decode)?\](?:\s*->\s*([^\n]+))?/g,
+    (_m, name, savedPath) => {
+      recordFile(name, savedPath);
       return '';
     },
   );

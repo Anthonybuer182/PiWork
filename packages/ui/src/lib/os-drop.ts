@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type DragEvent as ReactDragEvent } from 'react';
-import type { ImportFilesResult } from '@pi/types';
+import type { ImportFilesResult, SaveAttachmentInput, SavedAttachment } from '@pi/types';
 
 /**
  * OS file drag-and-drop helpers.
@@ -13,6 +13,7 @@ import type { ImportFilesResult } from '@pi/types';
 interface FsDropBridge {
   pathForFile?: (file: File) => string;
   importFiles?: (sources: string[]) => Promise<ImportFilesResult>;
+  saveAttachment?: (input: SaveAttachmentInput) => Promise<SavedAttachment>;
 }
 
 function fsBridge(): FsDropBridge | undefined {
@@ -60,6 +61,32 @@ export async function importDroppedFiles(sources: string[]): Promise<ImportFiles
   const fs = fsBridge();
   if (!fs?.importFiles) throw new Error('Importing files requires the desktop app');
   return fs.importFiles(sources);
+}
+
+/** Absolute OS path of a `File`, or undefined for web/generated files. */
+export function pathForFile(file: File): string | undefined {
+  const fs = fsBridge();
+  if (!fs?.pathForFile) return undefined;
+  try {
+    const p = fs.pathForFile(file);
+    return p || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Copy a composer attachment into the workspace so it has a previewable path.
+ * Undefined on the web build, where there is nothing to preview locally.
+ */
+export function canSaveAttachment(): boolean {
+  return typeof fsBridge()?.saveAttachment === 'function';
+}
+
+export async function saveAttachmentToWorkspace(input: SaveAttachmentInput): Promise<SavedAttachment> {
+  const fs = fsBridge();
+  if (!fs?.saveAttachment) throw new Error('Saving attachments requires the desktop app');
+  return fs.saveAttachment(input);
 }
 
 export interface OsFileDropHandlers {

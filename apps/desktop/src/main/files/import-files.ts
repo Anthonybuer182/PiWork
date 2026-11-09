@@ -27,7 +27,7 @@ function isWithin(child: string, parent: string): boolean {
  * name intact — `extname` already returns '' for it, but `.env.local` is
  * treated as base `.env` + ext `.local`, which reads correctly when renamed).
  */
-function uniquePath(dir: string, name: string, isDirectory: boolean): string {
+export function uniquePath(dir: string, name: string, isDirectory: boolean): string {
   const direct = join(dir, name);
   if (!existsSync(direct)) return direct;
 
