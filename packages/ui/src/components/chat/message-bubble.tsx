@@ -209,6 +209,10 @@ function MessageBubbleImpl({
   // for conversations recorded before its removal.)
   const displayContent = isUser ? extractAppendedQuotes(message.content).display : message.content;
 
+  // Attachment-only sends carry no text (`[Attached: …]` is stripped before
+  // display), so the text bubble only exists when there is something to say.
+  const hasUserText = isUser && displayContent.trim().length > 0;
+
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(displayContent);
@@ -280,13 +284,13 @@ function MessageBubbleImpl({
                   </Button>
                 </div>
               </div>
-            ) : (
+            ) : hasUserText ? (
               <div className={cn(
                 'max-w-full rounded-3xl bg-muted px-4 py-2.5 text-sm',
               )}>
                 <p className="whitespace-pre-wrap">{renderTokenizedText(displayContent)}</p>
               </div>
-            )}
+            ) : null}
             {hasUserMedia && (
               <div className="flex flex-col gap-1 mt-1 max-w-full">
                 {renderBlocks(userMediaBlocks, !!isStreaming, toolTimings)}
