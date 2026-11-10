@@ -1,6 +1,7 @@
 import { useMemo, useEffect, useRef } from 'react';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { createProxySDKClient, IPCTransport } from '@pi/sdk-wrapper';
+import type { PluginMessageData } from '@pi/types';
 import {
   SDKProvider,
   useSDK,
@@ -335,8 +336,17 @@ function AppContent() {
     }).electronAPI;
     if (!api?.on) return;
     api.on('pi:chat:send', (payload) => {
-      const text = (payload as { text?: string } | undefined)?.text;
-      if (text) useComposerStore.getState().setTriggerSend(text);
+      const p = payload as { text?: string; pluginMessage?: unknown } | undefined;
+      const text = p?.text;
+      if (text) {
+        // The plugin message rides along when the host sent one: the composer
+        // then delivers the turn as a plugin request card instead of a typed
+        // user message (see composer.tsx). A host that only sent text still
+        // works — it just renders as a user turn, as before.
+        useComposerStore
+          .getState()
+          .setTriggerSend(text, p?.pluginMessage as PluginMessageData | undefined);
+      }
     });
   }, []);
 

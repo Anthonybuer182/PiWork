@@ -132,4 +132,12 @@ export interface PluginMessage extends Message {
   pluginStatus?: import('./plugin/plugin-message.js').PluginMessageStatus;
   /** True when this revision also entered model context (agentVisible). */
   agentVisible?: boolean;
+  /** Short headline for a request card, e.g. 「解释网页内容」. */
+  title?: string;
+  /** The passage the request is about, rendered as a quote block. */
+  quote?: string;
+  /** Where that passage came from (page, document, file). */
+  source?: import('./plugin/plugin-message.js').PluginMessageSource;
+  /** This message started an agent turn (posted through `chat.send`). */
+  triggered?: boolean;
 }

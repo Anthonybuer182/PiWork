@@ -338,15 +338,45 @@ function findLatestPluginMessage(
 }
 
 /**
- * The text a `custom_message` entry sends to the model. Cards/files cannot be
- * sent, so a card-only message falls back to its title (or a plain line) —
- * enough for the model to know something happened, without inventing content.
+ * The text a `custom_message` entry sends to the model. `agentText` wins when
+ * the visible copy and the instruction differ (a `chat.send` request); cards
+ * and files cannot be sent, so a card-only message falls back to its title (or
+ * a plain line) — enough for the model to know something happened, without
+ * inventing content.
  */
 function pluginMessageContextText(data: PluginMessageData): string {
+  if (typeof data.agentText === 'string' && data.agentText.trim()) return data.agentText;
   if (typeof data.text === 'string' && data.text.trim()) return data.text;
-  const title = (data.card?.props as Record<string, unknown> | undefined)?.title;
+  const title = data.title ?? (data.card?.props as Record<string, unknown> | undefined)?.title;
   if (typeof title === 'string' && title.trim()) return title.trim();
   return `Plugin message from ${data.pluginId}`;
+}
+
+/**
+ * Deliver a turn as a plugin message rather than a typed one.
+ *
+ * The pi entry is a `custom_message` (role `custom`) carrying the plugin
+ * message data in `details`, so the transcript replays a plugin card instead
+ * of a user bubble — the plugin never gets the user's voice — while the model
+ * still receives the text and the run starts exactly as a prompt would start
+ * it. Streaming, tools and persistence are the SDK's normal run.
+ */
+async function promptPluginTurn(
+  session: AgentSession,
+  params: SendMessageParams,
+): Promise<void> {
+  const data: PluginMessageData = { ...params.pluginMessage!, sessionId: params.sessionId };
+  await session.sendCustomMessage(
+    {
+      customType: PLUGIN_MESSAGE_CUSTOM_TYPE,
+      content: params.content,
+      // The host draws the card from `details`; pi's own display flag is for
+      // its terminal UI, which this host does not use.
+      display: false,
+      details: data,
+    },
+    { triggerTurn: true },
+  );
 }
 
 export function createRealChatService(
@@ -1250,7 +1280,11 @@ export function createRealChatService(
                 mimeType: a.mimeType,
               }))
           : undefined;
-        await session.prompt(params.content, images?.length ? { images } : undefined);
+        if (params.pluginMessage) {
+          await promptPluginTurn(session, params);
+        } else {
+          await session.prompt(params.content, images?.length ? { images } : undefined);
+        }
 
       // Get session stats for cost/usage on the returned message
       let totalUsage: TokenUsage | undefined;
@@ -1675,7 +1709,11 @@ export function createRealChatService(
               }))
           : undefined;
 
-        await session.prompt(params.content, images?.length ? { images } : undefined);
+        if (params.pluginMessage) {
+          await promptPluginTurn(session, params);
+        } else {
+          await session.prompt(params.content, images?.length ? { images } : undefined);
+        }
 
         // Build final usage for returned message
         let totalUsage: TokenUsage | undefined;

@@ -951,6 +951,11 @@ function plugin(handlers) {
       await ctx.call("panel.setStatus", { panelId, badge: badge ?? "" }).catch(() => {
       });
     },
+    messages: {
+      post: /* @__PURE__ */ __name((params) => ctx.call("messages.post", params), "post"),
+      update: /* @__PURE__ */ __name((params) => ctx.call("messages.update", params), "update"),
+      remove: /* @__PURE__ */ __name((params) => ctx.call("messages.remove", params), "remove")
+    },
     log: {
       info: /* @__PURE__ */ __name((m) => log("info", m), "info"),
       warn: /* @__PURE__ */ __name((m) => log("warn", m), "warn"),
@@ -1171,6 +1176,16 @@ function plugin(handlers) {
         } catch (err) {
           log("error", `card event "${String(msg.eventId)}" handler threw: ${describe(err)}`);
         }
+        break;
+      }
+      case "message-action": {
+        if (!handlers.onMessageAction) {
+          log("warn", `message action "${String(msg.eventId)}" on ${String(msg.messageId)} ignored \u2014 implement onMessageAction`);
+          break;
+        }
+        Promise.resolve().then(() => handlers.onMessageAction(msg.messageId ?? "", msg.eventId ?? "", msg.kind === "submit" ? "submit" : "click", msg.payload, ctx, { sessionId: msg.sessionId })).catch((err) => {
+          log("error", `message action "${String(msg.eventId)}" handler threw: ${describe(err)}`);
+        });
         break;
       }
       case "ui-port": {
@@ -2622,6 +2637,12 @@ async function renderClipsInPage(ctx, newestId) {
   );
 }
 __name(renderClipsInPage, "renderClipsInPage");
+function actionSource(action, url) {
+  const label = String(action.title ?? "").trim();
+  if (!url) return label ? { label } : {};
+  return label ? { label, url } : { url };
+}
+__name(actionSource, "actionSource");
 async function handleAction(ctx, action) {
   const text = String(action.text ?? "").trim().slice(0, SELECTION_MAX_CHARS);
   const url = String(action.url ?? lastUrl ?? "");
@@ -2634,7 +2655,12 @@ async function handleAction(ctx, action) {
       pendingNote = { kind: kindKey, at: Date.now() };
       await showNoteInPage(ctx, { state: "pending", kind: kindKey });
       try {
-        await ctx.call("chat.send", { text: agentTaskPrompt(kind, text, url) });
+        await ctx.call("chat.send", {
+          agentText: agentTaskPrompt(kind, text, url),
+          title: `${kind}\u7F51\u9875\u5185\u5BB9`,
+          quote: text,
+          source: actionSource(action, url)
+        });
       } catch (err) {
         pendingNote = null;
         ctx.log.warn(`chat.send failed: ${describe2(err)}`);
@@ -2659,7 +2685,13 @@ async function handleAction(ctx, action) {
         '(\u8FD9\u6761\u6D88\u606F\u6765\u81EA\u5212\u8BCD\u5F39\u6846:\u56DE\u7B54\u65F6\u8BF7\u8C03\u7528 browser_show \u5DE5\u5177\u628A\u7B80\u660E\u56DE\u7B54\u5C55\u793A\u5230\u5F39\u6846 \u2014 kind \u586B "chat"\u3001title \u586B "\u56DE\u7B54",\u4E00\u4E24\u53E5\u8BDD\u8BF4\u6E05\u5373\u53EF\u3002\u5BF9\u8BDD\u91CC\u6B63\u5E38\u5B8C\u6574\u4F5C\u7B54,\u4E24\u8005\u5185\u5BB9\u4E0D\u8981\u4E92\u76F8\u91CD\u590D\u3002)'
       );
       try {
-        await ctx.call("chat.send", { text: parts.join("\n\n") });
+        await ctx.call("chat.send", {
+          text: question,
+          agentText: parts.join("\n\n"),
+          title: "\u5212\u8BCD\u63D0\u95EE",
+          ...quote ? { quote } : {},
+          source: actionSource(action, url)
+        });
       } catch (err) {
         ctx.log.warn(`chat.send failed: ${describe2(err)}`);
         void toastInPage(ctx, "\u53D1\u9001\u5230\u5BF9\u8BDD\u5931\u8D25");

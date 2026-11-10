@@ -398,11 +398,21 @@ if (event === 'note.ask') {
 }
 ```
 
-关于 `chat.send`，三件事要知道：
+关于 `chat.send`，要知道这些：
 
 - **不需要声明权限**，但发出的消息永远带来源标注（「插件消息 · 来自 便签（com.example.note）」）——插件够得着对话，但拿不到用户的声音，agent 和用户都看得出这不是用户亲手打的。
 - 消息会像用户输入一样触发一个 agent 回合：上面那条消息发出后，agent 会自己去调 `note_read`，把整理结果回在对话里。
 - 它要求当前有一个打开的会话。
+- 对话里显示的不是用户气泡，而是一张**插件请求卡**（插件图标/名称、「已交给 AI」徽章）。`text` 是用户读到的文案，`agentText` 是给模型的指令——两者可以不同：
+  ```ts
+  await ctx.call('chat.send', {
+    agentText: '把选中的网页内容翻译成中文，结果用 browser_show 展示…',  // 只给模型
+    title: '翻译网页内容',                        // 卡片标题
+    quote: 'Trending',                            // 卡片里的引用块（最多 4000 字）
+    source: { label: 'GitHub Trending', url: 'https://github.com/trending' }, // 来源行
+  });
+  ```
+  `title` / `quote` / `source` / `agentText` 都可省略；只有 `text` 的普通消息同样渲染成插件卡片，绝不会变成假用户气泡。
 
 重新打包、拷贝、重启。
 
@@ -683,7 +693,7 @@ const slotB = piSDK.liveSlot('page-b', document.getElementById('second-pane'), (
 | 存储 | `storage.get` / `storage.set` / `storage.delete` | `storage` | 插件私有键值对，落盘持久 |
 | 通知 | `notify.show` | `notify` | 系统通知 |
 | 面板 | `panel.open` / `panel.close` / `panel.focusTab` / `panel.updateTab` / `panel.setStatus` | 无 | 只能操作**自己的**面板（`ctx.openPanel` / `ctx.setBadge` 是它们的封装）。`panel.open` 可带 `params`，原样交给面板的 `onPanelMounted`；`panel.focusTab` 聚焦一个已经打开的标签（不按参数匹配）；`panel.updateTab` 改宿主标签的标题/参数 |
-| 对话 | `chat.send` | 无 | 发消息进当前对话。消息会带来源标注（「插件消息 · 来自 你的插件名」），agent 和用户都看得出不是用户亲手打的——插件够得着对话，但拿不到用户的声音 |
+| 对话 | `chat.send` | 无 | 叫醒当前对话的 agent 并开始一个回合。对话流里显示**插件请求卡**（不是用户气泡）：`text` 给用户看，`agentText` 给模型（自动带来源标注），可选 `title` / `quote`（最多 4000 字）/ `source`（`{ label, url }`）/ `card` / `files` / `status`。插件够得着对话，但拿不到用户的声音 |
 | 对话 | `messages.post` / `update` / `remove` | `messages` | 往**指定会话**发/改/撤回插件消息（卡片/文本/文件/状态）。存进会话记录、可随会话回放，默认**不进入 AI 上下文**；`agentVisible: true` 才让模型看到这一版。`sessionId` 必填；卡片是声明式 UI 树；`files` 是绝对路径数组，渲染成文件附件卡片；更新是追加 revision，读取时折叠最新；删除是追加墓碑。用户可在插件中心静音某个插件的消息 |
 | 对话框 | `dialog.openFile` / `dialog.saveFile` | 无 | 系统文件对话框。用户亲手选就是授权。`openFile` 返回 `{ canceled, path, paths }`，`saveFile` 返回 `{ canceled, path }` |
 | 文件 | `filesystem.read` / `write` / `delete` | `filesystem` | 任意绝对路径。`read` 返回 UTF-8 文本（≤2MB；docx/xlsx/pptx 用 `office.read`）；`write` 支持 `content`（文本）或 `contentB64`（二进制），`expectedMtime` 冲突检测；`delete` 同样支持 `expectedMtime` |

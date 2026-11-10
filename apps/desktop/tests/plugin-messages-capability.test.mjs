@@ -17,6 +17,7 @@ function makeHub(permissions = ['messages'], { withStore = true } = {}) {
   const updated = [];
   const removed = [];
   const signals = [];
+  const renderer = [];
   const registry = {
     get(id) {
       return id === plugin
@@ -32,6 +33,7 @@ function makeHub(permissions = ['messages'], { withStore = true } = {}) {
   const hub = new CapabilityHub({
     registry,
     emitEvent: () => undefined,
+    sendToRenderer: (channel, payload) => renderer.push({ channel, payload }),
     ...(withStore
       ? {
           appendPluginMessage: async (sessionId, data) => {
@@ -50,7 +52,7 @@ function makeHub(permissions = ['messages'], { withStore = true } = {}) {
         }
       : {}),
   });
-  return { hub, appended, updated, removed, signals };
+  return { hub, appended, updated, removed, signals, renderer };
 }
 
 const card = {
@@ -288,5 +290,62 @@ test('messages accept existing absolute files as attachment cards', async (t) =>
       files: [{ path: join(dir, 'missing.pdf') }],
     }),
     /not an existing file/,
+  );
+});
+
+// ── chat.send: a plugin request that starts a turn ─────────────────────────
+
+test('chat.send relays a plugin request card with display and agent text kept apart', async () => {
+  const { hub, renderer } = makeHub();
+  const result = await hub.dispatch(plugin, 'chat.send', {
+    text: '解释这段网页内容',
+    agentText: '向用户解释下面的网页内容…',
+    title: '解释网页内容',
+    quote: 'x'.repeat(5000),
+    source: { label: 'GitHub Trending', url: 'https://github.com/trending' },
+  });
+
+  assert.equal(renderer.length, 1);
+  const { channel, payload } = renderer[0];
+  assert.equal(channel, 'pi:chat:send');
+  assert.equal(result.messageId, payload.pluginMessage.id);
+
+  const data = payload.pluginMessage;
+  assert.equal(data.pluginId, plugin);
+  assert.equal(data.text, '解释这段网页内容');
+  assert.match(data.agentText, /^\[插件消息 · 来自 Test（com\.test\.plugin）\]\n向用户解释下面的网页内容…$/);
+  assert.equal(data.title, '解释网页内容');
+  assert.equal(data.quote.length, 4000, 'display quote is capped');
+  assert.deepEqual(data.source, { label: 'GitHub Trending', url: 'https://github.com/trending' });
+  assert.equal(data.agentVisible, true);
+  assert.equal(data.triggered, true);
+
+  // Legacy field: a renderer without card support still sends the attributed
+  // text as a typed turn.
+  assert.equal(payload.text, data.agentText);
+});
+
+test('chat.send accepts a request with no visible copy', async () => {
+  const { hub, renderer } = makeHub();
+  await hub.dispatch(plugin, 'chat.send', {
+    agentText: '翻译并展示',
+    title: '翻译网页内容',
+    quote: 'Trending',
+  });
+  const data = renderer[0].payload.pluginMessage;
+  assert.equal(data.text, undefined);
+  assert.match(data.agentText, /翻译并展示$/);
+});
+
+test('chat.send requires text or agentText, and validates structured fields', async () => {
+  const { hub } = makeHub();
+  await assert.rejects(hub.dispatch(plugin, 'chat.send', {}), /text \(or agentText\) is required/);
+  await assert.rejects(
+    hub.dispatch(plugin, 'chat.send', { text: 'hi', source: 'not-an-object' }),
+    /source must be an object/,
+  );
+  await assert.rejects(
+    hub.dispatch(plugin, 'chat.send', { text: 'hi', status: 'loud' }),
+    /chat\.send: status must be/,
   );
 });

@@ -16,6 +16,13 @@ export interface SendMessageParams {
    * plugin contributes.
    */
   skills?: string[];
+  /**
+   * Deliver this turn as a plugin-originated message instead of a user
+   * message: the entry is a pi `custom_message` carrying the plugin message
+   * data, so the timeline renders a plugin card (not a user bubble) while the
+   * agent sees `content` and starts the turn normally.
+   */
+  pluginMessage?: PluginMessageData;
 }
 
 export interface StreamChunk {

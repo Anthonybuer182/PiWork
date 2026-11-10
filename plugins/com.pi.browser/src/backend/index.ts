@@ -1973,6 +1973,13 @@ async function renderClipsInPage(ctx: PluginContext, newestId: string | null): P
   );
 }
 
+/** The page a popup action came from, as the request card's origin line. */
+function actionSource(action: SelAction, url: string): { label?: string; url?: string } {
+  const label = String(action.title ?? '').trim();
+  if (!url) return label ? { label } : {};
+  return label ? { label, url } : { url };
+}
+
 /** Dispatch one reported popup click. */
 async function handleAction(ctx: PluginContext, action: SelAction): Promise<void> {
   const text = String(action.text ?? '').trim().slice(0, SELECTION_MAX_CHARS);
@@ -1991,7 +1998,15 @@ async function handleAction(ctx: PluginContext, action: SelAction): Promise<void
       // is what gets translated, not the raw selection.
       await showNoteInPage(ctx, { state: 'pending', kind: kindKey });
       try {
-        await ctx.call('chat.send', { text: agentTaskPrompt(kind, text, url) });
+        // The conversation shows a work order — what was asked and what it is
+        // about — not the prompt: `agentText` is the instruction, the card is
+        // for the user.
+        await ctx.call('chat.send', {
+          agentText: agentTaskPrompt(kind, text, url),
+          title: `${kind}网页内容`,
+          quote: text,
+          source: actionSource(action, url),
+        });
       } catch (err) {
         pendingNote = null;
         ctx.log.warn(`chat.send failed: ${describe(err)}`);
@@ -2006,7 +2021,7 @@ async function handleAction(ctx: PluginContext, action: SelAction): Promise<void
     }
     case 'chat': {
       // The popup sends the question (textarea) and the quote (chip) as two
-      // fields; here they become one message — either alone is sendable.
+      // fields; the card shows them as such, while the agent gets one message.
       const question = text;
       const quote = String(action.quote ?? '').trim().slice(0, SELECTION_MAX_CHARS);
       const parts: string[] = [];
@@ -2022,7 +2037,13 @@ async function handleAction(ctx: PluginContext, action: SelAction): Promise<void
           'title 填 "回答",一两句话说清即可。对话里正常完整作答,两者内容不要互相重复。)',
       );
       try {
-        await ctx.call('chat.send', { text: parts.join('\n\n') });
+        await ctx.call('chat.send', {
+          text: question,
+          agentText: parts.join('\n\n'),
+          title: '划词提问',
+          ...(quote ? { quote } : {}),
+          source: actionSource(action, url),
+        });
       } catch (err) {
         ctx.log.warn(`chat.send failed: ${describe(err)}`);
         void toastInPage(ctx, '发送到对话失败');

@@ -3,7 +3,7 @@ import type { OpenDialogOptions, SaveDialogOptions } from 'electron';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
 import { join, isAbsolute } from 'path';
-import type { CapabilityMethod, PluginEvent, PluginPanelStatus, PluginMessageData, PluginMessageFile, PluginMessagePatch, PluginMessageStatus, UiNode } from '@pi/types';
+import type { CapabilityMethod, PluginEvent, PluginPanelStatus, PluginMessageData, PluginMessageFile, PluginMessagePatch, PluginMessageSource, PluginMessageStatus, UiNode } from '@pi/types';
 import { PLUGIN_PROTOCOL_VERSION } from '@pi/types';
 import { deleteFileWithMtimeGuard, writeFileWithMtimeGuard } from '@pi/sdk-wrapper/adapters';
 import type { PluginRegistry } from './registry';
@@ -109,49 +109,59 @@ const MAX_MESSAGE_POSTS_PER_MINUTE = 60;
 const MESSAGE_POST_WINDOW_MS = 60_000;
 
 /**
+ * How much of a quoted passage a `chat.send` request card stores for display.
+ * The full instruction still reaches the model through `agentText`; this is
+ * only the excerpt the card shows, and a selection can be very long.
+ */
+const MAX_CHAT_SEND_QUOTE = 4000;
+
+/**
  * Validate a plugin card tree before it enters a transcript: bounded size,
  * bounded depth, known components and well-formed event ids. A malformed tree
  * would fail far from the cause (deep in a renderer) and be persisted forever.
  */
-function validateCardTree(value: unknown): asserts value is UiNode {
+function validateCardTree(value: unknown, method = 'messages.post'): asserts value is UiNode {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('messages.post: card must be a declarative UI node');
+    throw new Error(`${method}: card must be a declarative UI node`);
   }
   let size = 0;
   try {
     size = Buffer.byteLength(JSON.stringify(value), 'utf-8');
   } catch {
-    throw new Error('messages.post: card must be JSON-serializable');
+    throw new Error(`${method}: card must be JSON-serializable`);
   }
   if (size > MAX_CARD_BYTES) {
-    throw new Error(`messages.post: card is too large (${size} bytes > ${MAX_CARD_BYTES})`);
+    throw new Error(`${method}: card is too large (${size} bytes > ${MAX_CARD_BYTES})`);
   }
 
   const visit = (node: unknown, depth: number): void => {
-    if (depth > MAX_CARD_DEPTH) throw new Error('messages.post: card is nested too deeply');
+    if (depth > MAX_CARD_DEPTH) throw new Error(`${method}: card is nested too deeply`);
     if (!node || typeof node !== 'object' || Array.isArray(node)) {
-      throw new Error('messages.post: every card child must be a node');
+      throw new Error(`${method}: every card child must be a node`);
     }
     const n = node as { component?: unknown; children?: unknown; events?: unknown };
     if (typeof n.component !== 'string' || !DECLARATIVE_COMPONENTS.has(n.component)) {
       throw new Error(
-        `messages.post: unknown card component "${String(n.component)}" — see the declarative vocabulary`,
+        `${method}: unknown card component "${String(n.component)}" — see the declarative vocabulary`,
       );
     }
     if (n.children !== undefined) {
-      if (!Array.isArray(n.children)) throw new Error('messages.post: card children must be an array');
+      if (!Array.isArray(n.children)) throw new Error(`${method}: card children must be an array`);
       for (const child of n.children) visit(child, depth + 1);
     }
     if (n.events !== undefined) {
       if (!n.events || typeof n.events !== 'object' || Array.isArray(n.events)) {
-        throw new Error('messages.post: card events must be an object');
+        throw new Error(`${method}: card events must be an object`);
       }
     }
   };
   visit(value, 0);
 }
 
-function pluginMessageStatus(value: unknown): PluginMessageStatus | undefined {
+function pluginMessageStatus(
+  value: unknown,
+  method = 'messages.post',
+): PluginMessageStatus | undefined {
   if (value === undefined) return undefined;
   if (
     value === 'info' ||
@@ -163,7 +173,7 @@ function pluginMessageStatus(value: unknown): PluginMessageStatus | undefined {
     return value;
   }
   throw new Error(
-    'messages.post: status must be info, success, warning, error or loading',
+    `${method}: status must be info, success, warning, error or loading`,
   );
 }
 
@@ -176,32 +186,53 @@ const MAX_MESSAGE_FILES = 20;
  * and the file must exist. The host renders the card; the click goes through
  * the same filePreview chain as the file tree.
  */
-function pluginMessageFiles(value: unknown): PluginMessageFile[] | undefined {
+function pluginMessageFiles(value: unknown, method = 'messages'): PluginMessageFile[] | undefined {
   if (value === undefined || value === null) return undefined;
-  if (!Array.isArray(value)) throw new Error('messages: files must be an array');
+  if (!Array.isArray(value)) throw new Error(`${method}: files must be an array`);
   if (value.length > MAX_MESSAGE_FILES) {
-    throw new Error(`messages: at most ${MAX_MESSAGE_FILES} files per message`);
+    throw new Error(`${method}: at most ${MAX_MESSAGE_FILES} files per message`);
   }
   return value.map((entry, index) => {
     if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
-      throw new Error(`messages: files[${index}] must be an object`);
+      throw new Error(`${method}: files[${index}] must be an object`);
     }
     const raw = entry as { path?: unknown; label?: unknown };
     const path = typeof raw.path === 'string' ? raw.path.trim() : '';
-    if (!path) throw new Error(`messages: files[${index}].path is required`);
-    if (!isAbsolute(path)) throw new Error(`messages: files[${index}].path must be absolute`);
+    if (!path) throw new Error(`${method}: files[${index}].path is required`);
+    if (!isAbsolute(path)) throw new Error(`${method}: files[${index}].path must be absolute`);
     let info: ReturnType<typeof statSync> | null = null;
     try {
       info = statSync(path);
     } catch {
       /* reported below */
     }
-    if (!info?.isFile()) throw new Error(`messages: files[${index}] is not an existing file: ${path}`);
+    if (!info?.isFile()) {
+      throw new Error(`${method}: files[${index}] is not an existing file: ${path}`);
+    }
     return {
       path,
       ...(typeof raw.label === 'string' && raw.label.trim() ? { label: raw.label.trim() } : {}),
     };
   });
+}
+
+/**
+ * Validate a request card's provenance line (`chat.send`): one short origin
+ * the user can read, not a place to smuggle extra prompt text.
+ */
+function pluginMessageSource(
+  value: unknown,
+  method = 'chat.send',
+): PluginMessageSource | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${method}: source must be an object`);
+  }
+  const raw = value as { label?: unknown; url?: unknown };
+  const label = typeof raw.label === 'string' ? raw.label.trim().slice(0, 200) : '';
+  const url = typeof raw.url === 'string' ? raw.url.trim().slice(0, 2000) : '';
+  if (!label && !url) return undefined;
+  return { ...(label ? { label } : {}), ...(url ? { url } : {}) };
 }
 
 /**
@@ -273,24 +304,67 @@ export class CapabilityHub {
     // one. Without this, a misbehaving plugin could inject instructions that
     // read as the user's own intent — the one trust boundary the rest of this
     // permissioned architecture cannot afford to leave open.
+    //
+    // It is also not the user's BUBBLE. The renderer delivers the turn as a
+    // plugin message (pi custom_message) and the transcript shows a request
+    // card: plugin icon and name, a short title, the passage it is about and
+    // where that came from. `text` is the copy the user reads; `agentText` is
+    // the instruction, prefixed with the attribution line for the model only.
+    // Structured fields are optional — a plain one-liner still renders as a
+    // plugin card instead of a fake user message.
     this.capabilities.set('chat.send', {
       handler: ({ pluginId, params }) => {
         const text = String(params.text ?? '').trim();
-        if (!text) throw new Error('chat.send: text is required');
+        const instruction =
+          typeof params.agentText === 'string' ? params.agentText.trim() : '';
+        if (!text && !instruction) {
+          throw new Error('chat.send: text (or agentText) is required');
+        }
         if (!this.sendToRenderer) throw new Error('chat.send: no renderer attached');
         const plugin = this.registry.get(pluginId);
         const name = plugin?.manifest.name ?? pluginId;
+
+        const title = typeof params.title === 'string' ? params.title.trim().slice(0, 200) : '';
+        const quote =
+          typeof params.quote === 'string' ? params.quote.trim().slice(0, MAX_CHAT_SEND_QUOTE) : '';
+        const source = pluginMessageSource(params.source);
+        const card = params.card;
+        if (card !== undefined) validateCardTree(card, 'chat.send');
+        const status = pluginMessageStatus(params.status, 'chat.send');
+        const files = pluginMessageFiles(params.files, 'chat.send');
+
+        const data: PluginMessageData = {
+          id: randomUUID(),
+          pluginId,
+          sessionId: typeof params.sessionId === 'string' ? params.sessionId.trim() : '',
+          revision: 1,
+          ...(text ? { text } : {}),
+          agentText: `[插件消息 · 来自 ${name}（${pluginId}）]\n${instruction || text}`,
+          ...(title ? { title } : {}),
+          ...(quote ? { quote } : {}),
+          ...(source ? { source } : {}),
+          ...(card !== undefined ? { card: card as UiNode } : {}),
+          ...(files?.length ? { files } : {}),
+          ...(status ? { status } : {}),
+          agentVisible: true,
+          triggered: true,
+          createdAt: Date.now(),
+        };
+
         // `workspaceId` is routing, not content: the shell delivers the message
         // to the window showing that workspace. A scheduled job must reach the
         // conversation it was scheduled from, not whichever window is focused.
         const workspaceId =
           typeof params.workspaceId === 'string' && params.workspaceId ? params.workspaceId : undefined;
         this.sendToRenderer('pi:chat:send', {
-          text: `[插件消息 · 来自 ${name}（${pluginId}）]\n${text}`,
+          // A renderer that predates plugin request cards still sends this as a
+          // typed turn — degraded, but the agent gets the attributed text.
+          text: data.agentText,
+          pluginMessage: data,
           pluginId,
           ...(workspaceId ? { workspaceId } : {}),
         });
-        return { ok: true };
+        return { ok: true, messageId: data.id };
       },
     });
 

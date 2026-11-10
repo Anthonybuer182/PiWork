@@ -28,7 +28,7 @@ import { useCommandStore, commandDescription, type RegisteredCommand } from '@/s
 import { toast } from '@/stores/toast-store';
 import { usePluginStore } from '@/stores/plugin-store';
 import { canSaveAttachment, pathForFile, saveAttachmentToWorkspace } from '@/lib/os-drop';
-import type { Attachment, ContentBlock, Config, SavedAttachment, Skill } from '@pi/types';
+import type { Attachment, ContentBlock, Config, PluginMessageData, SavedAttachment, Skill } from '@pi/types';
 import { SKILL_REFERENCE_MARKER } from '@pi/types';
 
 interface SendVariables {
@@ -37,6 +37,12 @@ interface SendVariables {
   attachments: Attachment[];
   /** Per-message skill references (the composer chips), captured at send time. */
   skills: Skill[];
+  /**
+   * Deliver the turn as a plugin request card (`chat.send`): no optimistic
+   * user bubble, and the SDK stores a plugin message entry instead of a user
+   * message. The agent still sees `content`.
+   */
+  pluginMessage?: PluginMessageData;
 }
 
 export function Composer() {
@@ -371,15 +377,24 @@ export function Composer() {
   // Watch for retry trigger from ChatTimeline
   useEffect(() => {
     if (triggerSend > 0 && activeSessionId) {
-      const currentValue = useComposerStore.getState().value;
-      if (currentValue.trim()) {
+      const state = useComposerStore.getState();
+      const content = state.triggerContent;
+      const pluginMessage = state.triggerPluginMessage;
+      if (content.trim()) {
         sendMutation.mutate({
-          content: currentValue,
+          content,
           sessionId: activeSessionId,
           attachments: [],
           skills: [],
+          ...(pluginMessage ? { pluginMessage } : {}),
         });
-        setValue('');
+        if (pluginMessage) {
+          // The plugin never touched the input: leave whatever the user was
+          // drafting exactly where it is; just consume the card.
+          state.setTriggerPluginMessage(null);
+        } else {
+          setValue('');
+        }
       }
     }
   }, [triggerSend]);
@@ -390,7 +405,7 @@ export function Composer() {
   // mutationFn to build the prompt and the optimistic blocks.
   const savedAttachmentsRef = useRef(new Map<string, SavedAttachment>());
   const sendMutation = useMutation({
-    onMutate: async ({ content, sessionId, attachments }: SendVariables) => {
+    onMutate: async ({ content, sessionId, attachments, pluginMessage }: SendVariables) => {
       // The conversation is part of the variables, not read again later:
       // `activeSessionId` in the callbacks would point at whichever
       // conversation is on screen when the run finishes.
@@ -469,30 +484,50 @@ export function Composer() {
         }
       }
 
-      // Optimistically show the user message immediately
+      // Optimistically show the user message immediately — or, for a plugin
+      // request, the request card, since that is what the run was started
+      // from. Either is replaced by the transcript when the send lands.
       queryClient.setQueryData(['session', sessionId], (old: any) => {
         if (!old) return old;
-        return {
-          ...old,
-          messages: [
-            ...(old.messages || []),
-            {
+        const now = new Date().toISOString();
+        const message = pluginMessage
+          ? {
+              id: `optimistic-plugin-${pluginMessage.id}`,
+              sessionId,
+              role: 'plugin',
+              status: 'complete',
+              content: pluginMessage.text ?? '',
+              blocks: [],
+              ...(pluginMessage.card ? { card: pluginMessage.card } : {}),
+              ...(pluginMessage.files?.length ? { files: pluginMessage.files } : {}),
+              pluginId: pluginMessage.pluginId,
+              pluginMessageId: pluginMessage.id,
+              revision: pluginMessage.revision,
+              ...(pluginMessage.status ? { pluginStatus: pluginMessage.status } : {}),
+              ...(pluginMessage.title ? { title: pluginMessage.title } : {}),
+              ...(pluginMessage.quote ? { quote: pluginMessage.quote } : {}),
+              ...(pluginMessage.source ? { source: pluginMessage.source } : {}),
+              agentVisible: true,
+              triggered: true,
+              createdAt: now,
+              updatedAt: now,
+            }
+          : {
               id: `optimistic-${Date.now()}`,
               sessionId,
               role: 'user',
               status: 'complete',
               content,
               blocks: userBlocks.length > 0 ? userBlocks : [],
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-            },
-          ],
-        };
+              createdAt: now,
+              updatedAt: now,
+            };
+        return { ...old, messages: [...(old.messages || []), message] };
       });
 
     },
-    mutationFn: async ({ content, sessionId, attachments, skills }: SendVariables) => {
-      lastUserMessageRef.current = content;
+    mutationFn: async ({ content, sessionId, attachments, skills, pluginMessage }: SendVariables) => {
+      if (!pluginMessage) lastUserMessageRef.current = content;
       useComposerStore.getState().beginSessionStream(sessionId);
 
       // If editing a message, navigate the tree first to branch from the edited entry
@@ -624,6 +659,7 @@ export function Composer() {
           // Every globally enabled skill goes to the model; the model decides
           // which one applies. Per-message references ride in the content.
           skills: enabledSkillIds,
+          ...(pluginMessage ? { pluginMessage } : {}),
         },
         (chunk) => {
           if (chunk.type === 'message_start') {

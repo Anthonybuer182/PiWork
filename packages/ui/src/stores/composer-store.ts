@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { Attachment, ContentBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, ToolTiming } from '@pi/types';
+import type { Attachment, ContentBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, ToolTiming, PluginMessageData } from '@pi/types';
 
 /**
  * Live run state of one conversation.
@@ -101,6 +101,14 @@ interface ComposerState {
   toolTimings: Map<string, number>;
   streamError: string | null;
   triggerSend: number;
+  /** The text the next triggered send carries (set together with triggerSend). */
+  triggerContent: string;
+  /**
+   * Plugin message delivered with the triggered send, when the trigger came
+   * from a plugin (`chat.send`). The composer then sends the turn as a plugin
+   * request card instead of a typed user message.
+   */
+  triggerPluginMessage: PluginMessageData | null;
   /** Editing mode: the raw entry ID being edited */
   editingEntryId: string | null;
   /** Editing mode: the UI message ID being edited (for reference) */
@@ -161,7 +169,9 @@ interface ComposerState {
   setMessageTiming: (timing: MessageTiming | null) => void;
   setToolTiming: (timing: ToolTiming) => void;
   setStreamError: (error: string | null) => void;
-  setTriggerSend: (content: string) => void;
+  setTriggerSend: (content: string, pluginMessage?: PluginMessageData) => void;
+  /** Set (or clear, with null) the plugin message for the next triggered send. */
+  setTriggerPluginMessage: (message: PluginMessageData | null) => void;
   /** Signal the chat timeline to scroll to bottom (e.g. after inserting a slash command message) */
   triggerScrollToBottom: () => void;
   /** Enter edit mode: track entry and message IDs for navigateTree on send */
@@ -194,6 +204,8 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
   toolTimings: new Map(),
   streamError: null,
   triggerSend: 0,
+  triggerContent: '',
+  triggerPluginMessage: null,
   scrollToBottomTrigger: 0,
   editingEntryId: null,
   editingMessageId: null,
@@ -361,14 +373,25 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
     if (id) get().updateSessionStream(id, { streamError });
     else set({ streamError });
   },
-  setTriggerSend: (content) =>
-    set((s) => ({
-      value: content,
-      triggerSend: s.triggerSend + 1,
-      drafts: s.activeStreamSessionId
-        ? { ...s.drafts, [s.activeStreamSessionId]: content }
-        : s.drafts,
-    })),
+  setTriggerSend: (content, pluginMessage) =>
+    set((s) => {
+      const triggered = {
+        triggerContent: content,
+        triggerPluginMessage: pluginMessage ?? null,
+        triggerSend: s.triggerSend + 1,
+      };
+      // A plugin request is not a draft: the instruction never flashes in the
+      // user's input box, and it never becomes their saved draft.
+      if (pluginMessage) return triggered;
+      return {
+        ...triggered,
+        value: content,
+        drafts: s.activeStreamSessionId
+          ? { ...s.drafts, [s.activeStreamSessionId]: content }
+          : s.drafts,
+      };
+    }),
+  setTriggerPluginMessage: (triggerPluginMessage) => set({ triggerPluginMessage }),
   triggerScrollToBottom: () => set((s) => ({ scrollToBottomTrigger: s.scrollToBottomTrigger + 1 })),
   setEditingMessage: (entryId, messageId, initialContent) =>
     set({ editingEntryId: entryId, editingMessageId: messageId, editingContent: initialContent }),
@@ -407,6 +430,8 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
       toolTimings: new Map(),
       streamError: null,
       triggerSend: 0,
+      triggerContent: '',
+      triggerPluginMessage: null,
       editingEntryId: null,
       editingMessageId: null,
       editingContent: '',

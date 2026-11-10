@@ -6,11 +6,13 @@
  * same declarative card tree tool results use, plus host-rendered file cards,
  * so plugin authors never ship UI code.
  *
- * Step 1 renders the card read-only; click routing (`onMessageAction`) lands in
- * the next slice.
+ * A `chat.send` request reads like a work order rather than a typing record:
+ * a short title, the passage it is about (quote), and where that came from.
+ * That structure is what keeps the timeline professional — replaying a raw
+ * prompt inside a pretend user bubble was the thing this replaced.
  */
 import type { FileBlock, PluginMessage } from '@pi/types';
-import { Sparkles } from 'lucide-react';
+import { Globe, Sparkles } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { Badge } from '@/components/ui/badge';
 import { usePluginStore } from '@/stores/plugin-store';
@@ -33,6 +35,8 @@ export function PluginMessageBubble({ message }: { message: PluginMessage }) {
   );
   const name = plugin?.name ?? message.pluginId;
   const files = (message.blocks ?? []).filter((b) => b.type === 'file') as FileBlock[];
+  const source = message.source;
+  const sourceText = source?.label || source?.url || '';
 
   /**
    * Card interactions go back to the plugin that owns this message. Main
@@ -77,7 +81,15 @@ export function PluginMessageBubble({ message }: { message: PluginMessage }) {
               STATUS_DOT[message.pluginStatus ?? 'info'] ?? STATUS_DOT.info,
             )}
           />
-          {message.agentVisible ? (
+          {message.triggered ? (
+            <Badge
+              variant="secondary"
+              className="px-1 py-0 text-[9px] font-normal"
+              title="这条插件消息启动了一次 AI 运行"
+            >
+              已交给 AI
+            </Badge>
+          ) : message.agentVisible ? (
             <Badge
               variant="secondary"
               className="px-1 py-0 text-[9px] font-normal"
@@ -91,8 +103,27 @@ export function PluginMessageBubble({ message }: { message: PluginMessage }) {
           </span>
         </div>
 
+        {message.title ? (
+          <div className="text-sm font-medium leading-snug">{message.title}</div>
+        ) : null}
+
         {message.content ? (
           <p className="whitespace-pre-wrap text-sm leading-relaxed">{message.content}</p>
+        ) : null}
+
+        {message.quote ? (
+          <blockquote className="max-h-44 overflow-y-auto whitespace-pre-wrap border-l-2 border-border pl-3 text-[13px] leading-relaxed text-muted-foreground">
+            {message.quote}
+          </blockquote>
+        ) : null}
+
+        {sourceText ? (
+          <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+            <Globe className="h-3 w-3 shrink-0" />
+            <span className="truncate" title={source?.url ?? sourceText}>
+              {sourceText}
+            </span>
+          </div>
         ) : null}
 
         {message.card ? (
