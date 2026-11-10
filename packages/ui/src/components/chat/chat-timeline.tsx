@@ -10,6 +10,7 @@ import { useComposerStore } from '@/stores/composer-store';
 import { usePluginStore } from '@/stores/plugin-store';
 import { Button } from '@/components/ui/button';
 import { stripAppendedContext } from '@/lib/quote-helpers';
+import { suppressedToolCards } from '@/lib/tool-card-collapse';
 import { MessageBubble } from './message-bubble';
 import { PluginMessageBubble } from './plugin-message-bubble';
 import { EmptyChat } from './empty-chat';
@@ -278,6 +279,14 @@ export function ChatTimeline() {
       (m) => m.role !== 'plugin' || !muted.has((m as PluginMessage).pluginId),
     );
   }, [session?.messages, mutedPlugins]);
+
+  // Repeated edits of one file draw the same card every batch. Only the first
+  // and last call that touched a path within a run keep their card body; the
+  // rest stay as plain tool rows (still expandable, still red on failure).
+  // Computed from STORED messages only: a live run keeps every card visible
+  // and folds once when the turn is persisted, instead of a card vanishing
+  // under the user each time the next batch starts.
+  const suppressedCards = useMemo(() => suppressedToolCards(storedMessages), [storedMessages]);
 
   // Plugin messages arrive outside the agent stream (a background event, a
   // panel action). Main persists them as session entries and sends a signal;
@@ -578,6 +587,7 @@ export function ChatTimeline() {
                 contextUsage={isLast ? contextUsage ?? undefined : undefined}
                 messageTiming={isLast && isAssistant ? messageTiming ?? undefined : undefined}
                 toolTimings={isLast && isAssistant ? toolTimings : EMPTY_TOOL_TIMINGS}
+                suppressedCards={suppressedCards}
                 onEditMessage={handleEditMessage}
                 onConfirmEdit={handleConfirmEdit}
                 onCancelEdit={handleCancelEdit}

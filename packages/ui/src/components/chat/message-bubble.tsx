@@ -25,6 +25,8 @@ interface MessageBubbleProps {
   contextUsage?: ContextUsageInfo;
   messageTiming?: MessageTiming;
   toolTimings?: Map<string, number>;
+  /** Tool-call ids whose plugin card body is folded away (see suppressedToolCards). */
+  suppressedCards?: ReadonlySet<string>;
   /** Callback when user clicks "Edit" on a user message */
   onEditMessage?: (message: Message) => void;
   /** Callback when user confirms inline edit with new content */
@@ -37,7 +39,12 @@ interface MessageBubbleProps {
  * Pair tool_call blocks with their corresponding tool_result blocks.
  * Returns an array of rendered elements, where tool_call + result are grouped.
  */
-function renderBlocks(blocks: ContentBlock[], isStreaming: boolean, toolTimings: Map<string, number>) {
+function renderBlocks(
+  blocks: ContentBlock[],
+  isStreaming: boolean,
+  toolTimings: Map<string, number>,
+  suppressedCards?: ReadonlySet<string>,
+) {
   const resultMap = new Map<string, ToolResultBlock>();
   const elements: React.ReactNode[] = [];
 
@@ -79,6 +86,7 @@ function renderBlocks(blocks: ContentBlock[], isStreaming: boolean, toolTimings:
             result={result}
             isStreaming={isStreaming && !result}
             durationMs={toolMs}
+            showPluginCard={!suppressedCards?.has(tcBlock.toolCallId)}
           />,
         );
         break;
@@ -176,6 +184,7 @@ function MessageBubbleImpl({
   contextUsage,
   messageTiming,
   toolTimings = EMPTY_TOOL_TIMINGS,
+  suppressedCards,
   onEditMessage,
   onConfirmEdit,
   onCancelEdit,
@@ -303,7 +312,7 @@ function MessageBubbleImpl({
           </div>
         ) : (
           <div className="flex flex-col">
-            {renderBlocks(message.blocks, !!isStreaming, toolTimings)}
+            {renderBlocks(message.blocks, !!isStreaming, toolTimings, suppressedCards)}
           </div>
         )}
         {/* Action row: timestamp + metrics + hover buttons */}
