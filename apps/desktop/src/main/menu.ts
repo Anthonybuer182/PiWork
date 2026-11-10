@@ -50,6 +50,8 @@ const MENU_LABELS: Record<MenuLanguage, Record<string, string>> = {
     zoom: '缩放',
     bringAllToFront: '全部置于顶层',
     help: '帮助',
+    reportBug: '报告问题',
+    suggestFeature: '功能建议',
   },
   en: {
     about: `About ${APP_NAME}`,
@@ -85,6 +87,8 @@ const MENU_LABELS: Record<MenuLanguage, Record<string, string>> = {
     zoom: 'Zoom',
     bringAllToFront: 'Bring All to Front',
     help: 'Help',
+    reportBug: 'Report a Bug',
+    suggestFeature: 'Suggest a Feature',
   },
 };
 
@@ -94,6 +98,29 @@ const MENU_LABELS: Record<MenuLanguage, Record<string, string>> = {
  * copy only because the menu bar exists before — and independently of — any
  * renderer.
  */
+const REPO_URL = 'https://github.com/Anthonybuer182/PiWork';
+
+/**
+ * Issue forms pre-fill fields by their `id`, so the menu can hand the bug
+ * form the same build details the 关于 page sends. Keep the ids in sync with
+ * `.github/ISSUE_TEMPLATE/bug_report.yml`.
+ */
+function feedbackUrl(template: string, params: Record<string, string> = {}): string {
+  // `URLSearchParams` writes spaces as `+`; GitHub's prefill expects `%20`.
+  const query = new URLSearchParams({ template, ...params }).toString().replace(/\+/g, '%20');
+  return `${REPO_URL}/issues/new?${query}`;
+}
+
+function platformLabel(): string {
+  if (process.platform === 'darwin') return 'macOS';
+  if (process.platform === 'win32') return 'Windows';
+  return 'Linux';
+}
+
+function openExternal(url: string): void {
+  void import('electron').then(({ shell }) => shell.openExternal(url));
+}
+
 let language: MenuLanguage = 'zh';
 let windows: WindowRegistry | null = null;
 /** True once a renderer has sent its language, which then outranks the file. */
@@ -229,11 +256,18 @@ function buildTemplate(registry: WindowRegistry, lang: MenuLanguage): MenuItemCo
       submenu: [
         {
           label: 'GitHub',
-          click: () => {
-            void import('electron').then(({ shell }) =>
-              shell.openExternal('https://github.com/Anthonybuer182/PiWork'),
-            );
-          },
+          click: () => openExternal(REPO_URL),
+        },
+        {
+          label: l.reportBug,
+          click: () =>
+            openExternal(
+              feedbackUrl('bug_report.yml', { version: app.getVersion(), os: platformLabel() }),
+            ),
+        },
+        {
+          label: l.suggestFeature,
+          click: () => openExternal(feedbackUrl('feature_request.yml')),
         },
       ],
     },

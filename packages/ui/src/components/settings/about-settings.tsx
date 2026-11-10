@@ -15,6 +15,7 @@ import { useI18n } from '@/i18n';
 import { formatBytes } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { hasUpdateApi, updateApi, updatePlatform } from '@/lib/update-client';
+import { bugReportUrl, featureRequestUrl } from '@/lib/feedback';
 import { Button } from '@/components/ui/button';
 import {
   AlertDialog,
@@ -187,6 +188,8 @@ export function AboutSettingsPage() {
           <div className="mt-2 flex flex-wrap items-center gap-4">
             <LinkButton url={REPO_URL}>{t('GitHub 仓库')}</LinkButton>
             <LinkButton url={RELEASES_URL}>{t('发布说明')}</LinkButton>
+            <LinkButton url={bugReportUrl({ version, platform })}>{t('报告问题')}</LinkButton>
+            <LinkButton url={featureRequestUrl()}>{t('功能建议')}</LinkButton>
           </div>
         </div>
       </div>

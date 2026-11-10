@@ -882,6 +882,8 @@ export const EN_MESSAGES = {
     'An AI coding assistant built with Electron and React.',
   'GitHub 仓库': 'GitHub repository',
   发布说明: 'Release notes',
+  报告问题: 'Report a bug',
+  功能建议: 'Suggest a feature',
   软件更新: 'Software update',
   '正在检查更新…': 'Checking for updates…',
   '检查更新失败：{message}': 'Could not check for updates: {message}',
