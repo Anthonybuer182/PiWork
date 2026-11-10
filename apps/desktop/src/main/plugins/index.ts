@@ -538,9 +538,14 @@ export class PluginSystem {
     }
     const result = await proc.executeTool(name, params, sessionId, workspaceId);
     // Agent-activity linkage: a tool that just ran means the plugin is doing
-    // visible work — surface its primary panel so the effect is shown. Plugins
-    // that contribute no panel have nothing to open, and `openPanelForActivity`
-    // no-ops.
+    // visible work — surface its primary panel so the effect is shown. Panels
+    // that are a viewport for content rather than a workspace where work
+    // happens opt out (`surfaceOnActivity: false` on the panel): the file
+    // viewer kept opening the right column every time an agent merely READ an
+    // attached file (`office_read`, `pdf_render`), which reads as the app
+    // auto-opening a window nobody asked for. A tool that genuinely has
+    // something to show calls `panel.open` itself — the files plugin does that
+    // for created/edited documents.
     this.openPanelForActivity(pluginId);
     return result;
   }
@@ -550,6 +555,7 @@ export class PluginSystem {
     const plugin = this.registry.get(pluginId);
     const panel = plugin?.manifest.contributes?.panels?.find((p) => !p.hidden);
     if (!panel) return;
+    if (panel.surfaceOnActivity === false) return;
     this.emitEvent({ type: 'panel-open', pluginId, panelId: panel.id, focus: true });
   }
 

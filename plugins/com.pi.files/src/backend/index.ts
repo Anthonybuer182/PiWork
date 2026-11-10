@@ -1205,7 +1205,12 @@ async function toolPdfRender(p: Record<string, unknown>): Promise<ToolResult> {
     if (info && !overwrite) throw new Error(`${out} already exists — pass overwrite: true to replace the set`);
   }
   for (let i = 0; i < rendered.length; i++) await writeOfficeBytes(files[i], rendered[i].data);
-  if (files[0]) await revealCreated(files[0]);
+  // Rendering is an INSPECTION step: the agent renders pages to look at them,
+  // usually from a file the user just attached. Revealing the first page would
+  // take the right column away from whatever the user was doing — the
+  // "sending an attachment opens the viewer by itself" complaint. The PNG
+  // paths are in the result, so the agent can still point at them; the user
+  // opens them when they want to.
   return text(
     `rendered ${rendered.length} page(s) from ${path} to PNG @${scale}x:\n  ${files.join('\n  ')}`,
     {

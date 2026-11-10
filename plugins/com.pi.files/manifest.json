@@ -21,7 +21,8 @@
         "entry": "./ui-dist/panel/index.html",
         "keepAlive": "lru",
         "scope": "session",
-        "multiInstance": true
+        "multiInstance": true,
+        "surfaceOnActivity": false
       }
     ],
     "tools": [
@@ -303,7 +304,7 @@
       },
       {
         "name": "files_open",
-        "description": "Open a file in this conversation's viewer panel. Required before office_edit on a docx — that editor drives the document that is open — and useful whenever the user should see a file on screen.",
+        "description": "Open a file in this conversation's viewer panel. Required before office_read/office_edit on a docx — that live editor drives the document that is already open. Otherwise call it ONLY when the user explicitly asks to open, show or display a file: never just because a file was attached, sent, mentioned, read or created — opening takes over the right column, so that call belongs to the user.",
         "readOnly": true,
         "inputSchema": {
           "type": "object",

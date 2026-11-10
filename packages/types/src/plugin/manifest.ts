@@ -73,6 +73,18 @@ export interface PanelContribution {
    */
   multiInstance?: boolean;
   /**
+   * Whether the host may surface this panel as the visible effect of a tool
+   * call. Defaults to true: after any of the plugin's tools runs, the panel
+   * earns a place in the layout, because the panel is where that plugin's
+   * work happens (the browser you are driving).
+   *
+   * Set false when the panel is a VIEWPORT for content rather than a
+   * workspace — the file viewer. An agent reading an attached file must not
+   * open the viewer on the user's screen; when a tool really has something to
+   * show, it calls `panel.open` itself, which is unaffected by this flag.
+   */
+  surfaceOnActivity?: boolean;
+  /**
    * Which sidebar column the panel lives in. Defaults to 'right'.
    *
    * The left column is the global-view column (all files, all sessions), so a

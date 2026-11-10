@@ -135343,7 +135343,6 @@ async function toolPdfRender(p) {
     if (info && !overwrite) throw new Error(`${out} already exists \u2014 pass overwrite: true to replace the set`);
   }
   for (let i = 0; i < rendered.length; i++) await writeOfficeBytes(files[i], rendered[i].data);
-  if (files[0]) await revealCreated(files[0]);
   return text(
     `rendered ${rendered.length} page(s) from ${path} to PNG @${scale}x:
   ${files.join("\n  ")}`,
