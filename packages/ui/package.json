@@ -56,8 +56,8 @@
   "devDependencies": {
     "@types/react": "^19.0.1",
     "@types/react-dom": "^19.0.1",
-    "tailwindcss": "^4.3.4",
+    "tailwindcss": "^4.3.5",
     "tailwindcss-animate": "^1.0.7",
-    "@tailwindcss/postcss": "^4.3.4"
+    "@tailwindcss/postcss": "^4.3.5"
   }
 }
