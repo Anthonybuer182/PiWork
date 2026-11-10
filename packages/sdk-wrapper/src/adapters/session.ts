@@ -309,7 +309,7 @@ function stripQuoteSections(text: string, cwd?: string): {
   return { content: content.trim(), quotes };
 }
 
-function agentMessageToBlocks(msg: any, cwd?: string): ContentBlock[] {
+export function agentMessageToBlocks(msg: any, cwd?: string): ContentBlock[] {
   const blocks: ContentBlock[] = [];
 
   if (msg.role === 'user') {
@@ -451,6 +451,12 @@ function agentMessageToBlocks(msg: any, cwd?: string): ContentBlock[] {
     }
   } else if (msg.role === 'toolResult' || msg.role === 'tool_result') {
     const content = extractTextFromContent(msg.content);
+    // The result carries the tool name and, for plugins with a
+    // messageRenderer, the declarative card tree in `details.card`. Both are
+    // persisted, so a reopened conversation must render the same card it
+    // rendered while streaming — without them the card degrades to a bare
+    // header row and its buttons lose their plugin.
+    const card = msg.details?.card;
     blocks.push({
       id: `b-tr-${msg.timestamp || Date.now()}`,
       type: 'tool_result',
@@ -458,6 +464,8 @@ function agentMessageToBlocks(msg: any, cwd?: string): ContentBlock[] {
       toolCallId: msg.toolCallId || 'unknown',
       result: content,
       isError: msg.isError,
+      ...(msg.toolName ? { toolName: msg.toolName } : {}),
+      ...(card ? { card } : {}),
     });
   } else if (msg.role === 'bashExecution') {
     blocks.push({
