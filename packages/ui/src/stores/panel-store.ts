@@ -16,6 +16,47 @@ export type PanelKeepAlive = 'always' | 'lru' | 'never';
 // sites import these from the store alongside PanelEntry.
 export type { PanelRegion, PanelAnchor, PanelScope };
 
+/**
+ * An editor group: one column of the right region when split, with its own
+ * tab list, active tab and width.
+ */
+export interface EditorGroup {
+  id: string;
+  tabs: string[];
+  active: string | null;
+  weight: number;
+}
+
+const EMPTY_GROUPS: Record<PanelRegion, EditorGroup[]> = { left: [], right: [] };
+
+function newGroupId(): string {
+  const c = (globalThis as { crypto?: Crypto }).crypto;
+  return c?.randomUUID
+    ? c.randomUUID()
+    : `g${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function makeGroup(tabs: string[], active: string | null, weight = 1): EditorGroup {
+  return { id: newGroupId(), tabs, active, weight };
+}
+
+function groupIndexContaining(groups: EditorGroup[], key: string): number {
+  return groups.findIndex((g) => g.tabs.includes(key));
+}
+
+/** Most recently used tab among `tabs`, else the last one, else null. */
+function recentTab(recency: string[], tabs: string[]): string | null {
+  return recency.find((k) => tabs.includes(k)) ?? tabs[tabs.length - 1] ?? null;
+}
+
+function normalizeWeights(count: number, previous?: readonly number[]): number[] {
+  if (count <= 0) return [];
+  return Array.from({ length: count }, (_, i) => {
+    const w = previous?.[i];
+    return typeof w === 'number' && Number.isFinite(w) && w > 0 ? w : 1;
+  });
+}
+
 /** How many conversations keep their panel state when the user moves on. */
 const SESSIONS_KEPT = 8;
 
@@ -43,7 +84,11 @@ export interface PanelEntry {
   /** Not shown in the picker/welcome grid; still openable via panel.open / events. */
   hidden?: boolean;
   keepAlive: PanelKeepAlive;
-  /** Whether the panel's tabs follow the session. Defaults to 'global'. */
+  /**
+   * Whether the panel's tabs follow the session. Defaults to the panel's
+   * region: the left column is the workspace as a whole ('global'), the right
+   * column is the conversation being worked on ('session').
+   */
   scope?: PanelScope;
   /** Several host tabs of this panel may be open at once. */
   multiInstance?: boolean;
@@ -135,6 +180,8 @@ export interface SessionPanelState {
   focused: string | null;
   params: Record<string, Record<string, unknown> | undefined>;
   titles?: Record<string, string>;
+  /** The conversation's right-column editor groups, if it had a split. */
+  splitGroups?: EditorGroup[];
 }
 
 export interface PanelRuntimeState {
@@ -192,11 +239,22 @@ function computeMounted(
   focusedIds: Record<PanelRegion, string | null>,
   openPanelIds: Record<PanelRegion, string[]>,
   recency: string[],
+  splitGroups: Record<PanelRegion, EditorGroup[]>,
 ): string[] {
   const byId = new Map(panels.map((p) => [p.id, p]));
   const mounted = new Set<string>();
   for (const key of Object.values(focusedIds)) {
     if (key && panelOfKey(byId, key)) mounted.add(key);
+  }
+
+  // Every visible column shows its active tab; mount all of them even when
+  // they never entered recency.
+  for (const region of ['left', 'right'] as PanelRegion[]) {
+    const groups = splitGroups[region];
+    if (groups.length < 2) continue;
+    for (const group of groups) {
+      if (group.active) mounted.add(group.active);
+    }
   }
 
   // 'always' means always: mount them whether or not they are open and
@@ -282,6 +340,7 @@ function reconcile(
     sessionPanels: Record<string, SessionPanelState>;
     recency: string[];
     panelOrder: Record<PanelRegion, string[]>;
+    splitGroups: Record<PanelRegion, EditorGroup[]>;
     pluginPanelsSynced: boolean;
   },
 ): {
@@ -291,10 +350,48 @@ function reconcile(
   openPanelIds: Record<PanelRegion, string[]>;
   sessionPanels: Record<string, SessionPanelState>;
   panelOrder: Record<PanelRegion, string[]>;
+  splitGroups: Record<PanelRegion, EditorGroup[]>;
   mountedIds: string[];
 } {
   const byId = new Map(panels.map((p) => [p.id, p]));
   const recency = prev.recency.filter((key) => panelOfKey(byId, key));
+
+  // Groups survive session switches (their tabs may be stashed), but a tab
+  // whose panel was uninstalled is dropped; an empty group disappears, and
+  // fewer than two groups collapses the split.
+  //
+  // Pruning waits for the plugin registry's first sync: at boot the host
+  // panels register before the plugin panels, so pruning now would drop a
+  // persisted split naming the viewer/browser and never bring it back.
+  const splitGroups = { ...prev.splitGroups };
+  for (const region of ['left', 'right'] as PanelRegion[]) {
+    const groups = prev.splitGroups[region] ?? [];
+    let kept = groups.map((g) => ({ ...g, tabs: [...g.tabs] }));
+    if (prev.pluginPanelsSynced) {
+      kept = kept
+        .map((g) => ({ ...g, tabs: g.tabs.filter((key) => Boolean(panelOfKey(byId, key))) }))
+        .filter((g) => g.tabs.length > 0);
+    }
+    kept = kept.map((g) => ({
+      ...g,
+      active: g.active && g.tabs.includes(g.active) ? g.active : recentTab(recency, g.tabs),
+      weight: Number.isFinite(g.weight) && g.weight > 0 ? g.weight : 1,
+    }));
+    if (kept.length >= 2) {
+      // Every open tab must live in a group. Tabs that predate the group
+      // layout (or arrived just after a restore) join the first group.
+      const assigned = new Set(kept.flatMap((g) => g.tabs));
+      const orphans = (prev.openPanelIds[region] ?? []).filter(
+        (key) => !assigned.has(key) && Boolean(panelOfKey(byId, key)),
+      );
+      if (orphans.length > 0) {
+        const first = kept[0];
+        first.tabs = [...first.tabs, ...orphans];
+        first.active = first.active ?? recentTab(recency, first.tabs);
+      }
+    }
+    splitGroups[region] = kept.length >= 2 ? kept : [];
+  }
 
   // The installed-panel order follows the registry: uninstall/disable removes
   // an entry, a freshly installed plugin appends (the user's drag order is kept
@@ -332,7 +429,23 @@ function reconcile(
         params[key] = st.params?.[key];
         if (st.titles?.[key]) titles[key] = st.titles[key];
       }
-      sessionPanels[sid] = { selected, focused, params, titles };
+      const groups = (st.splitGroups ?? [])
+        .map((g) => {
+          const tabs = g.tabs.filter((key) => selected.includes(key));
+          return {
+            ...g,
+            tabs,
+            active: g.active && tabs.includes(g.active) ? g.active : recentTab(recency, tabs),
+          };
+        })
+        .filter((g) => g.tabs.length > 0);
+      sessionPanels[sid] = {
+        selected,
+        focused,
+        params,
+        titles,
+        ...(groups.length >= 2 ? { splitGroups: groups } : {}),
+      };
     }
   }
 
@@ -361,19 +474,30 @@ function reconcile(
 
   const left = pick('left');
   const right = pick('right');
+  let rightFocused = right.focused;
+  const rightGroups = splitGroups.right;
+  if (
+    rightGroups.length >= 2 &&
+    (!rightFocused || !rightGroups.some((g) => g.tabs.includes(rightFocused!)))
+  ) {
+    rightFocused =
+      rightGroups.find((g) => g.active)?.active ?? rightGroups[0]?.active ?? rightFocused;
+  }
 
   return {
     panels,
     recency,
-    focusedId: { left: left.focused, right: right.focused },
+    focusedId: { left: left.focused, right: rightFocused },
     openPanelIds: { left: left.selected, right: right.selected },
     sessionPanels,
     panelOrder,
+    splitGroups,
     mountedIds: computeMounted(
       panels,
-      { left: left.focused, right: right.focused },
+      { left: left.focused, right: rightFocused },
       { left: left.selected, right: right.selected },
       recency,
+      splitGroups,
     ),
   };
 }
@@ -467,6 +591,7 @@ const panelStorage: StateStorage = {
             currentSessionId: s.currentSessionId,
             sessionPanels: s.sessionPanels,
             sessionOrder: s.sessionOrder,
+            splitGroups: s.splitGroups,
           },
         }),
       );
@@ -484,6 +609,23 @@ const panelStorage: StateStorage = {
   },
 };
 
+/**
+ * The scope a panel gets when its descriptor does not declare one.
+ *
+ * The two columns have different subjects — the left one is the workspace as a
+ * whole (all sessions, all files), the right one is the conversation being
+ * worked on (see the `region` contract in @pi/types) — so an undeclared panel
+ * follows the column it lives in. A declaration always wins: a right-side
+ * panel that must survive a conversation switch can still say
+ * `scope: 'global'`.
+ *
+ * This is what keeps a new conversation's right column empty (the panel grid)
+ * instead of inheriting the management panel that happened to be open last.
+ */
+function defaultScope(panel: { scope?: PanelScope; region: PanelRegion }): PanelScope {
+  return panel.scope ?? (panel.region === 'left' ? 'global' : 'session');
+}
+
 export const usePanelStore = create<PanelStoreState>()(
   persist(
     (set, get) => ({
@@ -491,6 +633,7 @@ export const usePanelStore = create<PanelStoreState>()(
       focusedId: EMPTY_FOCUSED,
       openPanelIds: EMPTY_TABS,
       panelOrder: { left: [], right: [] },
+      splitGroups: EMPTY_GROUPS,
       currentSessionId: null,
       sessionPanels: {},
       sessionOrder: [],
@@ -503,7 +646,15 @@ export const usePanelStore = create<PanelStoreState>()(
       pluginPanelsSynced: false,
 
       setHostPanels: (hostPanels) =>
-        set((s) => reconcile([...hostPanels, ...s.panels.filter((p) => p.source !== 'host')], s)),
+        set((s) =>
+          reconcile(
+            [
+              ...hostPanels.map((p) => ({ ...p, scope: defaultScope(p) })),
+              ...s.panels.filter((p) => p.source !== 'host'),
+            ],
+            s,
+          ),
+        ),
 
       setPluginPanels: (infos) =>
         set((s) => {
@@ -512,26 +663,29 @@ export const usePanelStore = create<PanelStoreState>()(
               // A panel is a web page. Manifest validation guarantees an entry,
               // but a malformed descriptor must not take the whole list down.
               .filter((panel) => Boolean(panel.entry))
-              .map((panel) => ({
-                id: pluginPanelId(plugin.id, panel.id),
-                title: panel.title,
-                icon: panel.icon ?? 'puzzle',
-                iconUrl: panel.iconUrl,
-                source: plugin.id,
-                pluginId: plugin.id,
-                panelId: panel.id,
-                entry: panel.entry,
-                hidden: panel.hidden === true,
-                // Default 'lru' so switching away and back does not reload
-                // the page from scratch. (Host panels carry their own
-                // keepAlive and never route through this mapping.)
-                keepAlive: panel.keepAlive ?? 'lru',
-                scope: panel.scope,
-                multiInstance: panel.multiInstance === true,
-                region: panel.region ?? 'right',
-                anchor: panel.anchor,
-                order: panel.order,
-              })),
+              .map((panel) => {
+                const region = panel.region ?? 'right';
+                return {
+                  id: pluginPanelId(plugin.id, panel.id),
+                  title: panel.title,
+                  icon: panel.icon ?? 'puzzle',
+                  iconUrl: panel.iconUrl,
+                  source: plugin.id,
+                  pluginId: plugin.id,
+                  panelId: panel.id,
+                  entry: panel.entry,
+                  hidden: panel.hidden === true,
+                  // Default 'lru' so switching away and back does not reload
+                  // the page from scratch. (Host panels carry their own
+                  // keepAlive and never route through this mapping.)
+                  keepAlive: panel.keepAlive ?? 'lru',
+                  scope: defaultScope({ scope: panel.scope, region }),
+                  multiInstance: panel.multiInstance === true,
+                  region,
+                  anchor: panel.anchor,
+                  order: panel.order,
+                };
+              }),
           );
           const hostPanels = s.panels.filter((p) => p.source === 'host');
           // The registry is now authoritative: sync BEFORE reconciling so this
@@ -566,6 +720,28 @@ export const usePanelStore = create<PanelStoreState>()(
           // same file/page), then an unloaded tab of the same panel (the
           // "open into the empty viewer tab" rule), else a new instance.
           const samePanel = selected.filter((key) => panelIdOfTab(key) === id);
+          const groups = s.splitGroups[region];
+          const hasSplit = groups.length >= 2;
+          const focusedGroup =
+            hasSplit && s.focusedId[region]
+              ? groupIndexContaining(groups, s.focusedId[region]!)
+              : -1;
+          // An empty tab is a natural destination. In a split, prefer one in
+          // the FOCUSED group, so a file opened from the tree lands in the
+          // column the user is working in.
+          const emptyTabs = samePanel.filter((key) => isEmptyParams(s.params[key]));
+          const pickEmpty = (): string | null => {
+            if (!hasSplit) return emptyTabs[0] ?? null;
+            const focused = groups[focusedGroup];
+            const inFocused =
+              focused && emptyTabs.find((key) => focused.tabs.includes(key));
+            return (
+              inFocused ??
+              emptyTabs.find((key) => groupIndexContaining(groups, key) !== -1) ??
+              emptyTabs[0] ??
+              null
+            );
+          };
           let targetKey: string | null = null;
           if (multi) {
             const wanted = opts?.params;
@@ -577,10 +753,9 @@ export const usePanelStore = create<PanelStoreState>()(
                   return false;
                 }
               });
-              if (same) targetKey = same;
-              else targetKey = samePanel.find((key) => isEmptyParams(s.params[key])) ?? null;
+              targetKey = same ?? pickEmpty();
             } else {
-              targetKey = samePanel.find((key) => isEmptyParams(s.params[key])) ?? null;
+              targetKey = pickEmpty();
             }
             if (!targetKey) targetKey = tabKeyOf(id, opts?.instanceId ?? newInstanceId());
           } else {
@@ -592,10 +767,27 @@ export const usePanelStore = create<PanelStoreState>()(
           const wasOpen = selected.includes(targetKey);
           if (opts?.params) params[targetKey] = opts.params;
 
-          // No-focus-steal: the tab is opened (so the strip shows it and its
-          // dot) but the active tab does not change. Unknown ids without a
-          // registered panel — a panel.open racing the registry sync — only
-          // get the badge; the tab is added once the panel exists.
+          // In split mode, new tabs (and the empty tab reused by an open)
+          // belong to the FOCUSED group. Opening a file never disturbs the
+          // other columns and never collapses the split.
+          let splitGroups = s.splitGroups;
+          if (hasSplit) {
+            const nextGroups = groups.map((g) => ({ ...g, tabs: [...g.tabs] }));
+            if (wasOpen) {
+              const gi = groupIndexContaining(nextGroups, targetKey);
+              if (gi !== -1 && focus) nextGroups[gi].active = targetKey;
+            } else if (entry || focus) {
+              const gi = focusedGroup >= 0 ? focusedGroup : 0;
+              nextGroups[gi].tabs.push(targetKey);
+              if (focus) nextGroups[gi].active = targetKey;
+            }
+            splitGroups = { ...s.splitGroups, [region]: nextGroups };
+          }
+
+          // No-focus-steal: the tab is opened (so its group's strip shows it
+          // and its dot) but the active tab does not change. Unknown ids
+          // without a registered panel — a panel.open racing the registry sync
+          // — only get the badge; the tab is added once the panel exists.
           if (!focus) {
             runtime[id] = { ...runtime[id], pending: true };
             const openPanelIds =
@@ -609,7 +801,8 @@ export const usePanelStore = create<PanelStoreState>()(
               tabTitles,
               openPanelIds,
               recency,
-              mountedIds: computeMounted(s.panels, s.focusedId, openPanelIds, recency),
+              splitGroups,
+              mountedIds: computeMounted(s.panels, s.focusedId, openPanelIds, recency, splitGroups),
             };
           }
 
@@ -624,13 +817,19 @@ export const usePanelStore = create<PanelStoreState>()(
               runtime,
               params,
               tabTitles,
+              splitGroups,
               activationNonces: { ...s.activationNonces, [id]: (s.activationNonces[id] ?? 0) + 1 },
-              mountedIds: computeMounted(s.panels, focusedId, s.openPanelIds, recency),
+              mountedIds: computeMounted(
+                s.panels,
+                focusedId,
+                s.openPanelIds,
+                recency,
+                splitGroups,
+              ),
             };
           }
 
-          // A new tab joins the strip at the end. Tab order is the user's
-          // arrangement from here on — drag reorder writes `setTabOrder`.
+          // A new tab joins the strip at the end.
           delete tabTitles[targetKey];
           const openPanelIds = { ...s.openPanelIds, [region]: [...selected, targetKey] };
           return {
@@ -640,8 +839,9 @@ export const usePanelStore = create<PanelStoreState>()(
             runtime,
             params,
             tabTitles,
+            splitGroups,
             activationNonces: { ...s.activationNonces, [id]: (s.activationNonces[id] ?? 0) + 1 },
-            mountedIds: computeMounted(s.panels, focusedId, openPanelIds, recency),
+            mountedIds: computeMounted(s.panels, focusedId, openPanelIds, recency, splitGroups),
           };
         }),
 
@@ -660,6 +860,35 @@ export const usePanelStore = create<PanelStoreState>()(
           const remaining = selected.filter((t) => t !== key);
           let fallback: string | null = remaining[Math.min(idx, remaining.length - 1)] ?? null;
           if (!fallback && remaining.length > 0) fallback = remaining[remaining.length - 1];
+
+          // Closing a tab inside an editor group removes it from that group.
+          // Its active tab falls to the group's most recent remaining tab; an
+          // empty group disappears, and fewer than two groups collapses the
+          // split back to the single-view strip.
+          const groups = s.splitGroups[region];
+          let splitGroups = s.splitGroups;
+          if (groups.length >= 2) {
+            const gi = groupIndexContaining(groups, key);
+            if (gi !== -1) {
+              const next = groups.map((g) => ({ ...g, tabs: [...g.tabs] }));
+              const group = next[gi];
+              group.tabs = group.tabs.filter((t) => t !== key);
+              if (group.tabs.length === 0) {
+                next.splice(gi, 1);
+              } else if (group.active === key) {
+                group.active = recentTab(s.recency, group.tabs);
+              }
+              if (next.length >= 1) {
+                const focusGroup = next[Math.min(gi, next.length - 1)] ?? next[0];
+                fallback = focusGroup?.active ?? fallback;
+              }
+              splitGroups = {
+                ...s.splitGroups,
+                [region]: next.length >= 2 ? next : [],
+              };
+            }
+          }
+
           const focusedId = {
             ...s.focusedId,
             [region]: s.focusedId[region] === key ? fallback : s.focusedId[region],
@@ -687,7 +916,260 @@ export const usePanelStore = create<PanelStoreState>()(
             params,
             tabTitles,
             runtime,
-            mountedIds: computeMounted(s.panels, focusedId, openPanelIds, s.recency),
+            splitGroups,
+            mountedIds: computeMounted(s.panels, focusedId, openPanelIds, s.recency, splitGroups),
+          };
+        }),
+
+      /**
+       * Move `key` into a new column on its right (the tab's split button).
+       *
+       * Any tab can be split, including singleton panels: splitting MOVES the
+       * tab, it never duplicates it. A panel that declares `multiInstance`
+       * gets a fresh empty tab backfilled into its old column (so the column
+       * still has somewhere to open a file from); a singleton cannot exist
+       * twice, so its old column is left empty with its `+`.
+       */
+      splitTab: (region, key) =>
+        set((s) => {
+          if (region !== 'right') return s;
+          const panelId = panelIdOfTab(key);
+          const entry = s.panels.find((p) => p.id === panelId);
+          const selected = s.openPanelIds[region];
+          if (!entry || !selected.includes(key)) return s;
+
+          const groups = s.splitGroups[region] ?? [];
+          let nextSelected = selected;
+          let nextGroups: EditorGroup[];
+
+          if (groups.length < 2) {
+            // First split: the moved tab becomes the new right group; the
+            // left group keeps the other tabs (or gets a fresh empty one when
+            // the panel supports more instances).
+            const sourceTabs = selected.filter((k) => k !== key);
+            let sourceActive = recentTab(s.recency, sourceTabs);
+            if (!sourceActive && entry.multiInstance) {
+              const fresh = tabKeyOf(panelId, newInstanceId());
+              sourceTabs.push(fresh);
+              sourceActive = fresh;
+              nextSelected = [...selected];
+              nextSelected.splice(selected.indexOf(key), 0, fresh);
+            }
+            nextGroups = [
+              makeGroup(sourceTabs, sourceActive),
+              makeGroup([key], key),
+            ];
+          } else {
+            // New column to the right of the source group. Emptying the
+            // source column backfills a fresh tab only when the panel can
+            // have another instance; otherwise the column stays empty.
+            nextGroups = groups.map((g) => ({ ...g, tabs: [...g.tabs] }));
+            const gi = groupIndexContaining(nextGroups, key);
+            if (gi === -1) {
+              nextGroups.push(makeGroup([key], key));
+            } else {
+              const source = nextGroups[gi];
+              source.tabs = source.tabs.filter((k) => k !== key);
+              if (source.tabs.length === 0) {
+                if (entry.multiInstance) {
+                  const fresh = tabKeyOf(panelId, newInstanceId());
+                  source.tabs = [fresh];
+                  source.active = fresh;
+                  nextSelected = [...selected];
+                  nextSelected.splice(selected.indexOf(key), 0, fresh);
+                } else {
+                  source.active = null;
+                }
+              } else if (source.active === key) {
+                source.active = recentTab(s.recency, source.tabs);
+              }
+              nextGroups.splice(gi + 1, 0, makeGroup([key], key));
+            }
+          }
+
+          const openPanelIds = { ...s.openPanelIds, [region]: nextSelected };
+          const splitGroups = { ...s.splitGroups, [region]: nextGroups };
+          const focusedId = { ...s.focusedId, [region]: key };
+          const recency = [key, ...s.recency.filter((r) => r !== key)].slice(0, 12);
+          return {
+            openPanelIds,
+            splitGroups,
+            focusedId,
+            recency,
+            mountedIds: computeMounted(s.panels, focusedId, openPanelIds, recency, splitGroups),
+          };
+        }),
+
+      /**
+       * Click a tab inside the split's LEFT group.
+       *
+       * It becomes the left pane's active tab and the split stays visible
+       * (VS Code: each editor group has its own active tab). The right
+       * pane's tab is never disturbed.
+       */
+      focusSplitTab: (region, key) =>
+        set((s) => {
+          const selected = s.openPanelIds[region];
+          if (!selected.includes(key)) return s;
+          const groups = s.splitGroups[region] ?? [];
+          let splitGroups = s.splitGroups;
+          if (groups.length >= 2) {
+            const gi = groupIndexContaining(groups, key);
+            if (gi !== -1) {
+              splitGroups = {
+                ...s.splitGroups,
+                [region]: groups.map((g, i) => (i === gi ? { ...g, active: key } : g)),
+              };
+            } else {
+              // A tab not yet assigned to a column: put it in the focused
+              // column and activate it there.
+              const focusIndex =
+                groupIndexContaining(groups, s.focusedId[region] ?? '') >= 0
+                  ? groupIndexContaining(groups, s.focusedId[region] ?? '')
+                  : 0;
+              splitGroups = {
+                ...s.splitGroups,
+                [region]: groups.map((g, i) =>
+                  i === focusIndex
+                    ? { ...g, tabs: [...g.tabs, key], active: key }
+                    : g,
+                ),
+              };
+            }
+          }
+          const focusedId = { ...s.focusedId, [region]: key };
+          const recency = [key, ...s.recency.filter((r) => r !== key)].slice(0, 12);
+          return {
+            splitGroups,
+            focusedId,
+            recency,
+            mountedIds: computeMounted(s.panels, focusedId, s.openPanelIds, recency, splitGroups),
+          };
+        }),
+
+      /** Open a fresh tab of `panelId` inside one editor group (its `+` menu). */
+      addTabToGroup: (region, groupId, panelId) =>
+        set((s) => {
+          const groups = s.splitGroups[region] ?? [];
+          const group = groups.find((g) => g.id === groupId);
+          const entry = s.panels.find((p) => p.id === panelId);
+          if (!group || !entry) return s;
+          const selected = s.openPanelIds[region];
+          const key = entry.multiInstance
+            ? tabKeyOf(panelId, newInstanceId())
+            : panelId;
+          if (selected.includes(key)) {
+            // A singleton already lives somewhere: focus it in place instead
+            // of pretending to open a second copy.
+            const splitGroups = {
+              ...s.splitGroups,
+              [region]: groups.map((g) =>
+                g.tabs.includes(key) ? { ...g, active: key } : g,
+              ),
+            };
+            const focusedId = { ...s.focusedId, [region]: key };
+            return {
+              splitGroups,
+              focusedId,
+              mountedIds: computeMounted(
+                s.panels,
+                focusedId,
+                s.openPanelIds,
+                s.recency,
+                splitGroups,
+              ),
+            };
+          }
+          const openPanelIds = { ...s.openPanelIds, [region]: [...selected, key] };
+          const splitGroups = {
+            ...s.splitGroups,
+            [region]: groups.map((g) =>
+              g.id === groupId ? { ...g, tabs: [...g.tabs, key], active: key } : g,
+            ),
+          };
+          const focusedId = { ...s.focusedId, [region]: key };
+          const recency = [key, ...s.recency.filter((r) => r !== key)].slice(0, 12);
+          return {
+            openPanelIds,
+            splitGroups,
+            focusedId,
+            recency,
+            mountedIds: computeMounted(s.panels, focusedId, openPanelIds, recency, splitGroups),
+          };
+        }),
+
+      /**
+       * Move a tab into another editor group (drag between group tab bars).
+       * Moving the last tab out of a group removes that group; when only one
+       * group remains the split collapses.
+       */
+      moveTabBetweenGroups: (region, key, targetGroupId, beforeKey) =>
+        set((s) => {
+          const groups = s.splitGroups[region] ?? [];
+          const sourceIdx = groupIndexContaining(groups, key);
+          const targetIdx = groups.findIndex((g) => g.id === targetGroupId);
+          if (sourceIdx === -1 || targetIdx === -1) return s;
+
+          const next = groups.map((g) => ({ ...g, tabs: [...g.tabs] }));
+          const source = next[sourceIdx];
+          const target = next[targetIdx];
+          source.tabs = source.tabs.filter((k) => k !== key);
+
+          if (sourceIdx !== targetIdx) {
+            const at = beforeKey ? target.tabs.indexOf(beforeKey) : -1;
+            if (at >= 0) target.tabs.splice(at, 0, key);
+            else target.tabs.push(key);
+            target.active = key;
+            if (source.tabs.length === 0) {
+              next.splice(sourceIdx, 1);
+            } else if (source.active === key) {
+              source.active = recentTab(s.recency, source.tabs);
+            }
+          } else {
+            const at = beforeKey ? target.tabs.indexOf(beforeKey) : -1;
+            if (at >= 0) target.tabs.splice(at, 0, key);
+            else target.tabs.push(key);
+            target.active = key;
+          }
+
+          const splitGroups = {
+            ...s.splitGroups,
+            [region]: next.length >= 2 ? next : [],
+          };
+          const focusedId = { ...s.focusedId, [region]: key };
+          const recency = [key, ...s.recency.filter((r) => r !== key)].slice(0, 12);
+          return {
+            splitGroups,
+            focusedId,
+            recency,
+            mountedIds: computeMounted(s.panels, focusedId, s.openPanelIds, recency, splitGroups),
+          };
+        }),
+
+      /** Collapse the split containing `key`; every tab stays open. */
+      unsplitTab: (region, key) =>
+        set((s) => {
+          const groups = s.splitGroups[region] ?? [];
+          if (!groups.some((g) => g.tabs.includes(key))) return s;
+          const splitGroups = { ...s.splitGroups, [region]: [] };
+          return {
+            splitGroups,
+            mountedIds: computeMounted(s.panels, s.focusedId, s.openPanelIds, s.recency, splitGroups),
+          };
+        }),
+
+      setGroupWeights: (region, weights) =>
+        set((s) => {
+          const groups = s.splitGroups[region] ?? [];
+          if (groups.length < 2 || weights.length !== groups.length) return s;
+          return {
+            splitGroups: {
+              ...s.splitGroups,
+              [region]: groups.map((g, i) => ({
+                ...g,
+                weight: Number.isFinite(weights[i]) && weights[i] > 0 ? weights[i] : 1,
+              })),
+            },
           };
         }),
 
@@ -715,12 +1197,24 @@ export const usePanelStore = create<PanelStoreState>()(
       setFocused: (region, key) =>
         set((s) => {
           if (!s.openPanelIds[region].includes(key)) return s;
+          const groups = s.splitGroups[region] ?? [];
+          let splitGroups = s.splitGroups;
+          if (groups.length >= 2) {
+            const gi = groupIndexContaining(groups, key);
+            if (gi !== -1) {
+              splitGroups = {
+                ...s.splitGroups,
+                [region]: groups.map((g, i) => (i === gi ? { ...g, active: key } : g)),
+              };
+            }
+          }
           const focusedId = { ...s.focusedId, [region]: key };
           const recency = [key, ...s.recency.filter((r) => r !== key)].slice(0, 12);
           return {
             focusedId,
+            splitGroups,
             recency,
-            mountedIds: computeMounted(s.panels, focusedId, s.openPanelIds, recency),
+            mountedIds: computeMounted(s.panels, focusedId, s.openPanelIds, recency, splitGroups),
           };
         }),
 
@@ -802,6 +1296,7 @@ export const usePanelStore = create<PanelStoreState>()(
           const sessionPanels = { ...s.sessionPanels };
           const params = { ...s.params };
           const tabTitles = { ...s.tabTitles };
+          const splitGroups = { ...s.splitGroups };
 
           // ── Stash: the outgoing conversation takes its slice with it. ──
           if (s.currentSessionId !== null) {
@@ -829,6 +1324,17 @@ export const usePanelStore = create<PanelStoreState>()(
                 stashFocused = s.focusedId[region];
               }
             }
+            // A split belongs to the conversation when every tab in every
+            // group does. Stash it and clear it from the outgoing column; the
+            // incoming conversation gets its own.
+            const groups = s.splitGroups.right ?? [];
+            const stashedGroups =
+              groups.length >= 2 &&
+              groups.every((g) => g.tabs.every((k) => stashSelected.includes(k)))
+                ? groups
+                : [];
+            if (stashedGroups.length >= 2) splitGroups.right = [];
+
             const prevStash = sessionPanels[s.currentSessionId];
             const mergedParams: SessionPanelState['params'] = { ...(prevStash?.params ?? {}) };
             for (const [k, v] of Object.entries(stashParams)) {
@@ -847,6 +1353,7 @@ export const usePanelStore = create<PanelStoreState>()(
               focused: stashFocused,
               params: mergedParams,
               titles: mergedTitles,
+              splitGroups: stashedGroups,
             };
           }
 
@@ -877,6 +1384,50 @@ export const usePanelStore = create<PanelStoreState>()(
               const p = s.panels.find((x) => x.id === panelIdOfTab(incomingFocused));
               focusedId[p?.region ?? 'right'] = incomingFocused;
             }
+            const incomingGroups = incoming.splitGroups ?? [];
+            if (incomingGroups.length >= 1) {
+              const valid = incomingGroups
+                .map((g) => {
+                  const tabs = g.tabs.filter((k) => openPanelIds.right.includes(k));
+                  return {
+                    ...g,
+                    tabs,
+                    active:
+                      g.active && tabs.includes(g.active)
+                        ? g.active
+                        : recentTab(s.recency, tabs),
+                  };
+                })
+                .filter((g) => g.tabs.length > 0);
+              splitGroups.right = valid.length >= 2 ? valid : [];
+            }
+          }
+
+          // Tabs that did not survive the swap must not linger.
+          const currentGroups = (splitGroups.right ?? [])
+            .map((g) => {
+              const tabs = g.tabs.filter((k) => openPanelIds.right.includes(k));
+              return {
+                ...g,
+                tabs,
+                active:
+                  g.active && tabs.includes(g.active)
+                    ? g.active
+                    : recentTab(s.recency, tabs),
+              };
+            })
+            .filter((g) => g.tabs.length > 0);
+          splitGroups.right = currentGroups.length >= 2 ? currentGroups : [];
+          if (splitGroups.right.length >= 2) {
+            const inGroup = splitGroups.right.some((g) =>
+              g.tabs.includes(focusedId.right ?? ''),
+            );
+            if (!inGroup) {
+              focusedId.right =
+                splitGroups.right.find((g) => g.active)?.active ??
+                splitGroups.right[0]?.active ??
+                focusedId.right;
+            }
           }
 
           // A tab bed always has an active tab when it has tabs. The stash can
@@ -903,7 +1454,8 @@ export const usePanelStore = create<PanelStoreState>()(
             focusedId,
             params,
             tabTitles,
-            mountedIds: computeMounted(s.panels, focusedId, openPanelIds, s.recency),
+            splitGroups,
+            mountedIds: computeMounted(s.panels, focusedId, openPanelIds, s.recency, splitGroups),
           };
         }),
 
@@ -935,7 +1487,7 @@ export const usePanelStore = create<PanelStoreState>()(
     }),
     {
       name: 'pi-panel-storage',
-      version: 11,
+      version: 14,
       // Installed-panel order → workspace key, open tabs → window key: see panelStorage.
       storage: createJSONStorage(() => panelStorage),
       partialize: (state) => ({
@@ -947,12 +1499,14 @@ export const usePanelStore = create<PanelStoreState>()(
         currentSessionId: state.currentSessionId,
         sessionPanels: state.sessionPanels,
         sessionOrder: state.sessionOrder,
+        splitGroups: state.splitGroups,
       }),
       migrate: (persisted, version) => {
         // v10 drops pane widths and the zoom: the right column is a tab strip
         // now, and the layout's own toggles give the panel the full width.
         // v11 adds per-tab params/titles so a multi-instance tab reopens on
-        // the same file/page after a restart.
+        // the same file/page after a restart. v12 adds a right-column split;
+        // v13 generalises it to N panes; v14 turns panes into editor groups.
         const p = (persisted ?? {}) as {
           panelOrder?: Record<PanelRegion, string[]>;
           openPanelIds?: Record<PanelRegion, string[]>;
@@ -962,6 +1516,11 @@ export const usePanelStore = create<PanelStoreState>()(
           currentSessionId?: string | null;
           sessionPanels?: Record<string, SessionPanelState>;
           sessionOrder?: string[];
+          splitGroups?: Record<PanelRegion, EditorGroup[]>;
+          splitPanes?: Record<PanelRegion, string[]>;
+          splitWeights?: Record<PanelRegion, number[]>;
+          splitPair?: Record<PanelRegion, { left: string; right: string } | null>;
+          splitRatio?: Record<PanelRegion, number>;
         };
         const DEVDOCS_PANEL = 'plugin:com.pi.devdocs:docs';
         const order = p.panelOrder ?? { left: [], right: [] };
@@ -978,6 +1537,67 @@ export const usePanelStore = create<PanelStoreState>()(
         if (version < 9) {
           return { panelOrder: order } as never;
         }
+
+        const groupsFromPanes = (
+          panes: string[] | undefined,
+          weights: number[] | undefined,
+          legacyPair: { left: string; right: string } | null | undefined,
+          legacyRatio: number | undefined,
+        ): EditorGroup[] => {
+          let list = Array.isArray(panes) ? panes : [];
+          if (list.length < 2 && legacyPair) list = [legacyPair.left, legacyPair.right];
+          if (list.length < 2) return [];
+          const w = Array.isArray(weights)
+            ? weights
+            : typeof legacyRatio === 'number'
+              ? [legacyRatio, 1 - legacyRatio]
+              : undefined;
+          const normalized = normalizeWeights(list.length, w);
+          return list.map((key, i) => makeGroup([key], key, normalized[i]));
+        };
+
+        const splitGroups: Record<PanelRegion, EditorGroup[]> = { left: [], right: [] };
+        for (const region of ['left', 'right'] as PanelRegion[]) {
+          const existing = p.splitGroups?.[region];
+          if (Array.isArray(existing) && existing.length >= 2) {
+            const groups = existing
+              .filter((g) => Array.isArray(g.tabs) && g.tabs.length > 0)
+              .map((g) => ({
+                id: typeof g.id === 'string' && g.id ? g.id : newGroupId(),
+                tabs: g.tabs.filter((k): k is string => typeof k === 'string'),
+                active:
+                  typeof g.active === 'string' && g.tabs.includes(g.active)
+                    ? g.active
+                    : ((g.tabs.find((k): k is string => typeof k === 'string') as string) ?? null),
+                weight: Number.isFinite(g.weight) && g.weight > 0 ? g.weight : 1,
+              }));
+            if (groups.length >= 2) splitGroups[region] = groups;
+          } else {
+            splitGroups[region] = groupsFromPanes(
+              p.splitPanes?.[region],
+              p.splitWeights?.[region],
+              p.splitPair?.[region],
+              p.splitRatio?.[region],
+            );
+          }
+        }
+
+        const sessionPanels = p.sessionPanels ?? {};
+        for (const st of Object.values(sessionPanels)) {
+          if (!st.splitGroups) {
+            const legacy = st as unknown as {
+              splitPanes?: string[];
+              splitPair?: { left: string; right: string } | null;
+            };
+            st.splitGroups = groupsFromPanes(
+              legacy.splitPanes,
+              undefined,
+              legacy.splitPair,
+              undefined,
+            );
+          }
+        }
+
         return {
           panelOrder: order,
           openPanelIds: p.openPanelIds ?? { left: [], right: [] },
@@ -985,8 +1605,9 @@ export const usePanelStore = create<PanelStoreState>()(
           params: p.params ?? {},
           tabTitles: p.tabTitles ?? {},
           currentSessionId: p.currentSessionId ?? null,
-          sessionPanels: p.sessionPanels ?? {},
+          sessionPanels,
           sessionOrder: p.sessionOrder ?? [],
+          splitGroups,
         } as never;
       },
     },
@@ -1049,6 +1670,11 @@ export interface PanelStoreState {
    * trail in registry order; unknown ids are pruned by reconcile. Persisted.
    */
   panelOrder: Record<PanelRegion, string[]>;
+  /**
+   * The right column's editor groups when split. Empty means the single-view
+   * tab strip; fewer than two groups is also treated as no split.
+   */
+  splitGroups: Record<PanelRegion, EditorGroup[]>;
   /** The conversation whose session tabs currently sit in `openPanelIds`. */
   currentSessionId: string | null;
   /** Per-conversation session-tab state, most recently entered tracked in `sessionOrder`. */
@@ -1088,6 +1714,27 @@ export interface PanelStoreState {
   ) => void;
   /** Close a tab (it leaves the strip; active falls to a neighbour). */
   closeTab: (region: PanelRegion, key: string) => void;
+  /**
+   * Show `key` side by side with a second tab of the same multi-instance
+   * panel (an existing empty tab, else a new instance). No-op for panels that
+   * cannot have several tabs, and for the left region.
+   */
+  splitTab: (region: PanelRegion, key: string) => void;
+  /** Open a fresh tab of `panelId` inside one editor group (its `+`). */
+  addTabToGroup: (region: PanelRegion, groupId: string, panelId: string) => void;
+  /** Move a tab into another group (drag between group tab bars). */
+  moveTabBetweenGroups: (
+    region: PanelRegion,
+    key: string,
+    targetGroupId: string,
+    beforeKey?: string,
+  ) => void;
+  /** Activate a tab within its group (or assign it to the focused group). */
+  focusSplitTab: (region: PanelRegion, key: string) => void;
+  /** Collapse the split containing `key`; every tab stays open. */
+  unsplitTab: (region: PanelRegion, key: string) => void;
+  /** Replace the groups' relative widths (same length as `splitGroups`). */
+  setGroupWeights: (region: PanelRegion, weights: number[]) => void;
   /** Drag-reorder the open tabs. */
   setTabOrder: (region: PanelRegion, keys: string[]) => void;
   /** The user's arrangement of the installed-panel list (left rail / picker). */

@@ -1,6 +1,9 @@
-import { contextBridge, ipcRenderer } from 'electron';
+import { contextBridge, ipcRenderer, webUtils } from 'electron';
 import type {
   BuiltinModelId,
+  ImportFilesResult,
+  SaveAttachmentInput,
+  SavedAttachment,
   VoiceBuiltinModel,
   VoiceCapability,
   VoiceModelProgress,
@@ -95,6 +98,19 @@ export interface ElectronAPI {
     listDir: (path: string) => Promise<DirEntry[]>;
     delete: (path: string) => Promise<{ success: boolean }>;
     rename: (oldPath: string, newPath: string) => Promise<{ success: boolean; path: string }>;
+    /**
+     * Absolute path of a `File` from an OS drop. Electron 32 removed
+     * `File.path`; this is the supported replacement and must run in the
+     * preload. JavaScript-constructed files yield '' — callers filter those.
+     */
+    pathForFile: (file: File) => string;
+    /** Copy OS-dropped paths into this window's workspace root. */
+    importFiles: (sources: string[]) => Promise<ImportFilesResult>;
+    /**
+     * Copy a composer attachment into the workspace
+     * (`.piwork/attachments/`), returning the path the chat and the model use.
+     */
+    saveAttachment: (input: SaveAttachmentInput) => Promise<SavedAttachment>;
   };
 
   // ── Shell ──
@@ -222,6 +238,9 @@ const electronAPI: ElectronAPI = {
     listDir: (p) => ipcRenderer.invoke('pi:fs:listDir', p),
     delete: (p) => ipcRenderer.invoke('pi:fs:delete', p),
     rename: (oldPath, newPath) => ipcRenderer.invoke('pi:fs:rename', oldPath, newPath),
+    pathForFile: (file) => webUtils.getPathForFile(file),
+    importFiles: (sources) => ipcRenderer.invoke('pi:fs:importFiles', sources),
+    saveAttachment: (input) => ipcRenderer.invoke('pi:fs:saveAttachment', input),
   },
 
   shell: {
@@ -347,6 +366,14 @@ const pluginBridge = (() => {
     setSetting: (pluginId: string, key: string, value: unknown): Promise<{ ok: boolean; error?: string }> =>
       ipcRenderer.invoke('pi:plugin:set-setting', { pluginId, key, value }),
     listTools: (): Promise<unknown[]> => ipcRenderer.invoke('pi:plugin:list-tools'),
+    messages: {
+      muted: (): Promise<string[]> => ipcRenderer.invoke('pi:plugin:messages:muted'),
+      setMuted: (
+        pluginId: string,
+        muted: boolean,
+      ): Promise<{ ok: boolean; muted?: string[]; error?: string }> =>
+        ipcRenderer.invoke('pi:plugin:messages:set-muted', { pluginId, muted }),
+    },
     executeTool: (pluginId: string, name: string, params?: Record<string, unknown>): Promise<{ ok: boolean; content?: unknown[]; details?: unknown; error?: string }> =>
       ipcRenderer.invoke('pi:plugin:execute-tool', { pluginId, name, params }),
     send: (pluginId: string, payload: unknown): void => {

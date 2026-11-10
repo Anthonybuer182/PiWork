@@ -24,9 +24,23 @@ export const EN_MESSAGES = {
   浅色: 'Light',
   深色: 'Dark',
   跟随系统: 'System',
-  '外观和语言保存在本机。': 'Appearance and language are stored on this device.',
+  '外观、语言和网络设置保存在本机。':
+    'Appearance, language and network settings are stored on this device.',
   '改动即时保存，关掉不丢。': 'Changes save as you make them.',
   未知错误: 'Unknown error',
+
+  // ── Network proxy (Settings → 通用) ──
+  网络代理: 'Network proxy',
+  直接连接: 'Direct connection',
+  手动配置: 'Manual',
+  '所有请求直接发出，不走代理。': 'Every request goes out directly, without a proxy.',
+  '所有请求都走这个代理。支持 http、https 和 socks5，改完立即生效。':
+    'Every request goes through this proxy. http, https and socks5 are supported; applies immediately.',
+  '跟随系统：{proxy}': 'Following the system: {proxy}',
+  '跟随系统：系统当前没有设置代理。': 'Following the system: no proxy is configured.',
+  代理地址: 'Proxy address',
+  '填好后按回车或点别处保存；也可以写 socks5://主机:端口。':
+    'Press Enter or click away to save. socks5://host:port works too.',
 
   // ── Model settings ──
   '服务商与模型 · ~/.pi/agent/models.json': 'Providers and models · ~/.pi/agent/models.json',
@@ -145,6 +159,15 @@ export const EN_MESSAGES = {
   放大窗格: 'Maximise pane',
   '放大占满（其他窗格收成侧条）': 'Fill the window (other panes collapse to a strip)',
   向右拆分: 'Split right',
+  取消拆分: 'Unsplit',
+  关闭其他: 'Close others',
+  拖动调整分屏比例: 'Drag to resize the split',
+  左侧窗格标签: 'Left pane tabs',
+  右侧窗格标签: 'Right pane tabs',
+  窗格标签: 'Pane tabs',
+  '点击 + 在此栏打开标签': 'Click + to open a tab in this column',
+  关闭该栏: 'Close this column',
+  在此栏打开新标签: 'Open a new tab in this column',
   '跟会话走的面板（切换会话时随会话切换）': 'Follow the session (this panel changes when you switch sessions)',
   '收起 {title}': 'Collapse {title}',
   '关闭 {title}': 'Close {title}',
@@ -169,6 +192,12 @@ export const EN_MESSAGES = {
   重命名会话: 'Rename session',
   会话列表: 'Session list',
   新建会话: 'New session',
+  正在运行: 'Running',
+  等待你的操作: 'Waiting for you',
+  '权限模式（全局，重启后恢复默认）': 'Permission mode (global; resets on restart)',
+  '后台会话需要审批：{summary}': 'A background session needs approval: {summary}',
+  后台会话有一个问题在等你: 'A background session has a question for you',
+  后台会话已完成: 'A background session finished',
   重命名: 'Rename',
   搜索会话: 'Search sessions',
   '搜索会话...': 'Search sessions…',
@@ -191,10 +220,7 @@ export const EN_MESSAGES = {
   高危操作逐条批准: 'Approve high-risk actions one by one',
   完全访问: 'Full access',
   '不拦截，仅记录审计日志': 'Do not block; only write an audit log',
-  '会话创建后可设置权限模式': 'Permission mode can be changed after the session starts',
-  '权限模式（新会话沿用上次选择，重启后恢复默认）':
-    'Permission mode (new sessions keep the last choice; resets on restart)',
-  当前: 'Current',
+ 当前: 'Current',
   正在加载: 'loading',
 
   // ── Plugins ──
@@ -230,6 +256,7 @@ export const EN_MESSAGES = {
   '市场结果({count})': 'Market results ({count})',
   '市场可用({count})': 'Available ({count})',
   '插件设置({count})': 'Plugin settings ({count})',
+  '在会话里显示插件消息': 'Show plugin messages in conversations',
   '已安装({count})': 'Installed ({count})',
   '可更新({from} → {to})': 'Update available ({from} → {to})',
   '回到 v{version}': 'Back to v{version}',
@@ -301,8 +328,8 @@ export const EN_MESSAGES = {
   '{group} · {count} 个 · {chars} 字符': '{group} · {count} · {chars} chars',
   '# 全局指令\n\n': '# Global instructions\n\n',
   '已删除。{note}': 'Deleted. {note}',
-  '{path}\n\n删掉之后，它替换或追加的内容会立即从系统提示词里消失，恢复成没有这个文件时的样子。':
-    '{path}\n\nOnce deleted, whatever it replaces or appends disappears from the system prompt immediately, restoring the state before the file existed.',
+  '{path}\n\n删掉之后，它注入的内容会立即从系统提示词里消失，恢复成没有这个文件时的样子。':
+    '{path}\n\nOnce deleted, whatever it injects disappears from the system prompt immediately, restoring the state before the file existed.',
   '{action}被拒绝：这个文件在你打开之后被外部改过，宿主拒绝写入以免覆盖别人刚做的修改。请先取消、重新打开拿到最新内容。\n（宿主的说明：{error}）':
     '{action} was refused: the file was changed outside the app after you opened it, so the host will not write over someone else’s edit. Cancel and reopen to get the latest content.\n(host message: {error})',
   '已保存并生效，下一条消息就会带上新内容。':
@@ -348,6 +375,28 @@ export const EN_MESSAGES = {
   '已复制到剪贴板。': 'Copied to the clipboard.',
   '{label}已复制到剪贴板。': '{label} copied to the clipboard.',
   '复制失败：当前环境不允许访问剪贴板。': 'Copy failed: this environment does not allow clipboard access.',
+
+  // ── Context settings (Settings → 上下文) ──
+  全局上下文: 'Global context',
+  '读取全局上下文失败': 'Could not read the global context',
+  '这些文件对所有工作区生效。工作区里的 .pi/SYSTEM.md 和 .pi/APPEND_SYSTEM.md 会遮住这里的同名文件；AGENTS.md 不会遮住，而是叠加。':
+    'These files apply to every workspace. A workspace .pi/SYSTEM.md or .pi/APPEND_SYSTEM.md shadows the copy here; AGENTS.md does not shadow — it is added on top.',
+  '写入后会完全替换 SDK 内置的系统提示词。除非你自己把工具用法和行为说明写进去，否则 agent 会失去这些能力。':
+    'Writing this replaces the SDK’s built-in system prompt entirely. Unless you include the tool usage and behaviour guidance yourself, the agent loses those abilities.',
+  '当前工作区有自己的 .pi/SYSTEM.md，这里的全局文件不会生效。':
+    'This workspace has its own .pi/SYSTEM.md, so the global file here has no effect.',
+  '当前工作区有自己的 .pi/APPEND_SYSTEM.md，这里的全局文件不会生效。':
+    'This workspace has its own .pi/APPEND_SYSTEM.md, so the global file here has no effect.',
+  '会叠加到每个工作区的上下文里，和工作区及上级目录的 AGENTS.md 一起注入。':
+    'Added to every workspace’s context, together with the AGENTS.md files from the workspace and its parent directories.',
+  '同目录下还有 {paths}。SDK 按 AGENTS.md → CLAUDE.md 的顺序只读取第一个，这些文件不会被读取。':
+    'Also in this directory: {paths}. The SDK reads only the first match in the order AGENTS.md → CLAUDE.md, so these files are not read.',
+  '创建后写入全局，对所有工作区生效。': 'Created globally; applies to every workspace.',
+  '当前工作区注入的 AGENTS.md': 'AGENTS.md injected into this workspace',
+  '这些文件会全部叠加进上下文，按全局 → 上级目录 → 工作区的顺序排列。':
+    'All of these are added to the context, ordered global → parent directories → workspace.',
+  '{n} 个': '{n}',
+  '以当前提示词为起点创建': 'Create from the current prompt',
   '重新读取': 'Reload',
   '需要一次对话后才能读取完整提示词': 'Send one message before the full prompt can be read',
   完整系统提示词: 'Full system prompt',
@@ -491,6 +540,7 @@ export const EN_MESSAGES = {
   '正在加载文件…': 'Loading files…',
   加载文件失败: 'Failed to load files',
   没有找到文件: 'No files found',
+  工作区目录不存在: 'Workspace folder not found',
   '删除文件「{name}」？': 'Delete file “{name}”?',
   '删除文件夹「{name}」？': 'Delete folder “{name}”?',
   '删除后无法恢复。': 'This cannot be undone.',
@@ -499,6 +549,16 @@ export const EN_MESSAGES = {
   '已删除「{name}」': 'Deleted “{name}”',
   '删除失败：{message}': 'Failed to delete: {message}',
   '删除 {name}': 'Delete {name}',
+  '松开以导入到工作区': 'Drop to import into the workspace',
+  '正在导入…': 'Importing…',
+  '已导入 {count} 项': 'Imported {count} item(s)',
+  '已导入 {count} 项，跳过 {skipped} 项': 'Imported {count}, skipped {skipped}',
+  '没有可导入的文件': 'No importable files',
+  '导入失败：{message}': 'Import failed: {message}',
+  '仅桌面端支持导入文件': 'Importing files is only available in the desktop app',
+  '无法获取拖入文件的路径': 'Could not read the dropped file paths',
+  '没有可打开的文件': 'No openable files',
+  '松开以在右栏打开': 'Drop to open in the right panel',
   侧栏: 'Sidebar',
   拖动调整预览面板宽度: 'Resize preview panel',
   拖动调整侧栏宽度: 'Resize sidebar',
@@ -550,6 +610,7 @@ export const EN_MESSAGES = {
   任务清单: 'Task list',
   暂无任务: 'No tasks yet',
   等待回答: 'Waiting for an answer',
+  提问: 'Question',
   '第 {current}/{total} 题': 'Question {current} of {total}',
   '跳到第 {current} 题': 'Go to question {current}',
   '输入其他答案…': 'Type another answer…',
@@ -712,6 +773,147 @@ export const EN_MESSAGES = {
   'Kokoro 中文音色建议 48–52；MeloTTS 仅 0': 'Kokoro Chinese voices: try 48–52; MeloTTS only has voice 0',
   'Kokoro 中文音色建议 48–52，英文可试 0；MeloTTS 仅 0': 'Kokoro: Chinese voices 48–52, English try voice 0; MeloTTS only has voice 0',
   'JSON 中的 hex': 'hex string in JSON',
+
+  // ── Storage settings (Settings → 存储) ──
+  存储: 'Storage',
+  数据位置: 'Data location',
+  '会话记录、配置、插件和技能都放在这个文件夹里。换到更大的磁盘时，数据会跟着走。':
+    'Conversations, configuration, plugins and skills all live in this folder. Move it to a bigger disk and the data goes with it.',
+  '更改位置…': 'Change location…',
+  '选择中…': 'Choosing…',
+  '复制中…': 'Copying…',
+  '恢复默认': 'Use default',
+  '恢复中…': 'Restoring…',
+  '打开文件夹': 'Open folder',
+  '换位置时复制现有数据': 'Copy the current data to the new location',
+  '打开时会把当前文件夹里的内容复制到新位置；关掉则从空文件夹开始。目标文件夹里已经有数据时不会被覆盖，而是直接使用。':
+    'On copies everything from the current folder into the new one; off starts empty. A target that already holds data is used as-is — nothing is overwritten.',
+  '选择数据存放位置': 'Choose where to store data',
+  选择: 'Choose',
+  '已改为 {path}。这个文件夹里已经有数据，会直接使用其中的内容；重启后生效。':
+    'Changed to {path}. That folder already holds data, so it will be used as-is; takes effect after a restart.',
+  '已把 {n} 个文件复制到 {path}；重启后生效。':
+    'Copied {n} files to {path}; takes effect after a restart.',
+  '已改为 {path}，新位置是空的；重启后生效。':
+    'Changed to {path}. The new location is empty; takes effect after a restart.',
+  '已恢复到默认位置 {path}。默认位置已有数据，没有覆盖；重启后生效。':
+    'Restored the default location {path}. The default already holds data, so nothing was overwritten; takes effect after a restart.',
+  '已恢复到默认位置 {path}；重启后生效。':
+    'Restored the default location {path}; takes effect after a restart.',
+  '已恢复默认位置，当前就在使用默认位置。':
+    'Restored the default location — it is already the one in use.',
+  '新位置 {path} 会在重启后生效，现在仍在使用上面的位置。':
+    'The new location {path} takes effect after a restart; the location above is still in use.',
+  '改动会在重启后生效。': 'The change takes effect after a restart.',
+  立即重启: 'Restart now',
+  占用空间: 'Space used',
+  '共 {size}': '{size} in total',
+  '{n} 个文件': '{n} files',
+  '点一行在文件管理器中打开。大小包含文件夹里的全部内容，符号链接不计入。':
+    'Click a row to open it in your file manager. Sizes cover everything in the folder; symbolic links are not counted.',
+  会话记录: 'Conversations',
+  '所有对话的完整记录，包括分支和回退过的内容。':
+    'The complete record of every conversation, including branches and rewound content.',
+  '已安装插件的代码和它们自己的依赖。':
+    'Installed plugin code and the dependencies they bring along.',
+  技能与扩展: 'Skills & extensions',
+  '全局技能、扩展和自定义 agent。': 'Global skills, extensions and custom agents.',
+  运行时依赖: 'Runtime dependencies',
+  '插件用的 npm 包，以及 fd、rg 等内置命令行工具。':
+    'npm packages used by plugins, plus bundled command-line tools such as fd and rg.',
+  其他数据: 'Other data',
+  '全局配置、提示词、模型列表和模型凭据等小文件。':
+    'Small files: global configuration, prompts, the model list and credentials.',
+  应用数据: 'App data',
+  '窗口布局、语音模型、权限审计和 Chromium 缓存。':
+    'Window layout, voice models, the permission audit and Chromium caches.',
+  读取存储信息失败: 'Could not read storage information',
+  // ── MCP (Settings → MCP) ──
+  MCP: 'MCP',
+  'MCP 服务器': 'MCP servers',
+  'MCP 仅在桌面应用中可用。': 'MCP is only available in the desktop app.',
+  '接入 Model Context Protocol 服务器。工具不会常驻提示词——模型需要时通过搜索发现，避免多服务器撑爆上下文。':
+    'Connect Model Context Protocol servers. Their tools are not kept in the prompt — the model discovers them on demand, so many servers do not crowd out the context.',
+  '本项目': 'This project',
+  '添加服务器': 'Add server',
+  '添加 MCP 服务器': 'Add MCP server',
+  '编辑 MCP 服务器': 'Edit MCP server',
+  '传输方式': 'Transport',
+  '本地命令 (stdio)': 'Local command (stdio)',
+  '远程服务 (HTTP)': 'Remote server (HTTP)',
+  '命令': 'Command',
+  '参数（每行一个）': 'Arguments (one per line)',
+  '环境变量（每行 KEY=value）': 'Environment (KEY=value per line)',
+  '环境变量格式应为 KEY=value，每行一条': 'Each environment line must look like KEY=value',
+  '工作目录（可选）': 'Working directory (optional)',
+  '地址': 'URL',
+  '请求头（每行 Name: value）': 'Headers (Name: value per line)',
+  '请求头格式应为 Name: value，每行一条': 'Each header line must look like Name: value',
+  '说明（可选）': 'Description (optional)',
+  '一句话描述这个服务器提供什么': 'One line about what this server offers',
+  '超时（秒）': 'Timeout (seconds)',
+  '按需加载工具': 'Load tools on demand',
+  '测试连接': 'Test connection',
+  '连接成功：协议 {version}，发现 {count} 个工具': 'Connected: protocol {version}, {count} tools',
+  '连接失败：{message}': 'Connection failed: {message}',
+  '连接失败': 'Connection failed',
+  '{name} 连接成功：协议 {version}，{count} 个工具': '{name} connected: protocol {version}, {count} tools',
+  '{name} 连接失败：{message}': '{name} failed: {message}',
+  '可用 · {count} 个工具': 'Ready · {count} tools',
+  '这个命令会在本机执行，并继承 PiWork 的环境变量（包括 API Key）。只添加你信任的服务器。':
+    "This command runs on your machine and inherits PiWork's environment, including API keys. Only add servers you trust.",
+  '此配置写入全局 mcp.json，与 pi 命令行共享。': 'Saved to the global mcp.json, shared with the pi CLI.',
+  '此配置写入当前工作区的 .pi/mcp.json，只在本工作区生效。':
+    "Saved to this workspace's .pi/mcp.json; it applies only here.",
+  '允许本项目运行 MCP 服务器': 'Allow this project to run MCP servers',
+  '项目里的 .pi/mcp.json 可以执行本机命令。只在你信任这个仓库时开启。':
+    "A project's .pi/mcp.json can run local commands. Turn this on only for repositories you trust.",
+  '配置文件有问题': 'Problems in the config file',
+  '还没有配置 MCP 服务器。添加一个，或在 pi 命令行里用 mcp add 添加，两边共享同一份配置。':
+    'No MCP servers yet. Add one here, or with "mcp add" in the pi CLI — both share the same file.',
+  '这个工作区还没有项目级的 MCP 服务器。': 'This workspace has no project-scoped MCP servers.',
+  '项目覆盖': 'Project override',
+  '删除 MCP 服务器？': 'Delete MCP server?',
+  '将从配置文件中移除 {name}，已打开会话中的工具会在下一条消息后失效。':
+    'Removes {name} from the config file. Tools in open sessions stop working after the next message.',
+  // ── 关于 (Settings → About) ──
+  关于: 'About',
+  '基于 Electron 和 React 的 AI 编程助手。':
+    'An AI coding assistant built with Electron and React.',
+  'GitHub 仓库': 'GitHub repository',
+  发布说明: 'Release notes',
+  报告问题: 'Report a bug',
+  功能建议: 'Suggest a feature',
+  软件更新: 'Software update',
+  '正在检查更新…': 'Checking for updates…',
+  '检查更新失败：{message}': 'Could not check for updates: {message}',
+  '发现新版本 {version}。': 'Version {version} is available.',
+  '已是最新版本。': "You're on the latest version.",
+  '正在检查…': 'Checking…',
+  检查更新: 'Check for updates',
+  '当前版本 {version}': 'Current {version}',
+  '已下载 {name}。': 'Downloaded {name}.',
+  '下载完成后退出并安装，装好后重新打开应用即可。':
+    'Quit and install once the download finishes; reopen the app for the new version.',
+  '下载完成后打开安装包，按提示更新并重新启动应用。':
+    'Open the installer after the download and follow its prompts, then restart the app.',
+  '这个版本没有提供适合当前平台的安装包，请到发布页面手动下载。':
+    'This release has no package for this platform — download it from the release page.',
+  '下载更新（{size}）': 'Download ({size})',
+  下载更新: 'Download update',
+  退出并安装: 'Quit and install',
+  '退出并安装？': 'Quit and install?',
+  '安装前会先退出 PiWork，正在运行的任务会中断。装好后重新打开应用即可。':
+    'PiWork quits first, which interrupts anything running. Reopen the app after installing.',
+  '正在退出并安装…': 'Quitting and installing…',
+  打开安装包: 'Open installer',
+  在文件夹中显示: 'Show in folder',
+  '正在下载 {name}…': 'Downloading {name}…',
+  更新内容: "What's new",
+  '在 GitHub 上查看': 'View on GitHub',
+  '发布于 {date}': 'Published {date}',
+  '更新包会下载到本机的下载文件夹，安装前需要退出 PiWork。':
+    'The installer downloads to your Downloads folder; PiWork quits before installing it.',
   // ---- END ----
 } as const;
 

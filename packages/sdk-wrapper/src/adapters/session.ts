@@ -1,5 +1,5 @@
-import type { Session, SessionWithMessages, Message, ContentBlock, AssistantMessage, SessionTreeNode, SessionTreeResult, TreeNodeToolCall, ToolCallBlock, ToolResultBlock } from '@pi/types';
-import { SKILL_REFERENCE_MARKER } from '@pi/types';
+import type { Session, SessionWithMessages, Message, ContentBlock, AssistantMessage, SessionTreeNode, SessionTreeResult, TreeNodeToolCall, ToolCallBlock, ToolResultBlock, TokenUsage, PluginMessage, PluginMessageData } from '@pi/types';
+import { PLUGIN_MESSAGE_CUSTOM_TYPE, SKILL_REFERENCE_MARKER } from '@pi/types';
 import type { SessionService } from '../services/session.js';
 import {
   SessionManager,
@@ -23,7 +23,15 @@ function titleFromText(text: string): string | undefined {
   const withoutRefs = marker >= 0 ? text.slice(0, marker) : text;
   for (const line of withoutRefs.split('\n')) {
     const trimmed = line.trim();
-    if (trimmed) return trimmed.slice(0, 60);
+    if (!trimmed) continue;
+    // Attachment-only sends title themselves by file name. The saved path
+    // after `->` is plumbing for the reader, never something a list row
+    // should show.
+    const nameOnly = trimmed.replace(
+      /^\[Attached:\s*(.+?)\s*\([^)]*\)(?:\s*-\s*could not decode)?\]\s*->.*$/,
+      '$1',
+    );
+    return nameOnly.slice(0, 60);
   }
   return undefined;
 }
@@ -88,23 +96,39 @@ type AgentMessage = SessionMessageEntry['message'];
  * Composer appends two kinds of sections:
  *  - Text files:   `File: <name>\n```<ext>\n...\n````\n`
  *  - Binary/error: `[Attached: <name> (<type>)]` or `[Attached: <name> (<type>) - could not decode]`
+ *
+ * Newer sends also append ` -> <workspace-relative path>`: outside files are
+ * copied under `.piwork/attachments/`, files already in the workspace are
+ * referenced in place. That path is what makes the card previewable after a
+ * reload and lets the model open the attachment directly.
  */
 function stripAttachmentSections(text: string, cwd?: string): { content: string; files: Array<{ fileName: string; fileSize?: number; workspacePath?: string }> } {
   const files: Array<{ fileName: string; fileSize?: number; workspacePath?: string }> = [];
   let content = text;
 
-  const recordFile = (name: string) => {
+  const recordFile = (name: string, savedPath?: string) => {
     const fileName = String(name).trim();
     const entry: { fileName: string; fileSize?: number; workspacePath?: string } = { fileName };
-    // Try to resolve the file on disk relative to cwd
+    // Try to resolve the file on disk. The saved-path hint wins (it is what
+    // the composer wrote); older messages only carry the file name, so fall
+    // back to the attachment folder and then to the workspace root.
+    const candidates: string[] = [];
+    if (cwd && savedPath) {
+      const hinted = String(savedPath).trim();
+      candidates.push(path.isAbsolute(hinted) ? hinted : path.resolve(cwd, hinted));
+    }
     if (cwd) {
-      const candidate = path.resolve(cwd, fileName);
+      candidates.push(path.resolve(cwd, '.piwork', 'attachments', fileName));
+      candidates.push(path.resolve(cwd, fileName));
+    }
+    for (const candidate of candidates) {
       try {
         if (existsSync(candidate)) {
           const stat = statSync(candidate);
           if (stat.isFile()) {
             entry.fileSize = stat.size;
             entry.workspacePath = candidate;
+            break;
           }
         }
       } catch { /* file may not exist or not be accessible */ }
@@ -112,20 +136,21 @@ function stripAttachmentSections(text: string, cwd?: string): { content: string;
     files.push(entry);
   };
 
-  // Text-file sections: `File: <name>\n```...``` `
+  // Text-file sections: `File: <name>\n```...``` ` (optionally followed by
+  // ` -> <saved path>` on the closing-fence line).
   content = content.replace(
-    /\n*File:\s*(.+?)\n```[\w]*\n[\s\S]*?```/g,
-    (_m, name) => {
-      recordFile(name);
+    /\n*File:\s*(.+?)\n```[\w]*\n[\s\S]*?```(?:\s*->\s*([^\n]+))?/g,
+    (_m, name, savedPath) => {
+      recordFile(name, savedPath);
       return '';
     },
   );
 
   // Binary/error placeholders: `[Attached: <name> (<type>)]`
   content = content.replace(
-    /\n*\[Attached:\s*(.+?)\s*\([^)]*\)(?:\s*-\s*could not decode)?\]/g,
-    (_m, name) => {
-      recordFile(name);
+    /\n*\[Attached:\s*(.+?)\s*\([^)]*\)(?:\s*-\s*could not decode)?\](?:\s*->\s*([^\n]+))?/g,
+    (_m, name, savedPath) => {
+      recordFile(name, savedPath);
       return '';
     },
   );
@@ -284,7 +309,7 @@ function stripQuoteSections(text: string, cwd?: string): {
   return { content: content.trim(), quotes };
 }
 
-function agentMessageToBlocks(msg: any, cwd?: string): ContentBlock[] {
+export function agentMessageToBlocks(msg: any, cwd?: string): ContentBlock[] {
   const blocks: ContentBlock[] = [];
 
   if (msg.role === 'user') {
@@ -426,6 +451,12 @@ function agentMessageToBlocks(msg: any, cwd?: string): ContentBlock[] {
     }
   } else if (msg.role === 'toolResult' || msg.role === 'tool_result') {
     const content = extractTextFromContent(msg.content);
+    // The result carries the tool name and, for plugins with a
+    // messageRenderer, the declarative card tree in `details.card`. Both are
+    // persisted, so a reopened conversation must render the same card it
+    // rendered while streaming — without them the card degrades to a bare
+    // header row and its buttons lose their plugin.
+    const card = msg.details?.card;
     blocks.push({
       id: `b-tr-${msg.timestamp || Date.now()}`,
       type: 'tool_result',
@@ -433,6 +464,8 @@ function agentMessageToBlocks(msg: any, cwd?: string): ContentBlock[] {
       toolCallId: msg.toolCallId || 'unknown',
       result: content,
       isError: msg.isError,
+      ...(msg.toolName ? { toolName: msg.toolName } : {}),
+      ...(card ? { card } : {}),
     });
   } else if (msg.role === 'bashExecution') {
     blocks.push({
@@ -458,6 +491,51 @@ function agentMessageToBlocks(msg: any, cwd?: string): ContentBlock[] {
 }
 
 // === Conversion: AgentMessage → our Message type ===
+
+/**
+ * Map the SDK's `Usage` onto our `TokenUsage`.
+ *
+ * `totalTokens` from the SDK already includes cached prompt tokens. The old
+ * fallback (`input + output`) did not, so any payload without an explicit
+ * total under-reported a cache-heavy turn by an order of magnitude.
+ */
+function sdkUsageToTokenUsage(usage: any): TokenUsage | undefined {
+  if (!usage) return undefined;
+  const input = usage.input ?? usage.inputTokens ?? 0;
+  const output = usage.output ?? usage.outputTokens ?? 0;
+  const cacheRead = usage.cacheRead ?? usage.cacheReadTokens ?? 0;
+  const cacheWrite = usage.cacheWrite ?? usage.cacheWriteTokens ?? 0;
+  const cost = typeof usage.cost === 'number' ? usage.cost : usage.cost?.total;
+  return {
+    inputTokens: input,
+    outputTokens: output,
+    totalTokens: usage.totalTokens ?? input + output + cacheRead + cacheWrite,
+    cacheReadTokens: cacheRead,
+    cacheWriteTokens: cacheWrite,
+    cost: typeof cost === 'number' ? cost : 0,
+  };
+}
+
+/**
+ * Sum one entry's usage into a merged message.
+ *
+ * A single UI message can contain several assistant entries (one per model
+ * call in a tool loop). Keeping only the first entry's usage made a reloaded
+ * conversation report a fraction of its tokens and cost.
+ */
+function addTokenUsage(target: TokenUsage | undefined, extra: TokenUsage | undefined): TokenUsage | undefined {
+  if (!extra) return target;
+  if (!target) return { ...extra };
+  return {
+    inputTokens: target.inputTokens + extra.inputTokens,
+    outputTokens: target.outputTokens + extra.outputTokens,
+    totalTokens: target.totalTokens + extra.totalTokens,
+    cacheReadTokens: (target.cacheReadTokens ?? 0) + (extra.cacheReadTokens ?? 0),
+    cacheWriteTokens: (target.cacheWriteTokens ?? 0) + (extra.cacheWriteTokens ?? 0),
+    cost: (target.cost ?? 0) + (extra.cost ?? 0),
+  };
+}
+
 function toMessage(msg: any, sessionId: string, index: number, entryId?: string, cwd?: string): Message | null {
   const blocks = agentMessageToBlocks(msg, cwd);
   if (blocks.length === 0) return null;
@@ -492,14 +570,7 @@ function toMessage(msg: any, sessionId: string, index: number, entryId?: string,
       createdAt: timestamp,
       updatedAt: timestamp,
       entryId,
-      usage: msg.usage ? {
-        inputTokens: msg.usage.input ?? msg.usage.inputTokens ?? 0,
-        outputTokens: msg.usage.output ?? msg.usage.outputTokens ?? 0,
-        totalTokens: msg.usage.totalTokens ?? (msg.usage.input ?? 0) + (msg.usage.output ?? 0),
-        cacheReadTokens: msg.usage.cacheRead ?? msg.usage.cacheReadTokens ?? 0,
-        cacheWriteTokens: msg.usage.cacheWrite ?? msg.usage.cacheWriteTokens ?? 0,
-        cost: msg.usage.cost?.total ?? 0,
-      } : undefined,
+      usage: sdkUsageToTokenUsage(msg.usage),
     } as AssistantMessage;
   }
 
@@ -519,6 +590,106 @@ function toMessage(msg: any, sessionId: string, index: number, entryId?: string,
 
 function isSessionMessageEntry(e: SessionEntry): e is SessionMessageEntry {
   return e.type === 'message';
+}
+
+/**
+ * The plugin payload of a custom entry.
+ *
+ * `custom` entries keep it in `data`; `custom_message` entries (the explicit
+ * agent-visible revision) keep their extension payload in `details` and their
+ * model-facing text in `content`. One reader handles both so a message keeps
+ * its identity across revisions.
+ */
+function pluginMessageDataOf(entry: SessionEntry): PluginMessageData | undefined {
+  if (entry.type !== 'custom' && entry.type !== 'custom_message') return undefined;
+  if ((entry as { customType?: string }).customType !== PLUGIN_MESSAGE_CUSTOM_TYPE) return undefined;
+  const data =
+    entry.type === 'custom'
+      ? (entry as { data?: PluginMessageData }).data
+      : (entry as { details?: PluginMessageData }).details;
+  return data && typeof data.id === 'string' ? data : undefined;
+}
+
+/** A pi custom/custom_message entry carrying a plugin-originated message. */
+function isPluginMessageEntry(
+  e: SessionEntry,
+): e is SessionEntry & { type: 'custom' | 'custom_message' } {
+  return pluginMessageDataOf(e) !== undefined;
+}
+
+/**
+ * Fold append-only plugin message entries to one message per plugin id
+ * (highest revision wins, later entry breaks a tie), dropping tombstones.
+ */
+function foldPluginMessages(entries: readonly SessionEntry[], sessionId: string): PluginMessage[] {
+  const latest = new Map<string, { entry: SessionEntry; data: PluginMessageData }>();
+  for (const entry of entries) {
+    const data = pluginMessageDataOf(entry);
+    if (!data) continue;
+    const prev = latest.get(data.id);
+    if (!prev || (data.revision ?? 0) >= (prev.data.revision ?? 0)) {
+      latest.set(data.id, { entry, data });
+    }
+  }
+
+  const messages: PluginMessage[] = [];
+  for (const { entry, data } of latest.values()) {
+    if (data.removed) continue;
+
+    const createdMs =
+      typeof data.createdAt === 'number' && Number.isFinite(data.createdAt)
+        ? data.createdAt
+        : Date.parse(entry.timestamp) || Date.now();
+    const createdAt = new Date(createdMs).toISOString();
+    const updatedAt = entry.timestamp ? new Date(entry.timestamp).toISOString() : createdAt;
+
+    const blocks: ContentBlock[] = [];
+    if (data.text) {
+      blocks.push({ id: `pm-text-${data.id}`, type: 'text', content: data.text });
+    }
+    for (const [i, file] of (data.files ?? []).entries()) {
+      const name = path.basename(file.path);
+      let size: number | undefined;
+      try {
+        size = statSync(file.path).size;
+      } catch {
+        /* missing file: the card still opens/下载s nothing */
+      }
+      blocks.push({
+        id: `pm-file-${data.id}-${i}`,
+        type: 'file',
+        content: file.label || name,
+        mimeType: getMimeType(file.path),
+        fileName: name,
+        fileSize: size,
+        workspacePath: file.path,
+      });
+    }
+
+    messages.push({
+      id: `msg-${sessionId}-plugin-${data.id}`,
+      sessionId,
+      role: 'plugin',
+      status: 'complete',
+      content: data.text ?? '',
+      blocks,
+      card: data.card,
+      files: data.files,
+      pluginId: data.pluginId,
+      pluginMessageId: data.id,
+      revision: data.revision ?? 1,
+      pluginStatus: data.status,
+      agentVisible: data.agentVisible === true,
+      ...(data.title ? { title: data.title } : {}),
+      ...(data.quote ? { quote: data.quote } : {}),
+      ...(data.source ? { source: data.source } : {}),
+      ...(data.triggered ? { triggered: true } : {}),
+      createdAt,
+      updatedAt,
+      entryId: entry.id,
+    });
+  }
+  return messages;
 }
 
 // === Conversion: SDK SessionTreeNode → our SessionTreeNode ===
@@ -648,7 +819,11 @@ export function createRealSessionService(): SessionService {
     async list(workspaceId: string): Promise<Session[]> {
       try {
         const sessions = await SessionManager.list(workspaceId);
-        return sessions.map(toSession);
+        // Order by creation, not by last activity: a long run finishing must
+        // not move its conversation to the top of the list.
+        return sessions
+          .map(toSession)
+          .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
       } catch (err) {
         // `SessionManager.list` already returns [] for a workspace whose
         // session directory is missing, so reaching here means something
@@ -714,6 +889,11 @@ export function createRealSessionService(): SessionService {
               .filter((b) => b.type === 'text')
               .map((b) => b.content)
               .join('');
+            // Each entry is one model call in this tool loop and carries its
+            // own usage. Keep only the first and a reloaded conversation
+            // reports a fraction of its tokens and cost.
+            const merged = lastMsg as AssistantMessage;
+            merged.usage = addTokenUsage(merged.usage, sdkUsageToTokenUsage(rawMsg.usage));
             if (rawMsg.timestamp) {
               lastMsg.updatedAt = new Date(rawMsg.timestamp).toISOString();
             }
@@ -774,6 +954,17 @@ export function createRealSessionService(): SessionService {
         const lastMsg = messages[messages.length - 1];
         lastMsg.blocks.push(...allFileBlocks);
       }
+
+      // Plugin-originated messages share this transcript (pi `custom` entries).
+      // Fold append-only updates to the latest revision and interleave them by
+      // their own createdAt — an update must stay where the message was, not
+      // jump to the end.
+      const pluginMessages = foldPluginMessages(entries, id);
+      if (pluginMessages.length > 0) {
+        messages.push(...pluginMessages);
+        messages.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
+      }
+
       const sessionName = sm.getSessionName();
       const title = (typeof sessionName === 'string' && sessionName ? sessionName : undefined)
         || (messageEntries.length > 0 ? extractTitleFromMessage(messageEntries[0].message) : undefined)

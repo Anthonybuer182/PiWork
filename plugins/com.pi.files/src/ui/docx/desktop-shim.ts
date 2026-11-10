@@ -285,17 +285,48 @@ async function openDocxPath(path: string): Promise<unknown> {
   const data = await res.arrayBuffer();
   const meta = await backend<{ mtime?: number }>('file.stat', { path }).catch(() => ({ mtime: undefined }));
   if (typeof meta?.mtime === 'number') openMtimes.set(path, meta.mtime);
+
+  // Newer GenOffice opens through a ONE-SHOT URL (`dataUrl`) and fetches it
+  // exactly once, rather than handing the renderer an ArrayBuffer over IPC.
+  // A blob URL is the equivalent in this host: same-origin under the plugin
+  // page and fetchable by the renderer. Release it after the open has had
+  // time to read it — a document replaced in place must not keep its old
+  // bytes alive for the panel's whole lifetime.
+  const dataUrl = URL.createObjectURL(
+    new Blob([data], {
+      type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    }),
+  );
+  setTimeout(() => URL.revokeObjectURL(dataUrl), 60_000);
+
   return {
     path,
     name: baseName(path),
-    data,
+    dataUrl,
     hash: await sha256Hex(data),
   };
 }
 
+/**
+ * Base64 of the bytes, chunked.
+ *
+ * `String.fromCharCode(...bytes)` spreads every byte as an argument and
+ * overflows the call stack past roughly 64 KB — a limit real documents pass
+ * routinely (the 188 KB fixture here did, and the save silently failed with
+ * "[office_edit] the document could not be saved").
+ */
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
 async function saveBytes(path: string, data: ArrayBuffer): Promise<{ ok: boolean; error?: string }> {
-  const base64 = btoa(String.fromCharCode(...new Uint8Array(data)));
   try {
+    const base64 = bytesToBase64(new Uint8Array(data));
     const res = await backend<{ mtime?: number }>('file.write', {
       path,
       base64,
@@ -396,7 +427,7 @@ export function installDesktopShim(): void {
       });
       if (!res?.path) return null;
       const bytes = await (await fetch(wsFileUrl(res.path))).arrayBuffer();
-      const b64 = btoa(String.fromCharCode(...new Uint8Array(bytes)));
+      const b64 = bytesToBase64(new Uint8Array(bytes));
       const ext = (res.path.split('.').pop() ?? 'png').toLowerCase();
       const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : ext === 'gif' ? 'image/gif' : 'image/png';
       return { base64: b64, mime, name: baseName(res.path) };

@@ -127,7 +127,7 @@ export function SkillsSettingsPage() {
               <button
                 type="button"
                 onClick={() => void refetchSkills()}
-                className="shrink-0 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="shrink-0 underline underline-offset-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               >
                 {t('重试')}
               </button>
@@ -218,7 +218,7 @@ export function SkillsSettingsPage() {
               <button
                 type="button"
                 onClick={() => void refetchPaths()}
-                className="shrink-0 underline underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                className="shrink-0 underline underline-offset-2 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring"
               >
                 {t('重试')}
               </button>
@@ -235,7 +235,7 @@ export function SkillsSettingsPage() {
                     aria-label={t('{path} 移除', { path })}
                     onClick={() => removeDirectory(path)}
                     disabled={savePaths.isPending}
-                    className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                    className="shrink-0 rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>

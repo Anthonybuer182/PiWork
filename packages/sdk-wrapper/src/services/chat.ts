@@ -1,4 +1,4 @@
-import type { Message, ContentBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, ToolTiming, QueueState, StreamingBehavior, AgentContextConfig, AgentContextReloadResult } from '@pi/types';
+import type { Message, ContentBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, ToolTiming, QueueState, StreamingBehavior, AgentContextConfig, AgentContextReloadResult, GlobalContextInfo, PluginMessageData, PluginMessagePatch } from '@pi/types';
 
 export interface SendMessageParams {
   sessionId: string;
@@ -16,6 +16,13 @@ export interface SendMessageParams {
    * plugin contributes.
    */
   skills?: string[];
+  /**
+   * Deliver this turn as a plugin-originated message instead of a user
+   * message: the entry is a pi `custom_message` carrying the plugin message
+   * data, so the timeline renders a plugin card (not a user bubble) while the
+   * agent sees `content` and starts the turn normally.
+   */
+  pluginMessage?: PluginMessageData;
 }
 
 export interface StreamChunk {
@@ -60,6 +67,9 @@ export interface ChatService {
   /** Optional: tear down cached sessions so the next prompt rebuilds them
    *  (plugin tool/skill sets changing at runtime). */
   invalidateSessions?(): void;
+  /** Optional: retire every cached session (app quit). Extensions such as MCP
+   *  close their child processes on `session_shutdown`. */
+  dispose?(): Promise<void>;
   sendMessage(params: SendMessageParams): Promise<Message>;
   sendMessageStream(
     params: SendMessageParams,
@@ -67,6 +77,32 @@ export interface ChatService {
     signal?: AbortSignal,
   ): Promise<Message>;
   getMessages(sessionId: string, limit?: number, offset?: number): Promise<Message[]>;
+  /**
+   * Append a plugin-originated message to a session as a pi `custom` entry.
+   *
+   * The entry shares the session transcript (so it replays) but is not sent to
+   * the model. The plugin backend calls this through the host's `messages`
+   * capability; the host owns validation, targeting and persistence.
+   */
+  appendPluginMessage?(sessionId: string, data: PluginMessageData): Promise<{ entryId: string }>;
+  /**
+   * Append a new revision of a plugin message. The service verifies the message
+   * belongs to `pluginId`, merges the patch, and appends the result. Returns
+   * the new revision; throws when the message is missing, owned by another
+   * plugin, or already removed.
+   */
+  updatePluginMessage?(
+    sessionId: string,
+    messageId: string,
+    pluginId: string,
+    patch: PluginMessagePatch,
+  ): Promise<{ entryId: string; revision: number }>;
+  /** Append a tombstone revision for a plugin message (same ownership rules). */
+  removePluginMessage?(
+    sessionId: string,
+    messageId: string,
+    pluginId: string,
+  ): Promise<{ entryId: string; revision: number }>;
   stopGeneration(sessionId: string): Promise<void>;
   /**
    * Queue a steering message that is delivered after the current assistant turn's
@@ -130,21 +166,46 @@ export interface ChatService {
    */
   reloadAgentContext(workspacePath: string): Promise<AgentContextReloadResult>;
   /**
+   * The global prompt/context files in the agent dir, for Settings → 上下文.
+   *
+   * Separate from `getAgentContextConfig` because it must work with no
+   * workspace open: these files apply to every workspace.
+   */
+  getGlobalContextInfo(): Promise<GlobalContextInfo>;
+  /**
+   * Rebuild affected live sessions after an ordinary file write.
+   *
+   * Used by the host to hook plugin `filesystem.write`/`delete`: saving
+   * `.pi/SYSTEM.md` or an AGENTS.md must take effect on the next turn, not
+   * silently wait for a new session. A no-op for files that are not part of
+   * any workspace's standing context.
+   *
+   * `preferredWorkspace` selects whose reload result is returned; every
+   * affected workspace is rebuilt either way (a global file applies to all).
+   */
+  reloadAgentContextForFile(
+    filePath: string,
+    preferredWorkspace?: string,
+  ): Promise<AgentContextReloadResult>;
+  /**
    * Write one of the agent's context/prompt files and rebuild the prompt.
    *
    * Separate from `file.write` because it carries the mtime guard (an editor
    * that read a file must not clobber a concurrent change) and because it
    * rebuilds the live session afterwards — the two always go together.
+   *
+   * `workspacePath` is omitted when editing a global file with no workspace
+   * open; the write still lands, it just has no live session to rebuild.
    */
   writeContextFile(params: {
-    workspacePath: string;
+    workspacePath?: string;
     path: string;
     content: string;
     expectedMtime?: number;
   }): Promise<{ file: { path: string; size: number; mtime: number }; reload: AgentContextReloadResult }>;
   /** Delete one of the agent's context/prompt files and rebuild the prompt. */
   deleteContextFile(params: {
-    workspacePath: string;
+    workspacePath?: string;
     path: string;
     expectedMtime?: number;
   }): Promise<{

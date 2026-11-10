@@ -1,0 +1,15 @@
+/*
+ * Renderer stylesheet. Tailwind 4 is configured through the JS config via
+ * `@config` (the theme tokens still live there), so this file only has to
+ * pull in Tailwind, the shared UI stylesheet, and declare what to scan.
+ */
+@import 'tailwindcss';
+@import '@pi/ui/globals.css';
+
+@config '../tailwind.config.ts';
+
+/* Tailwind 4 detects sources from the config/CLI root; in a pnpm workspace
+   that misses the shared package, so both trees are declared explicitly.
+   Paths are relative to this file. */
+@source '../';
+@source '../../../../../packages/ui/src';

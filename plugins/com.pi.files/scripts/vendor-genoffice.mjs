@@ -50,8 +50,32 @@ const PACKAGES = [
   'pdf2docx',
   'font-metrics',
   'file-parse',
+  // Raw-zip splicing shared by pptx-engine; browser-safe, unlike its sibling
+  // archive helpers (which are built on node:crypto / node:zlib).
+  'zip-gate',
   'i18n',
   'ui',
+];
+
+/**
+ * Files outside the packages above that the renderer still imports.
+ *
+ * `agent-core` is GenOffice's own agent — replaced by the host — but three of
+ * its modules are pure helpers the document engines and UI use for redaction
+ * range mapping, redaction labels, and mind-map parsing. Take those files and
+ * their relative closure instead of the package.
+ *
+ * `font-metrics/word-faces.json` is exported from the package root (the
+ * package's `exports` map points there), so the `src/` walk misses it.
+ */
+const EXTRA_FILES = [
+  'packages/agent-core/src/redact-core.ts',
+  'packages/agent-core/src/redact-range.ts',
+  'packages/agent-core/src/mind-map.ts',
+  'packages/agent-core/src/types.ts',
+  'packages/font-metrics/word-faces.json',
+  // The pdf backend's save path writes through this Node-only helper.
+  'packages/electron-utils/src/atomic-write.ts',
 ];
 
 /**
@@ -235,6 +259,20 @@ function collect() {
       continue;
     }
     files.push(...walk(dir));
+  }
+
+  // Files the package walk cannot reach, plus their relative closure.
+  for (const file of EXTRA_FILES) {
+    if (!existsSync(join(SRC, file))) {
+      console.warn(`[vendor] WARNING: ${file} missing — skipped`);
+      continue;
+    }
+    files.push(file);
+  }
+  const extraRoots = EXTRA_FILES.filter((f) => existsSync(join(SRC, f))).map((f) => join(SRC, f));
+  const beforeExtras = new Set(files);
+  for (const f of closureOf(extraRoots, SRC)) {
+    if (!beforeExtras.has(f)) files.push(f);
   }
 
   // Each app: its whole tree, plus the closure of its entries.

@@ -2,6 +2,7 @@ import { ipcMain } from 'electron';
 import type { InstallPhase } from '@pi/types';
 import type { PluginSystem } from '@main/plugins';
 import type { WindowRegistry } from '@main/windows';
+import type { PluginMessageSettingsService } from '@main/preferences/plugin-messages';
 import { hostWindowOf } from './guard';
 
 /**
@@ -17,7 +18,11 @@ import { hostWindowOf } from './guard';
  *   pi:plugin:set-enabled     → InstallResult
  *   pi:plugin:event           ← push channel (status/state/plugins-changed/install-phase)
  */
-export function registerPluginIpcHandlers(system: PluginSystem, windows?: WindowRegistry): void {
+export function registerPluginIpcHandlers(
+  system: PluginSystem,
+  windows?: WindowRegistry,
+  pluginMessageSettings?: PluginMessageSettingsService,
+): void {
   // The renderer owns "which conversation is on screen" — a view fact, not a
   // session one. Each window reports its own; the backend-visible value is the
   // FOCUSED window's conversation, and only the focused window's report is
@@ -52,6 +57,28 @@ export function registerPluginIpcHandlers(system: PluginSystem, windows?: Window
     return system.listAllInfos();
   });
 
+  // Per-plugin "show messages in conversations" preference. Host-owned: a
+  // plugin cannot un-mute itself, and the renderer hides muted plugins'
+  // messages without deleting them.
+  ipcMain.handle('pi:plugin:messages:muted', async () =>
+    pluginMessageSettings?.listMuted() ?? [],
+  );
+  ipcMain.handle(
+    'pi:plugin:messages:set-muted',
+    (event, payload: { pluginId?: string; muted?: boolean }) => {
+      if (!hostWindowOf(event)) return { ok: false, error: 'untrusted sender' };
+      if (!pluginMessageSettings) return { ok: false, error: 'settings unavailable' };
+      try {
+        return {
+          ok: true,
+          muted: pluginMessageSettings.setMuted(String(payload?.pluginId ?? ''), payload?.muted === true),
+        };
+      } catch (err) {
+        return { ok: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    },
+  );
+
   ipcMain.handle('pi:plugin:ensure-port', async (event, payload: { pluginId?: string }) => {
     const pluginId = payload?.pluginId;
     if (!pluginId) return { ok: false, error: 'missing pluginId' };
@@ -79,6 +106,38 @@ export function registerPluginIpcHandlers(system: PluginSystem, windows?: Window
       const { pluginId, toolName, eventId, kind } = payload ?? {};
       if (!pluginId || !toolName || !eventId) return { ok: false, error: 'missing pluginId, toolName or eventId' };
       const ok = system.sendCardEvent(pluginId, toolName, eventId, kind === 'submit' ? 'submit' : 'click', payload?.payload);
+      return ok ? { ok: true } : { ok: false, error: `plugin "${pluginId}" has no backend` };
+    },
+  );
+
+  // A card inside a plugin-originated message (messages.post). Same one-way
+  // shape as card-event, but the target is a persisted message id; the backend
+  // answers by updating/removing that message.
+  ipcMain.handle(
+    'pi:plugin:message-action',
+    (
+      _event,
+      payload: {
+        pluginId?: string;
+        messageId?: string;
+        eventId?: string;
+        kind?: string;
+        sessionId?: string;
+        payload?: unknown;
+      },
+    ) => {
+      const { pluginId, messageId, eventId, kind, sessionId } = payload ?? {};
+      if (!pluginId || !messageId || !eventId) {
+        return { ok: false, error: 'missing pluginId, messageId or eventId' };
+      }
+      const ok = system.sendMessageAction(
+        pluginId,
+        messageId,
+        eventId,
+        kind === 'submit' ? 'submit' : 'click',
+        payload?.payload,
+        sessionId,
+      );
       return ok ? { ok: true } : { ok: false, error: `plugin "${pluginId}" has no backend` };
     },
   );
@@ -158,6 +217,21 @@ export function registerPluginIpcHandlers(system: PluginSystem, windows?: Window
     const path = payload?.path;
     if (!path) return { panelId: null };
     return { panelId: system.findPreviewHandler(path) };
+  });
+
+  // OS files dropped on a plugin PANEL BODY (a native view): the shell renderer
+  // never sees that event, so the view's preload resolves the paths and sends
+  // them here. Route them to the owning window's host renderer, which owns the
+  // right-column tab store. Paths never pass through the plugin page.
+  ipcMain.on('pi:plugin:os-drop', (event, paths: unknown) => {
+    if (!windows || !Array.isArray(paths)) return;
+    const ctx = windows.byWebContents(event.sender);
+    if (!ctx || !ctx.pluginWebViews?.ownsWebContents(event.sender)) return;
+    const cleaned = paths
+      .filter((path): path is string => typeof path === 'string' && path.length > 0)
+      .slice(0, 50);
+    if (cleaned.length === 0) return;
+    windows.send(ctx.win, 'pi:os:dropped-files', { paths: cleaned });
   });
 
   ipcMain.handle('pi:plugin:list-tools', () => {

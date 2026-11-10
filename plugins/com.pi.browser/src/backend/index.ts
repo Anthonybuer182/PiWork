@@ -1519,6 +1519,54 @@ function zhError(message: string): string {
     ],
     [/^No option matching "([\s\S]*?)" found in dropdown[\s\S]*$/, (m) => `下拉框里没有 "${m[1]}"`],
     [/^Page load timed out$/, () => '页面加载超时'],
+    [
+      // What browser-manager's navigate() reports when Chromium says why the
+      // page cannot load. The proxy named here is the one the app's network
+      // settings resolved for this URL — it is the usual culprit, and the
+      // caller has no other way to see it.
+      /^Navigation failed: (ERR_[A-Z0-9_]+) \((-?\d+)\) loading '([^']*)'(?: via proxy (\S+))?$/,
+      (m) => {
+        const [, name, code, url, proxy] = m;
+        const where = proxy ? `经代理 ${proxy}` : url;
+        switch (name) {
+          case 'ERR_PROXY_CONNECTION_FAILED':
+            return `连不上代理 ${proxy ?? ''}（${code}）：代理没在运行，或端口填错了。检查 设置 → 网络代理，或先把代理启动起来。`;
+          case 'ERR_TUNNEL_CONNECTION_FAILED':
+            return `代理 ${proxy ?? ''} 没能为 ${url} 建立 HTTPS 隧道（${code}）。可以换个节点，或在 设置 → 网络代理 里改走直连。`;
+          case 'ERR_PROXY_AUTH_REQUIRED':
+          case 'ERR_PROXY_AUTH_UNSUPPORTED':
+            return `代理要求认证（${code}）：${proxy ?? url}`;
+          case 'ERR_CONNECTION_TIMED_OUT':
+          case 'ERR_TIMED_OUT':
+            return `连接 ${where} 超时（${code}）：一直没有响应。网络或代理可能不通。`;
+          case 'ERR_CONNECTION_REFUSED':
+            return `连接被拒绝（${code}）：${proxy ? `代理 ${proxy}` : url} 上没有服务在监听。`;
+          case 'ERR_CONNECTION_RESET':
+          case 'ERR_CONNECTION_CLOSED':
+          case 'ERR_EMPTY_RESPONSE':
+            return `连接被对端断开（${code}）：${where}。代理或站点不稳定，可以重试一次。`;
+          case 'ERR_NAME_NOT_RESOLVED':
+            return `域名解析失败（${code}）：${url}。代理或 DNS 没能给出地址。`;
+          case 'ERR_INTERNET_DISCONNECTED':
+            return '系统网络已断开，先检查网络连接。';
+          case 'ERR_BLOCKED_BY_CLIENT':
+            return `这个地址被拦下了（${code}）：${url}`;
+          default:
+            if (name.startsWith('ERR_CERT_')) {
+              return `HTTPS 证书不被接受（${name}）：${where}。若是代理在做中间人解密，需要先装好它的根证书。`;
+            }
+            return `打开页面失败：${name}（${code}）${proxy ? `，经代理 ${proxy}` : ''}`;
+        }
+      },
+    ],
+    [
+      /^Navigation timed out after (\d+)s loading '([^']*)'(?: via proxy (\S+))?$/,
+      (m) => {
+        const [, seconds, url, proxy] = m;
+        const via = proxy ? `，经代理 ${proxy}` : '';
+        return `页面加载超时（${seconds}s${via}）：${url} 一直没有加载完。网络或代理太慢，可以重试一次。`;
+      },
+    ],
     [/^setFileInputFiles failed: ([\s\S]*)$/, (m) => `写入文件框失败：${m[1]}`],
     [/^Upload failed: ([\s\S]*)$/, (m) => `上传失败：${m[1]}`],
   ];
@@ -1925,6 +1973,13 @@ async function renderClipsInPage(ctx: PluginContext, newestId: string | null): P
   );
 }
 
+/** The page a popup action came from, as the request card's origin line. */
+function actionSource(action: SelAction, url: string): { label?: string; url?: string } {
+  const label = String(action.title ?? '').trim();
+  if (!url) return label ? { label } : {};
+  return label ? { label, url } : { url };
+}
+
 /** Dispatch one reported popup click. */
 async function handleAction(ctx: PluginContext, action: SelAction): Promise<void> {
   const text = String(action.text ?? '').trim().slice(0, SELECTION_MAX_CHARS);
@@ -1943,7 +1998,15 @@ async function handleAction(ctx: PluginContext, action: SelAction): Promise<void
       // is what gets translated, not the raw selection.
       await showNoteInPage(ctx, { state: 'pending', kind: kindKey });
       try {
-        await ctx.call('chat.send', { text: agentTaskPrompt(kind, text, url) });
+        // The conversation shows a work order — what was asked and what it is
+        // about — not the prompt: `agentText` is the instruction, the card is
+        // for the user.
+        await ctx.call('chat.send', {
+          agentText: agentTaskPrompt(kind, text, url),
+          title: `${kind}网页内容`,
+          quote: text,
+          source: actionSource(action, url),
+        });
       } catch (err) {
         pendingNote = null;
         ctx.log.warn(`chat.send failed: ${describe(err)}`);
@@ -1958,7 +2021,7 @@ async function handleAction(ctx: PluginContext, action: SelAction): Promise<void
     }
     case 'chat': {
       // The popup sends the question (textarea) and the quote (chip) as two
-      // fields; here they become one message — either alone is sendable.
+      // fields; the card shows them as such, while the agent gets one message.
       const question = text;
       const quote = String(action.quote ?? '').trim().slice(0, SELECTION_MAX_CHARS);
       const parts: string[] = [];
@@ -1974,7 +2037,13 @@ async function handleAction(ctx: PluginContext, action: SelAction): Promise<void
           'title 填 "回答",一两句话说清即可。对话里正常完整作答,两者内容不要互相重复。)',
       );
       try {
-        await ctx.call('chat.send', { text: parts.join('\n\n') });
+        await ctx.call('chat.send', {
+          text: question,
+          agentText: parts.join('\n\n'),
+          title: '划词提问',
+          ...(quote ? { quote } : {}),
+          source: actionSource(action, url),
+        });
       } catch (err) {
         ctx.log.warn(`chat.send failed: ${describe(err)}`);
         void toastInPage(ctx, '发送到对话失败');
@@ -2093,6 +2162,41 @@ plugin({
       engineId = String(created?.tabId ?? '');
     }
 
+    // "Split right" duplicates the source host tab, including its
+    // `engineTabId`. Two host tabs cannot share one engine view (they would
+    // fight over its rectangle), so give the newcomer its own engine tab at
+    // the same URL — the browser equivalent of duplicating the editor.
+    if (engineId) {
+      const owner = hostOfEngine(engineId);
+      if (owner && owner !== hostTabId) {
+        const sourceUrl = String(p.url ?? rowOfEngine(engineId)?.url ?? '');
+        const created = await ctx.call<{ tabId?: string }>('browser.newTab', { sessionId: key });
+        const cloneId = String(created?.tabId ?? '');
+        if (cloneId) {
+          engineId = cloneId;
+          if (!b.tabs.some((t) => t.id === cloneId)) {
+            b.tabs.push({ id: cloneId, url: '', title: '' });
+          }
+          if (sourceUrl) {
+            try {
+              const result = await ctx.call<{ url?: string; title?: string }>(
+                'browser.navigate',
+                { url: normalizeUrl(sourceUrl), tabId: cloneId },
+                { timeoutMs: NAVIGATE_TIMEOUT_MS },
+              );
+              const row = b.tabs.find((t) => t.id === cloneId);
+              if (row) {
+                if (result?.url) row.url = result.url;
+                if (result?.title) row.title = result.title;
+              }
+            } catch {
+              /* clone keeps the engine's blank page */
+            }
+          }
+        }
+      }
+    }
+
     if (engineId) {
       // A favorites host tab reused for an agent-opened page leaves its old
       // blank engine tab behind; close it rather than orphaning a background
@@ -2182,18 +2286,28 @@ plugin({
       // bucket, so point the bucket at this host tab before it runs.
       bucketFor(key).activeTabId = hostEngine;
     }
+    // A navigation typed into THIS pane makes it the host's active tab, so
+    // the agent's "current tab" follows the pane the user is actually using.
+    const focusHostTab = () => {
+      void ctx.call('panel.focusTab', { panelId: 'browser', tabId: hostTabId, focus: true }).catch(() => {});
+    };
     switch (method) {
       case 'nav.open': {
-        const t = await ensureTab(ctx, key);
-        bindHostTab(hostTabId, t.id, sessionId);
+        focusHostTab();
+        // Navigate THIS host tab's own engine. `ensureTab` would ask the
+        // session's shared bucket for its active tab, and with two browser
+        // panes on screen that can be the OTHER pane's engine — navigating
+        // one pane would replace the page in the other.
+        const engineId = hostEngine ?? (await ensureTab(ctx, key)).id;
+        bindHostTab(hostTabId, engineId, sessionId);
         loadedHosts.add(hostTabId);
         const result = await ctx.call<{ url?: string; title?: string }>(
           'browser.navigate',
-          { url: normalizeUrl(params.url), tabId: t.id },
+          { url: normalizeUrl(params.url), tabId: engineId },
           { timeoutMs: NAVIGATE_TIMEOUT_MS },
         );
         if (result?.url) lastUrl = result.url;
-        const row = bucketFor(key).tabs.find((x) => x.id === t.id);
+        const row = bucketFor(key).tabs.find((x) => x.id === engineId);
         if (row && result?.url) row.url = result.url;
         if (row && result?.title) row.title = result.title;
         await syncHostTab(ctx, hostTabId);
@@ -2201,16 +2315,19 @@ plugin({
         return { url: result?.url ?? '', title: result?.title ?? '' };
       }
       case 'nav.back': {
+        focusHostTab();
         const t = targetTabId(key);
         if (t) await ctx.call('browser.back', { tabId: t });
         return { ok: true };
       }
       case 'nav.forward': {
+        focusHostTab();
         const t = targetTabId(key);
         if (t) await ctx.call('browser.forward', { tabId: t });
         return { ok: true };
       }
       case 'nav.reload': {
+        focusHostTab();
         const t = targetTabId(key);
         if (t) await ctx.call('browser.reload', { tabId: t });
         return { ok: true };
@@ -2713,11 +2830,22 @@ plugin({
         // Open on the conversation's focused tab; create one when it has none
         // (a fresh conversation's first navigate is its first tab).
         const tab = tid ? { id: tid } : await ensureTab(ctx, bucketKey(sessionKey));
-        const result = await ctx.call<{
+        let result: {
           url?: string;
           title?: string;
           page?: { authKind?: 'captcha' | 'login' | null };
-        }>('browser.navigate', { url, tabId: tab.id }, { timeoutMs: NAVIGATE_TIMEOUT_MS });
+          /** Set when the page rendered but no load-finished event arrived. */
+          slowMs?: number;
+        };
+        try {
+          result = await ctx.call('browser.navigate', { url, tabId: tab.id }, {
+            timeoutMs: NAVIGATE_TIMEOUT_MS,
+          });
+        } catch (error) {
+          // The host names Chromium's net error; the panel and the agent read
+          // Chinese. See zhError for the mapping.
+          throw new Error(zhError(error instanceof Error ? error.message : String(error)));
+        }
         const finalUrl = result?.url ?? url;
         // Keep the mirror row in step (the urlChanged event does it too, but
         // the direct answer is here now).
@@ -2726,7 +2854,13 @@ plugin({
         await showEngine(ctx, tab.id, true, sessionKey ?? panelSession);
         const viaHost = hostOfEngine(tab.id);
         if (viaHost) syncHostTab(ctx, viaHost);
-        const head = `已打开 ${finalUrl}${result?.title ? ` — ${result.title}` : ''}`;
+        // A page that took its time is still a page: say so instead of letting
+        // the agent believe the navigation failed.
+        const slowNote =
+          typeof result?.slowMs === 'number' && result.slowMs >= 3000
+            ? `\n\n（页面到 ${(result.slowMs / 1000).toFixed(1)}s 才就绪，网络偏慢，但内容已经加载，可以直接继续操作。）`
+            : '';
+        const head = `已打开 ${finalUrl}${result?.title ? ` — ${result.title}` : ''}${slowNote}`;
         if (result?.page?.authKind === 'captcha') {
           return `${head}\n\n⚠️ 这个页面需要人工完成人机验证。请在右侧浏览器面板里由用户完成；不要尝试点击或绕过。用户完成后再继续。`;
         }

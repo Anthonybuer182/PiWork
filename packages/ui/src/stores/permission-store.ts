@@ -20,34 +20,35 @@ export type { PermissionMode, PermissionDecision, PermissionRequest };
 function electronApi():
   | { invoke: (channel: string, ...args: unknown[]) => Promise<unknown>; on: (channel: string, cb: (...args: unknown[]) => void) => void }
   | undefined {
+  if (typeof window === 'undefined') return undefined;
   return (window as unknown as { electronAPI?: ReturnType<typeof electronApi> }).electronAPI;
 }
 
 interface PermissionState {
-  /** Session key → mode. Missing key falls back to main's last-picked mode. */
-  modeBySession: Record<string, PermissionMode>;
+  /** One mode for every conversation, like the model/thinking settings. */
+  mode: PermissionMode;
   /** Pending approval keyed by toolCallId — matches the tool_call block in the timeline. */
   pendingByToolCall: Record<string, PermissionRequest>;
 
-  setMode: (sessionId: string, mode: PermissionMode) => void;
+  setMode: (mode: PermissionMode) => void;
   receiveRequest: (request: PermissionRequest) => void;
   removeRequest: (requestId: string) => void;
-  /** Pull current mode + in-flight requests from main (on session switch / reload). */
+  /** Pull the mode + this conversation's in-flight requests (session switch / reload). */
   sync: (sessionId: string) => Promise<void>;
   /** Answer an approval card: resolves on main, drops the card immediately. */
   resolve: (request: PermissionRequest, decision: PermissionDecision) => void;
 }
 
 export const usePermissionStore = create<PermissionState>((set, get) => ({
-  modeBySession: {},
+  mode: 'default',
   pendingByToolCall: {},
 
-  setMode: (sessionId, mode) => {
-    set((s) => ({ modeBySession: { ...s.modeBySession, [sessionId]: mode } }));
+  setMode: (mode) => {
+    set({ mode });
     // Main is the enforcer — persist there too, but never roll back the UI if
     // the round-trip fails: the toggle staying responsive matters more.
     electronApi()
-      ?.invoke('pi:permission:set-mode', { sessionId, mode })
+      ?.invoke('pi:permission:set-mode', { mode })
       .catch(() => {});
   },
 
@@ -74,14 +75,21 @@ export const usePermissionStore = create<PermissionState>((set, get) => ({
         pending: PermissionRequest[];
       } | undefined;
       if (!state) return;
-      set((s) => ({
-        modeBySession: { ...s.modeBySession, [sessionId]: state.mode },
-        // Wholesale replace: anything the renderer still held that main no
-        // longer tracks is stale (answered elsewhere, or the session died).
-        pendingByToolCall: Object.fromEntries(
-          state.pending.map((req) => [req.toolCallId, req]),
-        ),
-      }));
+      set((s) => {
+        // Replace only THIS conversation's entries. A wholesale replace
+        // dropped another session's pending approval from the renderer, so
+        // switching back had to re-fetch before its card reappeared.
+        const kept = Object.entries(s.pendingByToolCall).filter(
+          ([, request]) => request.sessionId !== sessionId,
+        );
+        return {
+          mode: state.mode,
+          pendingByToolCall: {
+            ...Object.fromEntries(kept),
+            ...Object.fromEntries(state.pending.map((req) => [req.toolCallId, req])),
+          },
+        };
+      });
     } catch {
       /* main not up yet — the next session switch or request re-syncs */
     }

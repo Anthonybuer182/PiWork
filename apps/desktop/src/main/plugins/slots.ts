@@ -39,6 +39,21 @@ export interface LiveSlotBounds {
 }
 
 /**
+ * One layer of a frozen slot: a bitmap of what the slot was showing.
+ *
+ * The panel view and an engine view embedded in its page are separate native
+ * views, so the pane is captured as a stack: the panel first, then each engine
+ * at its offset above it. `x`/`y` are relative to the slot's own rect.
+ */
+export interface LiveSlotSnapshotLayer {
+  dataUrl: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
  * WHICH engine view the slot wants, when the view behind a slot is one of a
  * set (the multi-tab browser's tabs). Empty string = "no preference" — the
  * host falls back to whatever it currently considers active.
@@ -61,6 +76,12 @@ export interface LiveSlotHandler {
    * its reporter (the browser engine).
    */
   destroy?(): void;
+  /**
+   * Capture what this slot is currently showing (its own view plus any engine
+   * views layered inside it). Used to keep the pane looking alive while a
+   * floating menu needs to sit above the native views.
+   */
+  snapshot?(): Promise<LiveSlotSnapshotLayer[]>;
 }
 
 /**
@@ -160,6 +181,22 @@ export class LiveSlotRegistry {
   }
 
   /**
+   * Snapshot one slot without changing its visibility. Returns [] when the
+   * slot is unknown, not attached, or its handler cannot capture — callers
+   * treat that as "no frozen image" and fall back to hiding the view.
+   */
+  async snapshot(slotId: string): Promise<LiveSlotSnapshotLayer[]> {
+    const handler = this.handlers.get(slotId);
+    if (!handler?.snapshot) return [];
+    try {
+      return await handler.snapshot();
+    } catch (err) {
+      console.error('[slots] snapshot failed:', err);
+      return [];
+    }
+  }
+
+  /**
    * Re-show a hidden slot at its last known bounds (and tag).
    *
    * For slots whose page cannot re-report (a reused panel view remounts with
@@ -255,6 +292,16 @@ export function registerLiveSlotIpcHandlers(host: LiveSlotIpcHost): void {
         },
         payload?.tag || undefined,
       );
+    },
+  );
+
+  ipcMain.handle(
+    'pi:liveview:snapshot',
+    async (event, payload: { slotId?: string }) => {
+      const registry = host.forSender(event.sender);
+      if (!registry) return { ok: false, layers: [] as LiveSlotSnapshotLayer[] };
+      const layers = await registry.snapshot(String(payload?.slotId ?? ''));
+      return { ok: true, layers };
     },
   );
 

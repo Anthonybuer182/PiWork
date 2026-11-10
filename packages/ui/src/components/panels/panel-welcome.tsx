@@ -41,7 +41,7 @@ export function PanelWelcome({ region = 'right' }: { region?: 'left' | 'right' }
                 data-welcome-panel={panel.id}
                 title={title}
                 onClick={() => openPanel(panel.id, { focus: true })}
-                className="flex min-h-[104px] flex-col items-center justify-center gap-2.5 rounded-xl border bg-card px-4 py-5 text-center text-sm text-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                className="flex min-h-[104px] flex-col items-center justify-center gap-2.5 rounded-xl border bg-card px-4 py-5 text-center text-sm text-foreground transition-colors hover:bg-accent hover:text-accent-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring"
               >
                 <RailIcon panel={panel} size={24} />
                 <span className="max-w-full truncate">{title}</span>

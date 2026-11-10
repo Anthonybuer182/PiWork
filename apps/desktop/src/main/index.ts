@@ -1,21 +1,29 @@
-import { app } from 'electron';
+import { app, shell } from 'electron';
 import { APP_NAME } from '@main/branding';
 import { registerIpcHandlers } from '@main/ipc/index';
 import { registerNativeIpcHandlers } from '@main/ipc/native';
 import { registerWindowIpcHandlers } from '@main/ipc/windows';
-import { SettingsManager, ModelRegistry, AuthStorage } from '@earendil-works/pi-coding-agent';
+import { SettingsManager, ModelRegistry, ModelRuntime, getAgentDir } from '@earendil-works/pi-coding-agent';
+import { setSharedModelRuntime } from '@pi/sdk-wrapper/adapters';
 import { copyFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { ENGINE_UA, VlmAnalyzer } from '@main/browser';
+import { McpConfigStore } from '@main/mcp/config-store';
+import { registerMcpIpc } from '@main/mcp/ipc';
 import { persistBrowserSessionCookies } from '@main/browser/browser-session';
 import { PluginSystem, registerPluginSchemePrivileges } from '@main/plugins';
 import { registerPluginIpcHandlers } from '@main/ipc/plugins';
 import { registerLiveSlotIpcHandlers } from '@main/plugins/slots';
 import { createHostAgentTools, type AgentCustomTool } from '@main/agent-tools';
 import { PermissionService, installPermissionGate, registerPermissionIpc } from '@main/permissions';
+import { readPermissionMode, writePermissionMode } from '@main/permissions/mode-store';
 import { AskService, registerAskIpc } from '@main/asks';
 import { TodoService, registerTodoIpc } from '@main/todos';
 import { ToolSettingsService, registerToolSettingsIpc } from '@main/preferences/tools';
+import { PluginMessageSettingsService } from '@main/preferences/plugin-messages';
+import { StorageService, registerStorageIpc, applyStorageSettings } from '@main/storage';
+import { ProxyService, registerProxyIpc } from '@main/network';
+import { UpdateService, registerUpdateIpc } from '@main/updater';
 import { VoiceSettingsService } from '@main/voice/settings';
 import { resolveVoiceProvider } from '@main/voice/registry';
 import { registerVoiceIpc, warmLocalTts } from '@main/voice/ipc';
@@ -68,6 +76,12 @@ function adoptLegacySettings(): void {
   }
 }
 adoptLegacySettings();
+
+// Settings → 存储 may have moved the agent's data directory. The SDK reads
+// `PI_CODING_AGENT_DIR` on every `getAgentDir()` call, but the plugin registry
+// captures the path when it is constructed — so the choice must be in the
+// environment before startup reaches any of that.
+applyStorageSettings();
 
 // Enable Chrome DevTools Protocol so external tooling (Playwright, DevTools)
 // can connect to the app's own webContents (including the embedded browser
@@ -126,11 +140,26 @@ if (!gotLock) {
       if (existsSync(icon)) app.dock?.setIcon(icon);
     }
 
+    // Network (设置 → 通用 → 网络代理): route both Chromium and the main
+    // process's fetch through the chosen proxy. Installed before a window
+    // exists so the very first provider request already uses the right route;
+    // later changes re-apply to both stacks immediately.
+    const proxyService = new ProxyService(join(app.getPath('userData'), 'network.json'));
+    await proxyService.install();
+    registerProxyIpc(proxyService);
+
+    // 设置 → 关于 → 检查更新. Created after the proxy so its fetch already
+    // honours the saved proxy choice; it has no startup work of its own.
+    registerUpdateIpc(new UpdateService());
+
     const settingsManager = SettingsManager.create(app.getPath('home'));
 
-    // Shared ModelRegistry — used by the chat service and the browser walk
-    // planner's VLM analyzer.
-    const sharedModelRegistry = ModelRegistry.create(AuthStorage.inMemory());
+    // Shared ModelRuntime — used by the chat service and the browser walk
+    // planner's VLM analyzer. pi 1.x resolves models and credentials through an
+    // async runtime; the registry is only a synchronous read facade over it.
+    const modelRuntime = await ModelRuntime.create({ allowModelNetwork: false });
+    setSharedModelRuntime(modelRuntime);
+    const sharedModelRegistry = new ModelRegistry(modelRuntime);
     // VLM analyzer for goal-directed browser navigation (gracefully handles
     // missing VLM config).
     const vlmAnalyzer = new VlmAnalyzer(sharedModelRegistry, { timeoutMs: 15000 });
@@ -158,15 +187,19 @@ if (!gotLock) {
     const sendToSession = (sessionId: string | null | undefined, channel: string, payload: unknown) =>
       windows.sendToSession(sessionId, channel, payload);
 
-    // Permission modes (默认 / 完全访问). Per-session choices live in main,
-    // keyed by session; the last picked mode seeds every session with no
-    // explicit choice, and a restart resets everything to 'default' — 完全访问
-    // stays a per-run decision. High-risk calls in default mode block the
-    // agent until the renderer's inline approval card answers; 完全访问 lets
-    // everything through but leaves an audit line behind.
+    // Permission mode (默认 / 完全访问): one global setting, stored in pi's
+    // settings.json under `permissionMode` (unknown keys survive pi's own
+    // saves). High-risk calls in default mode block the agent until the
+    // renderer's inline approval card answers; 完全访问 lets everything
+    // through but leaves an audit line behind.
+    const permissionSettingsFile = join(getAgentDir(), 'settings.json');
     const permissionService = new PermissionService(
       (payload) => sendToSession(payload.sessionId, 'pi:permission:request', payload),
       (payload) => sendToSession(payload.sessionId, 'pi:permission:cancelled', payload),
+      {
+        initialMode: readPermissionMode(permissionSettingsFile),
+        onModeChange: (mode) => writePermissionMode(permissionSettingsFile, mode),
+      },
     );
     registerPermissionIpc(permissionService, windows);
     const permissionModeFor = (sessionId: string) => permissionService.getMode(sessionId);
@@ -200,6 +233,17 @@ if (!gotLock) {
       join(app.getPath('userData'), 'interaction-settings.json'),
     );
     registerToolSettingsIpc(toolSettings, () => toolCatalog);
+
+    // Storage (设置 → 存储): sizes and the agent data directory. The location
+    // itself was already applied at the top of this file, before startup.
+    registerStorageIpc(new StorageService(app.getPath('userData')));
+
+    // MCP servers (设置 → MCP). The config is pi's own `mcp.json`, so the CLI
+    // and the app share one list; which workspaces may run a project-scoped
+    // file is PiWork's own decision and lives in userData.
+    const mcpStore = new McpConfigStore({
+      trustPath: join(app.getPath('userData'), 'mcp-trust.json'),
+    });
 
     // Voice (设置 → 语音): provider list + preferences in userData/voice.json.
     // Vendor calls happen in main and local inference in a utility process;
@@ -304,22 +348,41 @@ if (!gotLock) {
     });
     pluginPlaybackHook = (key, playing) =>
       pluginSystem.pushHostEvent('voice.playback', 'voice', { key, playing });
+    const pluginMessageSettings = new PluginMessageSettingsService(
+      join(app.getPath('userData'), 'plugin-messages.json'),
+    );
     // Register IPC handlers BEFORE init completes — the file:// renderer loads
     // in milliseconds in packaged builds, and its first `pi:plugin:list` must
     // queue behind kernel boot (whenReady) instead of rejecting outright.
-    registerPluginIpcHandlers(pluginSystem, windows);
+    registerPluginIpcHandlers(pluginSystem, windows, pluginMessageSettings);
 
     // Host-contributed tools are built after the chat service exists, but the
     // provider is only *called* when a session is created — so the array is
     // filled in below and read through this closure.
     let hostTools: AgentCustomTool[] = [];
 
-    const { chatService } = registerIpcHandlers(settingsManager, sharedModelRegistry, {
+    const { chatService } = registerIpcHandlers(settingsManager, modelRuntime, {
       // The full set; the per-session allow/deny decision is applied by the
       // adapter through `excludedToolNames`, which covers built-ins too.
       customToolsProvider: () => [...hostTools, ...pluginSystem.aggregateTools()],
       getGlobalDisabledTools: () => toolSettings.getDisabled(),
       pluginDocsProvider: () => pluginSystem.listPluginDocs(),
+      mcp: {
+        enabled: (cwd) => mcpStore.hasEnabledServers(cwd),
+        extensionOptions: () => ({
+          // Read through the store so the app and the SDK agree on exposure
+          // normalization and on which project files count as trusted.
+          loadConfig: (ctx) => mcpStore.loadForSession(ctx.cwd),
+          // OAuth sign-in for HTTP servers: hand the URL to the OS only when
+          // it is a web URL.
+          openUrl: (url) => {
+            try {
+              const parsed = new URL(url);
+              if (parsed.protocol === 'http:' || parsed.protocol === 'https:') void shell.openExternal(url);
+            } catch { /* ignore malformed URLs */ }
+          },
+        }),
+      },
       onSessionCreated: (session, info) => {
         rememberSessionWorkspace(info.sessionKey, info.cwd);
         installPermissionGate(session, info.sessionKey, permissionService);
@@ -337,6 +400,41 @@ if (!gotLock) {
         windows.releaseActiveSession(sessionId);
       },
     });
+    registerMcpIpc(mcpStore, {
+      invalidateSessions: () => chatService.invalidateSessions?.(),
+    });
+
+    // Plugin-originated messages share the conversation transcript as pi
+    // `custom` entries. The capability hub validates/targets them; the chat
+    // service owns the session writer.
+    pluginSystem.appendPluginMessage = async (sessionId, data) => {
+      if (!chatService.appendPluginMessage) {
+        throw new Error('messages.post: this chat service cannot persist plugin messages');
+      }
+      return chatService.appendPluginMessage(sessionId, data);
+    };
+    pluginSystem.updatePluginMessage = async (sessionId, messageId, pluginId, patch) => {
+      if (!chatService.updatePluginMessage) {
+        throw new Error('messages.update: this chat service cannot persist plugin messages');
+      }
+      return chatService.updatePluginMessage(sessionId, messageId, pluginId, patch);
+    };
+    pluginSystem.removePluginMessage = async (sessionId, messageId, pluginId) => {
+      if (!chatService.removePluginMessage) {
+        throw new Error('messages.remove: this chat service cannot persist plugin messages');
+      }
+      return chatService.removePluginMessage(sessionId, messageId, pluginId);
+    };
+
+    // A plugin write/delete may have changed a .pi prompt file or an AGENTS.md
+    // the agent already loaded. Rebuild the affected live sessions so the save
+    // applies to the next turn instead of waiting for a new session.
+    pluginSystem.onContextFileWrite = (filePath) => {
+      void chatService.reloadAgentContextForFile(filePath).catch((err) => {
+        console.error('[agent-context] reload after file write failed:', err);
+      });
+    };
+
     hostTools = createHostAgentTools({
       readContextConfig: chatService.getAgentContextConfig.bind(chatService),
       todoService,
@@ -432,7 +530,13 @@ if (!gotLock) {
       event.preventDefault();
       const timeout = new Promise<void>((resolve) => setTimeout(resolve, 1_500));
       void Promise.race([
-        persistBrowserSessionCookies().then(() => undefined),
+        Promise.all([
+          persistBrowserSessionCookies().then(() => undefined),
+          // Retire cached agent sessions first: extensions close their child
+          // processes (MCP stdio servers) on `session_shutdown`, and killing
+          // the app without it leaves them orphaned.
+          chatService.dispose?.() ?? Promise.resolve(),
+        ]),
         timeout,
       ])
         .catch((err) => {

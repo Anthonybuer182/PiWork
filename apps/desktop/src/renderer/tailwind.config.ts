@@ -1,10 +1,13 @@
 import type { Config } from 'tailwindcss';
 
 export default {
-  darkMode: ['class'],
+  darkMode: 'class',
   content: [
     './src/**/*.{ts,tsx}',
-    '../../packages/ui/src/**/*.{ts,tsx}',
+    // Tailwind 4 resolves a legacy config's content globs relative to the
+    // config file (v3 used the working directory), so the shared package is
+    // four levels up from this file.
+    '../../../../packages/ui/src/**/*.{ts,tsx}',
   ],
   prefix: '',
   theme: {

@@ -28,6 +28,10 @@ function isFile(url) {
 const MAIN_PREFIX = '@main/';
 const MAIN_BASE = new URL('../../src/main/', import.meta.url);
 
+/** `@/foo` → `packages/ui/src/foo` (the UI package's `paths` alias). */
+const UI_PREFIX = '@/';
+const UI_BASE = new URL('../../../../packages/ui/src/', import.meta.url);
+
 export async function resolve(specifier, context, nextResolve) {
   if (specifier === 'electron') {
     return { url: electronStub, shortCircuit: true };
@@ -35,6 +39,14 @@ export async function resolve(specifier, context, nextResolve) {
 
   if (specifier.startsWith(MAIN_PREFIX)) {
     const base = new URL(specifier.slice(MAIN_PREFIX.length), MAIN_BASE);
+    for (const suffix of SUFFIXES) {
+      const candidate = new URL(`${base.href}${suffix}`);
+      if (isFile(candidate)) return { url: candidate.href, shortCircuit: true };
+    }
+  }
+
+  if (specifier.startsWith(UI_PREFIX)) {
+    const base = new URL(specifier.slice(UI_PREFIX.length), UI_BASE);
     for (const suffix of SUFFIXES) {
       const candidate = new URL(`${base.href}${suffix}`);
       if (isFile(candidate)) return { url: candidate.href, shortCircuit: true };

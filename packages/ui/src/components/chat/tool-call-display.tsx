@@ -1,4 +1,4 @@
-import { Loader2, MessageCircleQuestion, ShieldAlert, Sparkles } from 'lucide-react';
+import { Loader2, MessageCircleQuestion, ShieldAlert } from 'lucide-react';
 import { useCallback, useMemo, useState } from 'react';
 import { cn } from '@/lib/utils';
 import {
@@ -29,6 +29,12 @@ interface ToolCallDisplayProps {
   result?: ToolResultBlock;
   isStreaming?: boolean;
   durationMs?: number;
+  /**
+   * false folds the plugin card body away. Set on the middle batches of a run
+   * that edited the same file again and again: the row keeps the record, one
+   * first and one last card carry the summary.
+   */
+  showPluginCard?: boolean;
 }
 
 function formatDuration(ms: number): string {
@@ -91,6 +97,14 @@ function getToolPreview(block: ToolCallBlock): string {
     return running > 0 ? `${todos.length} 项 · ${running} 进行中` : `${todos.length} 项`;
   }
 
+  // Office batches: the file is the subject and the batch size is the useful
+  // summary — 「迎国庆.pptx · 6 个操作」beats a truncated absolute path, and it
+  // is what identifies the row once the card body is folded away.
+  if (typeof input.path === 'string' && Array.isArray(input.ops)) {
+    const name = input.path.split(/[\\/]/).pop() || input.path;
+    return input.ops.length > 0 ? `${name} · ${input.ops.length} 个操作` : name;
+  }
+
   if ('command' in input) return String(input.command).slice(0, 120);
   if ('path' in input) return String(input.path).slice(0, 120);
   if ('file_path' in input) return String(input.file_path).slice(0, 120);
@@ -102,7 +116,13 @@ function getToolPreview(block: ToolCallBlock): string {
   return String(first).slice(0, 120);
 }
 
-export function ToolCallDisplay({ block, result, isStreaming, durationMs }: ToolCallDisplayProps) {
+export function ToolCallDisplay({
+  block,
+  result,
+  isStreaming,
+  durationMs,
+  showPluginCard = true,
+}: ToolCallDisplayProps) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const [userCollapsed, setUserCollapsed] = useState(false);
@@ -205,7 +225,7 @@ export function ToolCallDisplay({ block, result, isStreaming, durationMs }: Tool
     [cardEventTarget, result?.toolName],
   );
   const hasPluginCard =
-    !!result?.card && !!result.toolName && rendererByType.has(result.toolName);
+    showPluginCard && !!result?.card && !!result.toolName && rendererByType.has(result.toolName);
   // Streaming args card: while the tool runs, render its args live
   // (e.g. the mail draft forms as the agent types it).
   const renderer = block.toolName ? rendererByType.get(block.toolName) : undefined;
@@ -223,7 +243,7 @@ export function ToolCallDisplay({ block, result, isStreaming, durationMs }: Tool
       awaitingApproval
         ? 'border-amber-400/60 bg-amber-50/40 dark:bg-amber-950/10'
         : awaitingAnswer
-          ? 'border-sky-400/60 bg-sky-50/40 dark:bg-sky-950/10'
+          ? 'border-foreground/25 bg-muted/20'
           : hasError
             ? 'border-destructive/30'
             : 'border-border',
@@ -235,7 +255,7 @@ export function ToolCallDisplay({ block, result, isStreaming, durationMs }: Tool
       >
         {/* Status icon */}
         {awaitingAnswer ? (
-          <MessageCircleQuestion className="h-3 w-3 animate-pulse text-sky-600 dark:text-sky-400 shrink-0" />
+          <MessageCircleQuestion className="h-3 w-3 animate-pulse text-foreground/70 shrink-0" />
         ) : awaitingApproval ? (
           <ShieldAlert className="h-3 w-3 animate-pulse text-amber-600 dark:text-amber-400 shrink-0" />
         ) : isRunning ? (
@@ -264,7 +284,7 @@ export function ToolCallDisplay({ block, result, isStreaming, durationMs }: Tool
 
         {/* Running indicator (only when collapsed) */}
         {awaitingAnswer && !expanded && (
-          <span className="text-sky-600/80 dark:text-sky-400/70 animate-pulse shrink-0 ml-auto">
+          <span className="text-foreground/70 animate-pulse shrink-0 ml-auto">
             {t('等待回答')}
           </span>
         )}
@@ -309,7 +329,7 @@ export function ToolCallDisplay({ block, result, isStreaming, durationMs }: Tool
       {/* ── Inline question card: the agent is waiting for an answer ── */}
       {awaitingAnswer && askRequest && (
         <div data-ask-inline={askRequest.requestId}>
-          <AskCard request={askRequest} />
+          <AskCard request={askRequest} inline />
         </div>
       )}
 
@@ -347,14 +367,7 @@ export function ToolCallDisplay({ block, result, isStreaming, durationMs }: Tool
 
       {/* ── Plugin message-renderer card (Tier 0 in the chat timeline) ── */}
       {hasPluginCard && result?.card && (
-        <div
-          data-plugin-card={result.toolName}
-          className="border-t border-border/40 bg-background/60 px-3 py-2"
-        >
-          <div className="mb-1.5 flex items-center gap-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
-            <Sparkles className="h-3 w-3" />
-            {result.toolName}
-          </div>
+        <div data-plugin-card={result.toolName} className="border-t border-border/40 px-2.5 py-2">
           <DeclarativeRenderer tree={result.card} onEvent={handleCardEvent} />
         </div>
       )}

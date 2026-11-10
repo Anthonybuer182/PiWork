@@ -1,5 +1,86 @@
 import { create } from 'zustand';
-import type { Attachment, ContentBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, ToolTiming } from '@pi/types';
+import type { Attachment, ContentBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, ToolTiming, PluginMessageData } from '@pi/types';
+
+/**
+ * Live run state of one conversation.
+ *
+ * The composer used to keep a single window-global streaming state, so
+ * switching conversations during a run either showed the other conversation's
+ * stream or let a late chunk write into it. Each conversation now owns a slot;
+ * the flat fields on the store mirror the slot of `activeStreamSessionId`, so
+ * every existing reader (ChatTimeline, composer) keeps working unchanged.
+ */
+export interface SessionStream {
+  isStreaming: boolean;
+  blocks: ContentBlock[];
+  usage: TokenUsage | null;
+  contextUsage: ContextUsageInfo | null;
+  sessionStats: SessionStatsInfo | null;
+  messageTiming: MessageTiming | null;
+  toolTimings: Map<string, number>;
+  streamError: string | null;
+  steering: string[];
+  followUp: string[];
+}
+
+function emptyStream(): SessionStream {
+  return {
+    isStreaming: false,
+    blocks: [],
+    usage: null,
+    contextUsage: null,
+    sessionStats: null,
+    messageTiming: null,
+    toolTimings: new Map(),
+    streamError: null,
+    steering: [],
+    followUp: [],
+  };
+}
+
+type VisibleStream = Pick<
+  ComposerState,
+  | 'isStreaming'
+  | 'streamingBlocks'
+  | 'streamingUsage'
+  | 'contextUsage'
+  | 'sessionStats'
+  | 'messageTiming'
+  | 'toolTimings'
+  | 'streamError'
+  | 'steeringQueue'
+  | 'followUpQueue'
+>;
+
+function visibleOf(stream: SessionStream): VisibleStream {
+  return {
+    isStreaming: stream.isStreaming,
+    streamingBlocks: stream.blocks,
+    streamingUsage: stream.usage,
+    contextUsage: stream.contextUsage,
+    sessionStats: stream.sessionStats,
+    messageTiming: stream.messageTiming,
+    toolTimings: stream.toolTimings,
+    streamError: stream.streamError,
+    steeringQueue: stream.steering,
+    followUpQueue: stream.followUp,
+  };
+}
+
+function snapshotVisible(state: ComposerState): SessionStream {
+  return {
+    isStreaming: state.isStreaming,
+    blocks: state.streamingBlocks,
+    usage: state.streamingUsage,
+    contextUsage: state.contextUsage,
+    sessionStats: state.sessionStats,
+    messageTiming: state.messageTiming,
+    toolTimings: state.toolTimings,
+    streamError: state.streamError,
+    steering: state.steeringQueue,
+    followUp: state.followUpQueue,
+  };
+}
 
 interface ComposerState {
   value: string;
@@ -20,6 +101,14 @@ interface ComposerState {
   toolTimings: Map<string, number>;
   streamError: string | null;
   triggerSend: number;
+  /** The text the next triggered send carries (set together with triggerSend). */
+  triggerContent: string;
+  /**
+   * Plugin message delivered with the triggered send, when the trigger came
+   * from a plugin (`chat.send`). The composer then sends the turn as a plugin
+   * request card instead of a typed user message.
+   */
+  triggerPluginMessage: PluginMessageData | null;
   /** Editing mode: the raw entry ID being edited */
   editingEntryId: string | null;
   /** Editing mode: the UI message ID being edited (for reference) */
@@ -33,6 +122,26 @@ interface ComposerState {
   /** Steering and follow-up message queues (synced from SDK queue_update events) */
   steeringQueue: string[];
   followUpQueue: string[];
+
+  /** Live run state per conversation (background runs included). */
+  streams: Record<string, SessionStream>;
+  /** The conversation whose slot the flat fields mirror. */
+  activeStreamSessionId: string | null;
+  /** Draft text per conversation. */
+  drafts: Record<string, string>;
+  /** Conversations with a send in flight in this window. */
+  sessionPending: Record<string, boolean>;
+
+  /** Switch the visible slot; stashes the current one and restores the target. */
+  enterSession: (sessionId: string | null) => void;
+  /** Write to one conversation's live state, mirroring it when it is visible. */
+  updateSessionStream: (sessionId: string, update: Partial<SessionStream>) => void;
+  setSessionToolTiming: (sessionId: string, timing: ToolTiming) => void;
+  /** Start a run for a conversation (visible or background). */
+  beginSessionStream: (sessionId: string) => void;
+  /** End a run; `clear` also drops its live blocks (the answer is persisted now). */
+  endSessionStream: (sessionId: string, options?: { clear?: boolean; error?: string | null }) => void;
+  setSessionPending: (sessionId: string, pending: boolean) => void;
 
   /** Remove a queued item by type and index (visual-only, SDK queue unaffected) */
   removeQueuedItem: (type: 'steer' | 'followUp', index: number) => void;
@@ -60,7 +169,9 @@ interface ComposerState {
   setMessageTiming: (timing: MessageTiming | null) => void;
   setToolTiming: (timing: ToolTiming) => void;
   setStreamError: (error: string | null) => void;
-  setTriggerSend: (content: string) => void;
+  setTriggerSend: (content: string, pluginMessage?: PluginMessageData) => void;
+  /** Set (or clear, with null) the plugin message for the next triggered send. */
+  setTriggerPluginMessage: (message: PluginMessageData | null) => void;
   /** Signal the chat timeline to scroll to bottom (e.g. after inserting a slash command message) */
   triggerScrollToBottom: () => void;
   /** Enter edit mode: track entry and message IDs for navigateTree on send */
@@ -93,23 +204,109 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
   toolTimings: new Map(),
   streamError: null,
   triggerSend: 0,
+  triggerContent: '',
+  triggerPluginMessage: null,
   scrollToBottomTrigger: 0,
   editingEntryId: null,
   editingMessageId: null,
   editingContent: '',
   steeringQueue: [],
   followUpQueue: [],
+  streams: {},
+  activeStreamSessionId: null,
+  drafts: {},
+  sessionPending: {},
 
-  setSessionStats: (sessionStats) => set({ sessionStats }),
-  setMessageTiming: (messageTiming) => set({ messageTiming }),
-  setToolTiming: (timing) =>
-    set((s) => ({
-      toolTimings: new Map(s.toolTimings).set(timing.toolCallId, timing.durationMs),
+  enterSession: (sessionId) =>
+    set((state) => {
+      const streams = { ...state.streams };
+      const drafts = { ...state.drafts };
+      // Keep what the visible fields hold, even if a caller bypassed the
+      // session-scoped setters.
+      if (state.activeStreamSessionId) {
+        streams[state.activeStreamSessionId] = snapshotVisible(state);
+        drafts[state.activeStreamSessionId] = state.value;
+      }
+      const target = sessionId ? streams[sessionId] : undefined;
+      return {
+        streams,
+        drafts,
+        activeStreamSessionId: sessionId,
+        value: sessionId ? (drafts[sessionId] ?? '') : '',
+        ...visibleOf(target ?? emptyStream()),
+      };
+    }),
+
+  updateSessionStream: (sessionId, update) =>
+    set((state) => {
+      const current = state.streams[sessionId] ?? emptyStream();
+      const next = { ...current, ...update };
+      const streams = { ...state.streams, [sessionId]: next };
+      if (state.activeStreamSessionId !== sessionId) return { streams };
+      return { streams, ...visibleOf(next) };
+    }),
+
+  setSessionToolTiming: (sessionId, timing) =>
+    set((state) => {
+      const current = state.streams[sessionId] ?? emptyStream();
+      const next = {
+        ...current,
+        toolTimings: new Map(current.toolTimings).set(timing.toolCallId, timing.durationMs),
+      };
+      const streams = { ...state.streams, [sessionId]: next };
+      if (state.activeStreamSessionId !== sessionId) return { streams };
+      return { streams, ...visibleOf(next) };
+    }),
+
+  beginSessionStream: (sessionId) => {
+    get().updateSessionStream(sessionId, { ...emptyStream(), isStreaming: true });
+  },
+
+  endSessionStream: (sessionId, options = {}) => {
+    get().updateSessionStream(sessionId, {
+      isStreaming: false,
+      streamError: options.error ?? null,
+      ...(options.clear ? { blocks: [], usage: null, steering: [], followUp: [] } : {}),
+    });
+  },
+
+  setSessionPending: (sessionId, pending) =>
+    set((state) => {
+      const sessionPending = { ...state.sessionPending };
+      if (pending) sessionPending[sessionId] = true;
+      else delete sessionPending[sessionId];
+      return { sessionPending };
+    }),
+
+  setSessionStats: (sessionStats) => {
+    const id = get().activeStreamSessionId;
+    if (id) get().updateSessionStream(id, { sessionStats });
+    else set({ sessionStats });
+  },
+  setMessageTiming: (messageTiming) => {
+    const id = get().activeStreamSessionId;
+    if (id) get().updateSessionStream(id, { messageTiming });
+    else set({ messageTiming });
+  },
+  setToolTiming: (timing) => {
+    const id = get().activeStreamSessionId;
+    if (id) get().setSessionToolTiming(id, timing);
+    else set((s) => ({ toolTimings: new Map(s.toolTimings).set(timing.toolCallId, timing.durationMs) }));
+  },
+
+  setValue: (value) =>
+    set((state) => ({
+      value,
+      drafts: state.activeStreamSessionId
+        ? { ...state.drafts, [state.activeStreamSessionId]: value }
+        : state.drafts,
     })),
-
-  setValue: (value) => set({ value }),
   setCursorPosition: (cursorPosition) => set({ cursorPosition }),
-  setIsStreaming: (isStreaming) => set({ isStreaming }),
+  setIsStreaming: (isStreaming) => {
+    const id = get().activeStreamSessionId;
+    if (id) get().updateSessionStream(id, { isStreaming });
+    else set({ isStreaming });
+  },
   setIsDragging: (isDragging) => set({ isDragging }),
   setShowSlashMenu: (show, query = '') => set({ showSlashMenu: show, slashQuery: query }),
   setShowMentionMenu: (show, query = '') => set({ showMentionMenu: show, mentionQuery: query }),
@@ -129,35 +326,83 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
   clearAttachments: () => set({ pendingAttachments: [], uploadProgress: {} }),
   addStreamingBlock: (block) =>
     set((s) => {
-      const idx = s.streamingBlocks.findIndex((b) => b.id === block.id);
-      if (idx >= 0) {
-        // Replace existing block with the latest snapshot (avoids duplication
-        // when SDK re-sends the same block ID with accumulated content)
-        const updated = [...s.streamingBlocks];
-        updated[idx] = block;
-        return { streamingBlocks: updated };
-      }
-      return { streamingBlocks: [...s.streamingBlocks, block] };
+      const blocks = s.streamingBlocks;
+      const idx = blocks.findIndex((b) => b.id === block.id);
+      const updated = idx >= 0 ? [...blocks] : [...blocks, block];
+      if (idx >= 0) updated[idx] = block;
+      const id = s.activeStreamSessionId;
+      if (!id) return { streamingBlocks: updated };
+      const streams = { ...s.streams, [id]: { ...(s.streams[id] ?? snapshotVisible(s)), blocks: updated } };
+      return { streams, streamingBlocks: updated };
     }),
   updateStreamingBlock: (id, updates) =>
-    set((s) => ({
-      streamingBlocks: s.streamingBlocks.map((b) =>
+    set((s) => {
+      const streamingBlocks = s.streamingBlocks.map((b) =>
         b.id === id ? { ...b, ...updates } : b,
-      ),
-    })),
-  clearStreamingBlocks: () => set({ streamingBlocks: [] }),
-  setStreamingBlocks: (streamingBlocks) => set({ streamingBlocks }),
-  setStreamingUsage: (streamingUsage) => set({ streamingUsage }),
-  setContextUsage: (contextUsage) => set({ contextUsage }),
-  setStreamError: (streamError) => set({ streamError }),
-  setTriggerSend: (content) => set((s) => ({ value: content, triggerSend: s.triggerSend + 1 })),
+      );
+      const active = s.activeStreamSessionId;
+      if (!active) return { streamingBlocks };
+      const streams = {
+        ...s.streams,
+        [active]: { ...(s.streams[active] ?? snapshotVisible(s)), blocks: streamingBlocks },
+      };
+      return { streams, streamingBlocks };
+    }),
+  clearStreamingBlocks: () => {
+    const id = get().activeStreamSessionId;
+    if (id) get().updateSessionStream(id, { blocks: [] });
+    else set({ streamingBlocks: [] });
+  },
+  setStreamingBlocks: (blocks) => {
+    const id = get().activeStreamSessionId;
+    if (id) get().updateSessionStream(id, { blocks });
+    else set({ streamingBlocks: blocks });
+  },
+  setStreamingUsage: (usage) => {
+    const id = get().activeStreamSessionId;
+    if (id) get().updateSessionStream(id, { usage });
+    else set({ streamingUsage: usage });
+  },
+  setContextUsage: (contextUsage) => {
+    const id = get().activeStreamSessionId;
+    if (id) get().updateSessionStream(id, { contextUsage });
+    else set({ contextUsage });
+  },
+  setStreamError: (streamError) => {
+    const id = get().activeStreamSessionId;
+    if (id) get().updateSessionStream(id, { streamError });
+    else set({ streamError });
+  },
+  setTriggerSend: (content, pluginMessage) =>
+    set((s) => {
+      const triggered = {
+        triggerContent: content,
+        triggerPluginMessage: pluginMessage ?? null,
+        triggerSend: s.triggerSend + 1,
+      };
+      // A plugin request is not a draft: the instruction never flashes in the
+      // user's input box, and it never becomes their saved draft.
+      if (pluginMessage) return triggered;
+      return {
+        ...triggered,
+        value: content,
+        drafts: s.activeStreamSessionId
+          ? { ...s.drafts, [s.activeStreamSessionId]: content }
+          : s.drafts,
+      };
+    }),
+  setTriggerPluginMessage: (triggerPluginMessage) => set({ triggerPluginMessage }),
   triggerScrollToBottom: () => set((s) => ({ scrollToBottomTrigger: s.scrollToBottomTrigger + 1 })),
   setEditingMessage: (entryId, messageId, initialContent) =>
     set({ editingEntryId: entryId, editingMessageId: messageId, editingContent: initialContent }),
   setEditingContent: (content) => set({ editingContent: content }),
   clearEditingMessage: () =>
     set({ editingEntryId: null, editingMessageId: null, editingContent: '' }),
-  setQueues: (steering, followUp) => set({ steeringQueue: steering, followUpQueue: followUp }),
+  setQueues: (steering, followUp) => {
+    const id = get().activeStreamSessionId;
+    if (id) get().updateSessionStream(id, { steering, followUp });
+    else set({ steeringQueue: steering, followUpQueue: followUp });
+  },
   removeQueuedItem: (type, index) =>
     set((s) => {
       if (type === 'steer') {
@@ -185,10 +430,16 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
       toolTimings: new Map(),
       streamError: null,
       triggerSend: 0,
+      triggerContent: '',
+      triggerPluginMessage: null,
       editingEntryId: null,
       editingMessageId: null,
       editingContent: '',
       steeringQueue: [],
       followUpQueue: [],
+      streams: {},
+      activeStreamSessionId: null,
+      drafts: {},
+      sessionPending: {},
     }),
 }));

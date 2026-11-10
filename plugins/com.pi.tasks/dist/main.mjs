@@ -3382,6 +3382,8 @@ function plugin(handlers) {
   let panelPort = null;
   const panelPorts = /* @__PURE__ */ new Map();
   const portPanel = /* @__PURE__ */ new Map();
+  const portTab = /* @__PURE__ */ new Map();
+  const tabMeta = /* @__PURE__ */ new Map();
   let pluginId = "";
   let dataDir = "";
   let booted = false;
@@ -3391,11 +3393,17 @@ function plugin(handlers) {
   let portClosed = false;
   let probeSeq = 0;
   const pendingProbes = /* @__PURE__ */ new Map();
-  function routeFor(panelId) {
+  function routeFor(panelId, tabId) {
     if (panelId) {
       const ports = panelPorts.get(panelId);
-      if (ports && ports.size > 0)
+      if (ports && ports.size > 0) {
+        if (tabId) {
+          const matched = [...ports].filter((port) => portTab.get(port) === tabId);
+          if (matched.length > 0)
+            return matched;
+        }
         return [...ports];
+      }
     }
     return panelPort ? [panelPort] : [];
   }
@@ -3420,14 +3428,14 @@ function plugin(handlers) {
         }, options?.timeoutMs ?? CALL_TIMEOUT_MS);
       });
     },
-    send(panelId, event, data) {
-      const ports = routeFor(panelId);
+    send(panelId, event, data, tabId) {
+      const ports = routeFor(panelId, tabId);
       if (ports.length === 0)
         return false;
       let delivered = false;
       for (const port of ports) {
         try {
-          port.postMessage({ kind: "event", event, panelId, data });
+          port.postMessage({ kind: "event", event, panelId, tabId, data });
           delivered = true;
         } catch {
         }
@@ -3511,10 +3519,13 @@ function plugin(handlers) {
     const msg = raw;
     if (!msg || typeof msg !== "object")
       return;
+    if (sourcePort && msg.tabId !== void 0)
+      portTab.set(sourcePort, msg.tabId);
     if (msg.kind === "request") {
       const id = String(msg.id ?? "");
       const method = String(msg.method ?? "");
       const panelId = msg.panelId ?? "";
+      const tabId = msg.tabId;
       const replyPort = sourcePort ?? routeFor(panelId)[0];
       const reply = /* @__PURE__ */ __name((ok, error, result) => {
         replyPort?.postMessage({ kind: "response", id, ok, panelId, error, result });
@@ -3531,7 +3542,12 @@ function plugin(handlers) {
         return;
       }
       try {
-        const result = await handlers.onRequest(panelId, method, msg.params ?? {}, ctx2);
+        const known = tabId ? tabMeta.get(tabId) : void 0;
+        const result = await handlers.onRequest(panelId, method, msg.params ?? {}, ctx2, {
+          tabId,
+          sessionId: known?.sessionId,
+          workspaceId: known?.workspaceId
+        });
         if (result === void 0) {
           reply(false, `onRequest handled "${method}" without returning anything. Return the answer (a value, or true), or rethrow for a method you do not handle.`);
           return;
@@ -3545,6 +3561,7 @@ function plugin(handlers) {
     if (msg.kind === "event") {
       const event = String(msg.event ?? "");
       const panelId = msg.panelId ?? "";
+      const tabId = msg.tabId;
       if (event === "pi.probe.reply") {
         const probeId = String(msg.data?.id ?? "");
         const resolve = pendingProbes.get(probeId);
@@ -3557,6 +3574,13 @@ function plugin(handlers) {
       if (!panelId)
         log("warn", `panel event "${event}" arrived with no panel id.`);
       if (event === "panel.mounted") {
+        const data = msg.data ?? {};
+        if (data.tabId) {
+          tabMeta.set(data.tabId, {
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId
+          });
+        }
         if (!handlers.onPanelMounted) {
           if (!mountWarned.has(panelId)) {
             mountWarned.add(panelId);
@@ -3565,8 +3589,8 @@ function plugin(handlers) {
           return;
         }
         try {
-          const data = msg.data ?? {};
           await handlers.onPanelMounted(panelId, data.params, ctx2, {
+            tabId: data.tabId ?? tabId,
             sessionId: data.sessionId,
             workspaceId: data.workspaceId
           });
@@ -3575,12 +3599,36 @@ function plugin(handlers) {
         }
         return;
       }
+      if (event === "panel.activated" && handlers.onPanelActivated) {
+        const data = msg.data ?? {};
+        if (data.tabId) {
+          tabMeta.set(data.tabId, {
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId
+          });
+        }
+        try {
+          await handlers.onPanelActivated(panelId, data.params, ctx2, {
+            tabId: data.tabId ?? tabId,
+            sessionId: data.sessionId,
+            workspaceId: data.workspaceId
+          });
+        } catch (err) {
+          log("error", `onPanelActivated for "${panelId}" threw: ${describe(err)}`);
+        }
+        return;
+      }
       if (!handlers.onEvent) {
         log("warn", `panel event "${event}" ignored: this plugin handles no events.`);
         return;
       }
       try {
-        await handlers.onEvent(panelId, event, msg.data, ctx2);
+        const known = tabId ? tabMeta.get(tabId) : void 0;
+        await handlers.onEvent(panelId, event, msg.data, ctx2, {
+          tabId,
+          sessionId: known?.sessionId,
+          workspaceId: known?.workspaceId
+        });
       } catch (err) {
         log("error", `panel event "${event}" handler threw: ${describe(err)}`);
       }

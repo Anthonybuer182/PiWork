@@ -1,6 +1,7 @@
-import { useMemo, useEffect } from 'react';
+import { useMemo, useEffect, useRef } from 'react';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import { createProxySDKClient, IPCTransport } from '@pi/sdk-wrapper';
+import type { PluginMessageData } from '@pi/types';
 import {
   SDKProvider,
   useSDK,
@@ -18,9 +19,12 @@ import {
   initAskBridge,
   useTodoStore,
   initTodoBridge,
+  openDroppedPaths,
   initToolBridge,
   initPluginVoiceBridge,
   getPluginBridge,
+  toast,
+  useI18n,
 } from '@pi/ui';
 import { AppShell } from '@pi/ui';
 import { LayoutToggles, PanelTabs } from '@pi/ui';
@@ -67,6 +71,7 @@ const HOST_PANELS: PanelEntry[] = [
 function AppContent() {
   useTheme();
   const sdk = useSDK();
+  const { t } = useI18n();
 
   const sidebarOpen = useUIStore((s) => s.sidebarOpen);
   const rightPanelOpen = useUIStore((s) => s.rightPanelOpen);
@@ -265,6 +270,26 @@ function AppContent() {
     useTodoStore.getState().sync(sessionId);
   }, [activeSessionId]);
 
+  // Background approvals/questions render inside that conversation's timeline.
+  // When one arrives for a conversation that is not on screen, say so — the
+  // run is blocked until someone answers.
+  const pendingPermissions = usePermissionStore((s) => s.pendingByToolCall);
+  const pendingAsks = useAskStore((s) => s.requests);
+  const announcedRef = useRef(new Set<string>());
+  useEffect(() => {
+    const active = useUIStore.getState().activeSessionId;
+    for (const request of Object.values(pendingPermissions)) {
+      if (request.sessionId === active || announcedRef.current.has(request.requestId)) continue;
+      announcedRef.current.add(request.requestId);
+      toast(t('后台会话需要审批：{summary}', { summary: request.summary }));
+    }
+    for (const request of Object.values(pendingAsks)) {
+      if (request.sessionId === active || announcedRef.current.has(request.requestId)) continue;
+      announcedRef.current.add(request.requestId);
+      toast(t('后台会话有一个问题在等你'));
+    }
+  }, [pendingPermissions, pendingAsks, t]);
+
   // ── Tell main which conversation is on screen ──
   // Same view-fact reasoning as the workspace above: only the renderer knows.
   // Session-scoped plugin backends (browser, viewer) resolve "the current
@@ -311,8 +336,31 @@ function AppContent() {
     }).electronAPI;
     if (!api?.on) return;
     api.on('pi:chat:send', (payload) => {
-      const text = (payload as { text?: string } | undefined)?.text;
-      if (text) useComposerStore.getState().setTriggerSend(text);
+      const p = payload as { text?: string; pluginMessage?: unknown } | undefined;
+      const text = p?.text;
+      if (text) {
+        // The plugin message rides along when the host sent one: the composer
+        // then delivers the turn as a plugin request card instead of a typed
+        // user message (see composer.tsx). A host that only sent text still
+        // works — it just renders as a user turn, as before.
+        useComposerStore
+          .getState()
+          .setTriggerSend(text, p?.pluginMessage as PluginMessageData | undefined);
+      }
+    });
+  }, []);
+
+  // A file dropped on a plugin panel BODY is forwarded out of that native view
+  // by the plugin preload (view → main → here); the shell DOM never sees it.
+  // Open it through the same right-column path as a drop on the tab strip.
+  useEffect(() => {
+    const api = (window as unknown as {
+      electronAPI?: { on?: (channel: string, cb: (payload: unknown) => void) => void };
+    }).electronAPI;
+    if (!api?.on) return;
+    api.on('pi:os:dropped-files', (payload) => {
+      const paths = (payload as { paths?: string[] } | undefined)?.paths;
+      if (Array.isArray(paths) && paths.length > 0) void openDroppedPaths(paths);
     });
   }, []);
 

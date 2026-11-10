@@ -2,8 +2,9 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname, parse, resolve } from 'path';
 import { homedir } from 'os';
 import type { ConfigService } from '../services/config.js';
-import { SettingsManager, AuthStorage, ModelRegistry, getAgentDir, loadSkills } from '@earendil-works/pi-coding-agent';
-import type { Skill as SdkSkill } from '@earendil-works/pi-coding-agent';
+import { SettingsManager, getAgentDir, loadSkills } from '@earendil-works/pi-coding-agent';
+import type { ModelRegistry, ModelRuntime, Skill as SdkSkill } from '@earendil-works/pi-coding-agent';
+import { createModelRegistry, getSharedModelRuntime } from './model-runtime.js';
 import type { Config, ModelCapabilities, ModelInfo, ModelProvider, ModelsConfig, ProviderEntry, ModelEntry, Skill } from '@pi/types';
 
 // ── Multimodal model auto-detection ──
@@ -260,21 +261,31 @@ export function migrateModelsConfig(): number {
 }
 
 // Re-read configured providers after models.json changes
-function refreshConfiguredProviders(modelRegistry: ModelRegistry): Set<string> {
+async function refreshConfiguredProviders(modelRegistry: ModelRegistry): Promise<Set<string>> {
   // Re-create registry to pick up changes
   const providers = getConfiguredModelProviders();
   // Force registry refresh
   try {
-    modelRegistry.refresh();
+    await modelRegistry.refresh();
   } catch {
     // refresh might not be available on in-memory instance
   }
   return providers;
 }
 
-export function createRealConfigService(cwd: string, agentDir?: string, modelRegistry?: ModelRegistry, settingsManager?: SettingsManager): ConfigService {
+export function createRealConfigService(cwd: string, agentDir?: string, modelRuntime?: ModelRuntime, settingsManager?: SettingsManager): ConfigService {
   const settings = settingsManager ?? SettingsManager.create(cwd, agentDir);
-  const registry = modelRegistry ?? ModelRegistry.create(AuthStorage.inMemory());
+
+  // pi 1.x: the runtime is async, the registry is only a synchronous read facade.
+  let runtimePromise: Promise<ModelRuntime> | undefined = modelRuntime
+    ? Promise.resolve(modelRuntime)
+    : undefined;
+  let registry: ModelRegistry | undefined;
+  async function getRegistry(): Promise<ModelRegistry> {
+    runtimePromise ??= getSharedModelRuntime();
+    const runtime = await runtimePromise;
+    return (registry ??= createModelRegistry(runtime));
+  }
   const resolvedAgentDir = agentDir || getAgentDir();
 
   // Determine which providers have usable auth (mutable after models.json writes)
@@ -290,7 +301,7 @@ export function createRealConfigService(cwd: string, agentDir?: string, modelReg
 
       // Validate: only keep the default model if it's in models.json AND has configured auth
       const configuredModelIds = getModelsJsonModelIds();
-      const availableModels = registry.getAvailable();
+      const availableModels = (await getRegistry()).getAvailable();
       const validModels = availableModels.filter((m) => configuredModelIds.has(m.id));
       if (rawDefaultModelId && !validModels.some((m) => m.id === rawDefaultModelId)) {
         rawDefaultModelId = validModels[0]?.id ?? '';
@@ -334,7 +345,8 @@ export function createRealConfigService(cwd: string, agentDir?: string, modelReg
         console.log(`[config] Auto-migrated ${patched} model(s) to multimodal (image input).`);
       }
       // Refresh from disk so listModels and getModelsConfig stay in sync
-      configuredProviders = refreshConfiguredProviders(registry);
+      const registry = await getRegistry();
+      configuredProviders = await refreshConfiguredProviders(registry);
       // Only return models that are explicitly configured in models.json
       const configuredModelIds = getModelsJsonModelIds();
       const models = registry.getAll().filter((m) =>
@@ -437,7 +449,7 @@ export function createRealConfigService(cwd: string, agentDir?: string, modelReg
         }
       }
       writeModelsConfig(config);
-      configuredProviders = refreshConfiguredProviders(registry);
+      configuredProviders = await refreshConfiguredProviders(await getRegistry());
     },
 
     async upsertProvider(name: string, provider: ProviderEntry): Promise<void> {
@@ -448,7 +460,7 @@ export function createRealConfigService(cwd: string, agentDir?: string, modelReg
       }
       current.providers[name] = provider;
       writeModelsConfig(current);
-      configuredProviders = refreshConfiguredProviders(registry);
+      configuredProviders = await refreshConfiguredProviders(await getRegistry());
     },
 
     async listRemoteModels(input: { baseUrl: string; api: string; apiKey: string }) {
@@ -490,14 +502,14 @@ export function createRealConfigService(cwd: string, agentDir?: string, modelReg
       }
 
       writeModelsConfig(current);
-      configuredProviders = refreshConfiguredProviders(registry);
+      configuredProviders = await refreshConfiguredProviders(await getRegistry());
     },
 
     async deleteProvider(name: string): Promise<void> {
       const current = readModelsConfig();
       delete current.providers[name];
       writeModelsConfig(current);
-      configuredProviders = refreshConfiguredProviders(registry);
+      configuredProviders = await refreshConfiguredProviders(await getRegistry());
     },
 
     async addModel(providerName: string, model: ModelEntry): Promise<void> {
@@ -509,7 +521,7 @@ export function createRealConfigService(cwd: string, agentDir?: string, modelReg
       }
       provider.models.push(normalizeModelInput(model));
       writeModelsConfig(current);
-      configuredProviders = refreshConfiguredProviders(registry);
+      configuredProviders = await refreshConfiguredProviders(await getRegistry());
     },
 
     async deleteModel(providerName: string, modelId: string): Promise<void> {
@@ -518,7 +530,7 @@ export function createRealConfigService(cwd: string, agentDir?: string, modelReg
       if (!provider) throw new Error(`Provider "${providerName}" does not exist`);
       provider.models = provider.models.filter((m) => m.id !== modelId);
       writeModelsConfig(current);
-      configuredProviders = refreshConfiguredProviders(registry);
+      configuredProviders = await refreshConfiguredProviders(await getRegistry());
     },
 
     async updateModel(providerName: string, modelId: string, model: Partial<ModelEntry>): Promise<void> {
@@ -541,7 +553,7 @@ export function createRealConfigService(cwd: string, agentDir?: string, modelReg
 
       provider.models[idx] = { ...updated, id: nextId };
       writeModelsConfig(current);
-      configuredProviders = refreshConfiguredProviders(registry);
+      configuredProviders = await refreshConfiguredProviders(await getRegistry());
 
       // A rename changes the id downstream code uses to look the model up, so
       // keep the saved default-model selection pointing at it. Match on the id

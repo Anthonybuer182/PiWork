@@ -1,24 +1,45 @@
 import { useEffect, useState } from 'react';
-import { AudioLines, Cpu, Hammer, SlidersHorizontal, Sparkles } from 'lucide-react';
+import {
+  AudioLines,
+  Cable,
+  Cpu,
+  FileText,
+  Hammer,
+  HardDrive,
+  Info,
+  SlidersHorizontal,
+  Sparkles,
+} from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useUIStore } from '@/stores/ui-store';
 import { useI18n, type MessageKey } from '@/i18n';
 import { hasVoiceApi } from '@/lib/voice/voice-client';
+import { hasStorageApi } from '@/lib/storage-client';
+import { hasMcpApi } from '@/lib/mcp-client';
+import { hasUpdateApi } from '@/lib/update-client';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { GeneralSettingsPage } from './general-settings';
 import { ModelsSettingsPage } from './models-settings';
+import { ContextSettingsPage } from './context-settings';
+import { StorageSettingsPage } from './storage-settings';
 import { SkillsSettingsPage } from './skills-settings';
 import { ToolsSettingsPage } from './tools-settings';
 import { VoiceSettingsPage } from './voice-settings';
+import { McpSettingsPage } from './mcp-settings';
+import { AboutSettingsPage } from './about-settings';
 
-type SectionId = 'general' | 'models' | 'voice' | 'tools' | 'skills';
+type SectionId = 'general' | 'models' | 'context' | 'storage' | 'voice' | 'tools' | 'skills' | 'mcp' | 'about';
 
 const SECTIONS: { id: SectionId; label: MessageKey; icon: typeof Cpu }[] = [
   { id: 'general', label: '通用', icon: SlidersHorizontal },
   { id: 'models', label: '模型', icon: Cpu },
+  { id: 'context', label: '上下文', icon: FileText },
+  { id: 'storage', label: '存储', icon: HardDrive },
   { id: 'voice', label: '语音', icon: AudioLines },
   { id: 'tools', label: '工具', icon: Hammer },
   { id: 'skills', label: '技能', icon: Sparkles },
+  { id: 'mcp', label: 'MCP', icon: Cable },
+  { id: 'about', label: '关于', icon: Info },
 ];
 
 /**
@@ -60,8 +81,15 @@ export function SettingsDialog() {
   }, []);
 
   // Voice is desktop-only: the web build has no microphone bridge or TTS
-  // playback path, so the section is absent rather than broken.
-  const sections = SECTIONS.filter((s) => s.id !== 'voice' || hasVoiceApi());
+  // playback path, so the section is absent rather than broken. Storage is
+  // likewise about a directory the desktop app owns, and 关于 is about an
+  // installed build that can be replaced.
+  const sections = SECTIONS.filter(
+    (s) => (s.id !== 'voice' || hasVoiceApi())
+      && (s.id !== 'storage' || hasStorageApi())
+      && (s.id !== 'mcp' || hasMcpApi())
+      && (s.id !== 'about' || hasUpdateApi()),
+  );
   const active = sections.find((s) => s.id === section) ?? sections[0];
 
   return (
@@ -71,7 +99,7 @@ export function SettingsDialog() {
         // A click on the dimmed backdrop must not discard a half-finished
         // form. Esc and the close button remain.
         onInteractOutside={(e) => e.preventDefault()}
-        className="h-[min(680px,calc(100vh-96px))] w-[min(940px,calc(100vw-96px))] max-w-none gap-0 overflow-hidden p-0 outline-none sm:rounded-xl"
+        className="h-[min(680px,calc(100vh-96px))] w-[min(940px,calc(100vw-96px))] max-w-none gap-0 overflow-hidden p-0 outline-hidden sm:rounded-xl"
       >
         <DialogTitle className="sr-only">{t('设置')}</DialogTitle>
         <DialogDescription className="sr-only">{t('配置模型服务商、技能和通用选项')}</DialogDescription>
@@ -96,7 +124,7 @@ export function SettingsDialog() {
                 onClick={() => setSection(id)}
                 className={cn(
                   'flex items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors',
-                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
+                  'focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring',
                   section === id
                     ? 'bg-accent font-medium text-accent-foreground'
                     : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
@@ -118,9 +146,13 @@ export function SettingsDialog() {
             <div className="min-h-0 flex-1">
               {section === 'general' && <GeneralSettingsPage />}
               {section === 'models' && <ModelsSettingsPage />}
+              {section === 'context' && <ContextSettingsPage />}
+              {section === 'storage' && hasStorageApi() && <StorageSettingsPage />}
               {section === 'voice' && hasVoiceApi() && <VoiceSettingsPage />}
               {section === 'tools' && <ToolsSettingsPage />}
               {section === 'skills' && <SkillsSettingsPage />}
+              {section === 'mcp' && hasMcpApi() && <McpSettingsPage />}
+              {section === 'about' && hasUpdateApi() && <AboutSettingsPage />}
             </div>
           </div>
         </div>

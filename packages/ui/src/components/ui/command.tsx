@@ -51,7 +51,7 @@ const CommandInput = React.forwardRef<HTMLInputElement, CommandInputProps>(
       <input
         ref={ref}
         className={cn(
-          'flex h-11 w-full rounded-md bg-transparent py-3 text-sm outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50',
+          'flex h-11 w-full rounded-md bg-transparent py-3 text-sm outline-hidden placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50',
           className,
         )}
         {...props}
@@ -103,7 +103,7 @@ const CommandItem = React.forwardRef<HTMLDivElement, CommandItemProps>(
         if (e.key === 'Enter' && onSelect) onSelect();
       }}
       className={cn(
-        'relative flex cursor-default select-none items-center rounded-sm px-2 py-1.5 text-sm outline-none hover:bg-accent hover:text-accent-foreground',
+        'relative flex cursor-default select-none items-center rounded-sm px-2 py-1.5 text-sm outline-hidden hover:bg-accent hover:text-accent-foreground',
         className,
       )}
       {...props}

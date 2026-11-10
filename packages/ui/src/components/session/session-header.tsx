@@ -113,7 +113,7 @@ export function SessionHeader() {
             }}
             maxLength={120}
             aria-label={t('会话标题')}
-            className="h-7 w-64 rounded-md border border-input bg-background px-2 text-sm outline-none focus:ring-1 focus:ring-foreground/20"
+            className="h-7 w-64 rounded-md border border-input bg-background px-2 text-sm outline-hidden focus:ring-1 focus:ring-foreground/20"
           />
           <Button
             variant="ghost"

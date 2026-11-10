@@ -1,7 +1,7 @@
 /**
  * Stubs for GenOffice's `PdfApi` (window.pdfApi).
  *
- * 55 members, of which the renderer calls a scattered handful during bootstrap —
+ * 80 members, of which the renderer calls a scattered handful during bootstrap —
  * none of them guessable from the outside (the first slides run died on
  * `clipboardProbe`). Each returns the SHAPE its declaration promises, so a
  * stubbed call degrades to "feature unavailable" rather than blowing up
@@ -15,7 +15,15 @@
  */
 export const pdfApiStubs: Record<string, unknown> = {
   consumePending: () => Promise.resolve(null),
+  openSourcePath: () => Promise.resolve(),
   readFile: () => Promise.resolve(null),
+  readFileChunk: () => undefined,
+  decryptPdf: () => undefined,
+  compareReadPdf: () => Promise.resolve([]),
+  compareReadOpen: () => undefined,
+  pickAttachmentFile: () => Promise.resolve(null),
+  exportAttachment: () => undefined,
+  reduceFileSize: () => Promise.resolve(null),
   save: () => Promise.resolve(null),
   requestRedactionCopy: () => Promise.resolve(false),
   autoRename: () => Promise.resolve(null),
@@ -44,10 +52,17 @@ export const pdfApiStubs: Record<string, unknown> = {
   imageSearch: () => Promise.resolve(null),
   fetchImage: () => Promise.resolve(null),
   generateImage: () => Promise.resolve(''),
+  listDigitalSignatures: () => Promise.resolve([]),
+  pickCertificate: () => Promise.resolve(null),
+  listSystemCertificates: () => Promise.resolve(null),
+  releaseCertificate: () => undefined,
+  inspectCertificate: () => undefined,
+  signWithCertificate: () => Promise.resolve(null),
   listSavedSignatures: () => Promise.resolve([]),
   addSavedSignature: () => Promise.resolve([]),
   removeSavedSignature: () => Promise.resolve([]),
   getUsername: () => Promise.resolve(''),
+  onUsernameChanged: () => () => undefined,
   setDirty: () => undefined,
   onCloseSaveRequest: () => () => undefined,
   sendCloseSaveResult: () => undefined,
@@ -55,6 +70,10 @@ export const pdfApiStubs: Record<string, unknown> = {
   sendSaveAsResult: () => undefined,
   onSaveAsFlow: () => () => undefined,
   onPrintRequest: () => () => undefined,
+  print: () => Promise.resolve(false),
+  printFile: () => undefined,
+  listPrinters: () => Promise.resolve([]),
+  printerOptions: () => Promise.resolve([]),
   onFileRenamed: () => () => undefined,
   getLanguage: () => Promise.resolve(null),
   onLanguageChanged: () => () => undefined,
@@ -65,6 +84,12 @@ export const pdfApiStubs: Record<string, unknown> = {
   onAiPanelPrefsChanged: () => () => undefined,
   onChromePressed: () => () => undefined,
   getAiSettings: () => Promise.resolve(null),
+  setAiSettings: () => Promise.resolve(),
+  onAiSettingsChanged: () => () => undefined,
+  openAiModelSettings: () => Promise.resolve(),
+  openSkillsSettings: () => Promise.resolve(),
+  skillsList: () => Promise.resolve([]),
+  skillText: () => Promise.resolve(''),
   gskStatus: () => Promise.resolve(false),
   aiStream: () => Promise.resolve(),
   aiStreamCancel: () => Promise.resolve(),

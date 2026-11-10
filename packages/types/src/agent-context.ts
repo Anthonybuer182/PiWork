@@ -141,6 +141,36 @@ export interface AgentContextConfig {
   };
 }
 
+/**
+ * One of the global prompt/context files the Settings → 上下文 page edits.
+ *
+ * These live in the agent config dir, so they are outside every workspace and
+ * cannot be reached through the file tree unless the user opens that directory
+ * as a workspace of its own.
+ */
+export type GlobalContextFileKind = 'system' | 'append' | 'agents';
+
+export interface GlobalContextFile {
+  kind: GlobalContextFileKind;
+  /** The file the SDK reads; the path a create would write when absent. */
+  path: string;
+  exists: boolean;
+  content: string | null;
+  bytes: number;
+  chars: number;
+  mtimeMs: number;
+  /**
+   * AGENTS.md / CLAUDE.md variants that exist beside the active file but are
+   * not read: the loader takes the first name that exists in a fixed order.
+   */
+  shadowed: string[];
+}
+
+export interface GlobalContextInfo {
+  agentDir: string;
+  files: GlobalContextFile[];
+}
+
 /** Outcome of rebuilding the live session's prompt from disk. */
 export interface AgentContextReloadResult {
   /** True when the live session's prompt was rebuilt and the edit is live. */

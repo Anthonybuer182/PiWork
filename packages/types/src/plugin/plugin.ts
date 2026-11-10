@@ -27,7 +27,10 @@ export interface PluginPanelInfo {
   /** Not shown on the rail; still openable via panel.open. */
   hidden?: boolean;
   keepAlive?: 'always' | 'lru' | 'never';
-  /** Whether the panel's tabs follow the session. Defaults to 'global'. */
+  /**
+   * Whether the panel's tabs follow the session. Defaults to the panel's
+   * region: left column 'global', right column 'session'.
+   */
   scope?: import('./manifest.js').PanelScope;
   /** Several host tabs of this panel may be open at once. */
   multiInstance?: boolean;

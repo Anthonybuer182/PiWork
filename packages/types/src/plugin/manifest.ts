@@ -55,7 +55,12 @@ export interface PanelContribution {
    */
   entry: string;
   keepAlive?: PanelKeepAlive;
-  /** Whether the panel's tabs follow the session. Defaults to 'global'. */
+  /**
+   * Whether the panel's tabs follow the session. Defaults to the panel's
+   * region: the left column is the workspace as a whole ('global'), the right
+   * column is the conversation being worked on ('session'). A right-side panel
+   * that must stay open across conversations declares 'global' explicitly.
+   */
   scope?: PanelScope;
   /**
    * Allow several host tabs of this panel at once.
@@ -67,6 +72,18 @@ export interface PanelContribution {
    * second open focuses the existing tab instead of creating another.
    */
   multiInstance?: boolean;
+  /**
+   * Whether the host may surface this panel as the visible effect of a tool
+   * call. Defaults to true: after any of the plugin's tools runs, the panel
+   * earns a place in the layout, because the panel is where that plugin's
+   * work happens (the browser you are driving).
+   *
+   * Set false when the panel is a VIEWPORT for content rather than a
+   * workspace — the file viewer. An agent reading an attached file must not
+   * open the viewer on the user's screen; when a tool really has something to
+   * show, it calls `panel.open` itself, which is unaffected by this flag.
+   */
+  surfaceOnActivity?: boolean;
   /**
    * Which sidebar column the panel lives in. Defaults to 'right'.
    *
@@ -255,6 +272,17 @@ export type PluginPermission = string;
  *
  * History:
  *
+ * 9 — added the `message-action` host→plugin message and the
+ *     `messages.update` / `messages.remove` capabilities: cards inside a
+ *     plugin-originated message are interactive, and the plugin can revise or
+ *     withdraw the message by id. Purely additive; floor stays 3.
+ *
+ * 8 — added the `messages.post` host capability and the `messages`
+ *     permission: a plugin can post a persistent plugin message (declarative
+ *     card/text) into a conversation timeline as a pi `custom` entry. It is
+ *     kept with the transcript but is NOT sent to the model. Purely additive;
+ *     plugins that never call it behave exactly as before, floor stays 3.
+ *
  * 7 — added optional workspace attribution: `PluginToolCallMessage.workspaceId`
  *     (the calling conversation's workspace), `panel.mounted`'s
  *     `data.workspaceId`, and an injected `piSDK.workspace` /
@@ -291,7 +319,7 @@ export type PluginPermission = string;
  *     A manifest still declaring `selectionActions` is now rejected rather than
  *     silently ignored — see the `apiVersion` note on PluginManifest.
  */
-export const PLUGIN_PROTOCOL_VERSION = 7;
+export const PLUGIN_PROTOCOL_VERSION = 9;
 
 /**
  * The OLDEST protocol version this build still loads — the lower bound of the

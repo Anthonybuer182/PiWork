@@ -1,6 +1,7 @@
 import { ipcMain, dialog, app } from 'electron';
 import type { IpcMainInvokeEvent } from 'electron';
-import { ModelRegistry, AuthStorage, SettingsManager } from '@earendil-works/pi-coding-agent';
+import { SettingsManager } from '@earendil-works/pi-coding-agent';
+import type { ModelRuntime } from '@earendil-works/pi-coding-agent';
 import {
   createRealWorkspaceService,
   createRealSessionService,
@@ -38,19 +39,20 @@ export interface RegisterIpcHandlersOptions {
   getGlobalDisabledTools?: RealChatServiceOptions['getGlobalDisabledTools'];
   /** Called after the run is aborted and before the session file is removed. */
   onSessionDeleted?: (sessionId: string) => void;
+  /** MCP servers — see RealChatServiceOptions.mcp. */
+  mcp?: RealChatServiceOptions['mcp'];
 }
 
 let onSessionDeletedHook: ((sessionId: string) => void) | undefined;
 
 export function registerIpcHandlers(
   settingsManager: SettingsManager,
-  modelRegistry?: ModelRegistry,
+  modelRuntime?: ModelRuntime,
   options?: RegisterIpcHandlersOptions,
 ): { chatService: ChatService } {
-  // Shared ModelRegistry so config writes refresh chat's visible model list.
-  // If an external registry is provided, use it (allows sharing with VLM analyzer).
-  const sharedModelRegistry = modelRegistry ?? ModelRegistry.create(AuthStorage.inMemory());
-
+  // One ModelRuntime for the whole process: config writes and chat's visible
+  // model list must read the same catalog. When the host does not pass one in,
+  // the adapters lazily create (and share) their own.
   // app.getPath('home') is stable across platforms and never points inside
   // the app bundle (unlike process.cwd() in packaged builds).
   const defaultCwd = app.getPath('home');
@@ -58,13 +60,14 @@ export function registerIpcHandlers(
   workspaceService = createRealWorkspaceService();
   sessionService = createRealSessionService();
   fileService = createRealFileService();
-  configService = createRealConfigService(defaultCwd, undefined, sharedModelRegistry, settingsManager);
+  configService = createRealConfigService(defaultCwd, undefined, modelRuntime, settingsManager);
   onSessionDeletedHook = options?.onSessionDeleted;
-  chatService = createRealChatService(defaultCwd, sharedModelRegistry, settingsManager, {
+  chatService = createRealChatService(defaultCwd, modelRuntime, settingsManager, {
     customToolsProvider: options?.customToolsProvider,
     pluginDocsProvider: options?.pluginDocsProvider,
     onSessionCreated: options?.onSessionCreated,
     getGlobalDisabledTools: options?.getGlobalDisabledTools,
+    mcp: options?.mcp,
   });
 
   // The renderer owns "which workspace is on screen" — a view fact, not a
@@ -252,7 +255,7 @@ async function handleChat(action: string, params: unknown): Promise<unknown> {
       return chatService.navigateTree(p.sessionId as string, p.entryId as string, p.options as any);
     case 'compact':
       return chatService.compact(p.sessionId as string, p.customInstructions as string | undefined);
-    // ── agent context (the host's context panel) ──
+    // ── agent context (Settings → 上下文 and host tools) ──
     case 'getAgentContextConfig':
       return chatService.getAgentContextConfig(
         p.workspacePath as string,
@@ -261,6 +264,13 @@ async function handleChat(action: string, params: unknown): Promise<unknown> {
       );
     case 'reloadAgentContext':
       return chatService.reloadAgentContext(p.workspacePath as string);
+    case 'getGlobalContextInfo':
+      return chatService.getGlobalContextInfo();
+    case 'reloadAgentContextForFile':
+      return chatService.reloadAgentContextForFile(
+        p.filePath as string,
+        p.preferredWorkspace as string | undefined,
+      );
     case 'writeContextFile':
       return chatService.writeContextFile(p as unknown as Parameters<typeof chatService.writeContextFile>[0]);
     case 'deleteContextFile':

@@ -1,4 +1,5 @@
 import { useCallback, useEffect } from 'react';
+import { electronApi } from '../lib/electron-ipc';
 import { useLanguageStore, type Language } from './language-store';
 import { EN_MESSAGES, type MessageKey } from './messages.en';
 
@@ -47,10 +48,19 @@ export function useI18n() {
   return { language, setLanguage, t: tr };
 }
 
-/** Keep `<html lang>` in step — assistive tech and spellcheck read it. */
+/**
+ * Keep `<html lang>` in step — assistive tech and spellcheck read it — and
+ * tell the desktop shell about the change so its native menu bar can relabel
+ * itself. The menu is app-global and lives in main, which cannot read our
+ * localStorage; on mount this also corrects a menu built with the default
+ * language before the renderer loaded. No-op in the web build.
+ */
 export function useLanguageSync(): void {
   const language = useLanguageStore((s) => s.language);
   useEffect(() => {
     document.documentElement.lang = language === 'zh' ? 'zh-CN' : 'en';
+    electronApi()
+      ?.invoke('pi:app:setLanguage', language)
+      .catch(() => {});
   }, [language]);
 }

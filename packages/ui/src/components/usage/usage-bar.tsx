@@ -131,26 +131,28 @@ export function UsageBar() {
         </span>
       )}
       <div className="flex-1" />
-      {/* Context window usage */}
+      {/* Context window usage. The SDK reports `percent` on a 0–100 scale
+          (getContextUsage), not 0–1 — thresholds, width and label all use it
+          directly. */}
       {ctx && ctx.percent != null && (
         <span
-          title={`Context: ${ctx.tokens?.toLocaleString() ?? '?'} / ${ctx.contextWindow.toLocaleString()} (${(ctx.percent * 100).toFixed(1)}%)`}
+          title={`Context: ${ctx.tokens?.toLocaleString() ?? '?'} / ${ctx.contextWindow.toLocaleString()} (${ctx.percent.toFixed(1)}%)`}
           className="flex items-center gap-1.5"
         >
           <div className="h-1.5 w-20 bg-muted rounded-full overflow-hidden">
             <div
               className={cn(
                 'h-full rounded-full transition-all duration-500',
-                ctx.percent > 0.8
+                ctx.percent > 80
                   ? 'bg-destructive/80'
-                  : ctx.percent > 0.6
+                  : ctx.percent > 60
                     ? 'bg-amber-400/80'
                     : 'bg-foreground/40',
               )}
-              style={{ width: `${Math.min(ctx.percent * 100, 100)}%` }}
+              style={{ width: `${Math.min(ctx.percent, 100)}%` }}
             />
           </div>
-          <span className="text-[10px]">{(ctx.percent * 100).toFixed(0)}%</span>
+          <span className="text-[10px]">{ctx.percent.toFixed(0)}%</span>
         </span>
       )}
     </div>

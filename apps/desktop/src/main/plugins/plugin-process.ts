@@ -212,6 +212,17 @@ export class PluginProcess {
     this.post({ type: 'card-event', toolName, eventId, kind, payload });
   }
 
+  /** Fire-and-forget: a card inside a plugin-originated message was used. */
+  sendMessageAction(
+    messageId: string,
+    eventId: string,
+    kind: 'click' | 'submit',
+    payload?: unknown,
+    sessionId?: string,
+  ): void {
+    this.post({ type: 'message-action', messageId, eventId, kind, payload, sessionId });
+  }
+
   /** Execute an agent tool in the backend; resolves with agent-facing result. */
   executeTool(
     name: string,

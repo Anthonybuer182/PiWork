@@ -10,6 +10,8 @@ import type {
   PluginInfo,
   PluginToolContent,
   UiNode,
+  PluginMessageData,
+  PluginMessagePatch,
 } from '@pi/types';
 import { PLUGIN_PROTOCOL_VERSION } from '@pi/types';
 import { PluginRegistry } from './registry';
@@ -80,6 +82,36 @@ export class PluginSystem {
   /** Notified whenever the aggregate tool/skill set changes. */
   onExtensionsChanged: (() => void) | null = null;
   /**
+   * Notified after any plugin write/delete so the host can rebuild a live
+   * session when the path was one of its prompt/context files. Assigned once
+   * the chat service exists; the hub captures this lazily.
+   */
+  onContextFileWrite: ((filePath: string) => void) | null = null;
+  /**
+   * Append a plugin-originated message to a conversation (assigned once the
+   * chat service exists). The capability hub calls this lazily; `messages` is
+   * permission-gated and validated there.
+   */
+  appendPluginMessage:
+    | ((sessionId: string, data: PluginMessageData) => Promise<{ entryId: string }>)
+    | null = null;
+  /** Append an update/tombstone revision of a plugin message (assigned with append). */
+  updatePluginMessage:
+    | ((
+        sessionId: string,
+        messageId: string,
+        pluginId: string,
+        patch: PluginMessagePatch,
+      ) => Promise<{ entryId: string; revision: number }>)
+    | null = null;
+  removePluginMessage:
+    | ((
+        sessionId: string,
+        messageId: string,
+        pluginId: string,
+      ) => Promise<{ entryId: string; revision: number }>)
+    | null = null;
+  /**
    * A plugin's backend just (re)started — activate, re-enable, or crash
    * restart. Panel views reused across those events hold ports to the dead
    * process; the host uses this to push fresh ones (see PluginWebViews.
@@ -132,6 +164,23 @@ export class PluginSystem {
       sendToRenderer: opts?.sendToRenderer,
       getPermissionMode: opts?.getPermissionMode,
       voiceReady: opts?.voiceReady,
+      // Lazy on purpose: the chat service is created after the kernel, and the
+      // hook is only invoked by a later plugin write.
+      onContextFileWrite: (filePath) => this.onContextFileWrite?.(filePath),
+      appendPluginMessage: (sessionId, data) =>
+        this.appendPluginMessage
+          ? this.appendPluginMessage(sessionId, data)
+          : Promise.reject(new Error('messages.post: no conversation store attached')),
+      updatePluginMessage: (sessionId, messageId, pluginId, patch) =>
+        this.updatePluginMessage
+          ? this.updatePluginMessage(sessionId, messageId, pluginId, patch)
+          : Promise.reject(new Error('messages.update: no conversation store attached')),
+      removePluginMessage: (sessionId, messageId, pluginId) =>
+        this.removePluginMessage
+          ? this.removePluginMessage(sessionId, messageId, pluginId)
+          : Promise.reject(new Error('messages.remove: no conversation store attached')),
+      sendToSession: (sessionId, channel, payload) =>
+        this.eventSink?.sendToSession(sessionId, channel, payload),
     });
     this.marketplace = new PluginMarketplace(this.registry);
   }
@@ -398,8 +447,8 @@ export class PluginSystem {
           name: tool.name,
           label: tool.name,
           // Carried on the tool itself so anything reporting on the tool set —
-          // the context panel's per-plugin schema cost, most directly — can
-          // attribute a tool to its plugin without re-deriving it from the
+          // the context-audit tool's per-plugin schema cost, most directly —
+          // can attribute a tool to its plugin without re-deriving it from the
           // registry.
           pluginId,
           description: tool.description ?? `Plugin tool from ${pluginId}`,
@@ -460,6 +509,21 @@ export class PluginSystem {
     return true;
   }
 
+  /** Route a click/submit inside a plugin-originated message's card. */
+  sendMessageAction(
+    pluginId: string,
+    messageId: string,
+    eventId: string,
+    kind: 'click' | 'submit',
+    payload?: unknown,
+    sessionId?: string,
+  ): boolean {
+    const proc = this.processes.get(pluginId);
+    if (!proc) return false;
+    proc.sendMessageAction(messageId, eventId, kind, payload, sessionId);
+    return true;
+  }
+
   /** Execute one agent tool in its plugin backend (agent loop entry point). */
   async executeTool(
     pluginId: string,
@@ -474,9 +538,14 @@ export class PluginSystem {
     }
     const result = await proc.executeTool(name, params, sessionId, workspaceId);
     // Agent-activity linkage: a tool that just ran means the plugin is doing
-    // visible work — surface its primary panel so the effect is shown. Plugins
-    // that contribute no panel have nothing to open, and `openPanelForActivity`
-    // no-ops.
+    // visible work — surface its primary panel so the effect is shown. Panels
+    // that are a viewport for content rather than a workspace where work
+    // happens opt out (`surfaceOnActivity: false` on the panel): the file
+    // viewer kept opening the right column every time an agent merely READ an
+    // attached file (`office_read`, `pdf_render`), which reads as the app
+    // auto-opening a window nobody asked for. A tool that genuinely has
+    // something to show calls `panel.open` itself — the files plugin does that
+    // for created/edited documents.
     this.openPanelForActivity(pluginId);
     return result;
   }
@@ -486,6 +555,7 @@ export class PluginSystem {
     const plugin = this.registry.get(pluginId);
     const panel = plugin?.manifest.contributes?.panels?.find((p) => !p.hidden);
     if (!panel) return;
+    if (panel.surfaceOnActivity === false) return;
     this.emitEvent({ type: 'panel-open', pluginId, panelId: panel.id, focus: true });
   }
 

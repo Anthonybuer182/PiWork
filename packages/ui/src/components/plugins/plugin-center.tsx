@@ -144,6 +144,8 @@ function InstalledItem({ plugin }: { plugin: PluginInfo }) {
   const rollbackPlugin = usePluginStore((s) => s.rollbackPlugin);
   const catalog = usePluginStore((s) => s.catalog);
   const installPhases = usePluginStore((s) => s.installPhases);
+  const mutedPlugins = usePluginStore((s) => s.mutedPlugins);
+  const setPluginMuted = usePluginStore((s) => s.setPluginMuted);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [keepData, setKeepData] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -237,6 +239,21 @@ function InstalledItem({ plugin }: { plugin: PluginInfo }) {
             {plugin.permissions.map((p) => (
               <Badge key={p} variant="outline" className="text-[10px] font-normal">{p}</Badge>
             ))}
+          </div>
+        ) : null}
+
+        {plugin.permissions.includes('messages') ? (
+          <div
+            className="mt-2 flex items-center justify-between gap-3 rounded-md border border-dashed px-2 py-1.5"
+            data-plugin-messages-mute={plugin.id}
+          >
+            <div className="text-xs text-muted-foreground">{t('在会话里显示插件消息')}</div>
+            <Switch
+              checked={!mutedPlugins.includes(plugin.id)}
+              onCheckedChange={(checked) => void setPluginMuted(plugin.id, !checked)}
+              aria-label={t('在会话里显示插件消息')}
+              data-plugin-messages-mute-switch={plugin.id}
+            />
           </div>
         ) : null}
 

@@ -1,7 +1,7 @@
 /**
  * Stubs for GenOffice's `HtmlApi` (window.htmlApi).
  *
- * 51 members, of which the renderer calls a scattered handful during bootstrap —
+ * 61 members, of which the renderer calls a scattered handful during bootstrap —
  * none of them guessable from the outside (the first slides run died on
  * `clipboardProbe`). Each returns the SHAPE its declaration promises, so a
  * stubbed call degrades to "feature unavailable" rather than blowing up
@@ -15,6 +15,7 @@
  */
 export const htmlApiStubs: Record<string, unknown> = {
   consumePending: () => Promise.resolve(null),
+  openSourcePath: () => Promise.resolve(),
   consumeHeadlessExport: () => Promise.resolve(null),
   headlessExportDone: () => undefined,
   readFile: () => Promise.resolve(''),
@@ -31,6 +32,8 @@ export const htmlApiStubs: Record<string, unknown> = {
   onCloseSaveRequest: () => () => undefined,
   sendCloseSaveResult: () => undefined,
   onFileRenamed: () => () => undefined,
+  onFileChangedOnDisk: () => () => undefined,
+  ackFileChangedOnDisk: () => undefined,
   setProvisionalTitle: () => undefined,
   pickImage: () => Promise.resolve(null),
   saveImage: () => Promise.resolve(null),
@@ -46,6 +49,7 @@ export const htmlApiStubs: Record<string, unknown> = {
   exportDocx: () => Promise.resolve(null),
   exportPdf: () => Promise.resolve(null),
   exportHtml: () => Promise.resolve(null),
+  printHtml: () => Promise.resolve(null),
   getLanguage: () => Promise.resolve(null),
   onLanguageChanged: () => () => undefined,
   getTheme: () => Promise.resolve(null),
@@ -57,6 +61,12 @@ export const htmlApiStubs: Record<string, unknown> = {
   onAiPanelPrefsChanged: () => () => undefined,
   onChromePressed: () => () => undefined,
   getAiSettings: () => Promise.resolve(null),
+  setAiSettings: () => Promise.resolve(),
+  onAiSettingsChanged: () => () => undefined,
+  openAiModelSettings: () => Promise.resolve(),
+  openSkillsSettings: () => Promise.resolve(),
+  skillsList: () => Promise.resolve([]),
+  skillText: () => Promise.resolve(''),
   aiGskStatus: () => Promise.resolve(null),
   aiStream: () => Promise.resolve(),
   aiStreamCancel: () => Promise.resolve(),

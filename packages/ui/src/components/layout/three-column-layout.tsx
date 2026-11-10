@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, useCallback, type ReactNode } from 'react';
+import { useEffect, useRef, useState, useCallback, type CSSProperties, type ReactNode } from 'react';
 import { cn } from '@/lib/utils';
 import { useI18n } from '@/i18n';
 import { getHostChrome, DRAG, NO_DRAG, WindowControls } from './title-bar';
@@ -626,7 +626,11 @@ export function ThreeColumnLayout({
               // The toggles zone sits over this segment's right end — unless
               // the chat has taken that edge.
               paddingRight: swapped ? 0 : trailingWidth,
-            }}
+              // Split tab bars need to divide the SAME width as the body panes
+              // under them. They read this to cancel the reservation above and
+              // then re-reserve it on the rightmost bar (panel-tabs.tsx).
+              ['--header-trailing-width' as string]: `${swapped ? 0 : trailingWidth}px`,
+            } as CSSProperties}
           >
             {rightHeader != null && (
               <div className="flex h-full min-w-0 flex-1 items-stretch">
@@ -647,7 +651,7 @@ export function ThreeColumnLayout({
               transform: 'translateX(-50%)',
             }}
           >
-            <span className="whitespace-nowrap rounded-full bg-primary px-2.5 py-1 text-[11px] font-medium leading-none text-primary-foreground shadow-sm">
+            <span className="whitespace-nowrap rounded-full bg-primary px-2.5 py-1 text-[11px] font-medium leading-none text-primary-foreground shadow-xs">
               {t('松开收起{label}', { label: hintLabel })}
             </span>
           </div>
@@ -688,7 +692,7 @@ export function ThreeColumnLayout({
                 sidebarOpen ? { width: currentLeftWidth, transition: widthTransition } : undefined
               }
               className={cn(
-                'flex-shrink-0 overflow-hidden border-r',
+                'shrink-0 overflow-hidden border-r',
                 !sidebarOpen && 'hidden',
               )}
             >
@@ -748,7 +752,7 @@ export function ThreeColumnLayout({
               }}
               className={cn(
                 'overflow-hidden flex flex-col',
-                rightTakesCenter ? 'min-w-0 flex-1' : 'flex-shrink-0',
+                rightTakesCenter ? 'min-w-0 flex-1' : 'shrink-0',
               )}
             >
               <div className="flex-1 overflow-hidden">{rightPanel}</div>

@@ -159,7 +159,12 @@ const MEASURE_ATTRS: ReadonlyMap<string, AttrFactors> = new Map<string, AttrFact
 function convertMeasure(value: string, factor: number): string {
   const m = MEASURE_RE.exec(value)
   if (!m) return value
-  return String(Math.round(parseFloat(m[1]) * PT_PER_UNIT[m[2]]! * factor))
+  // A hostile file can declare astronomical measures ("9".repeat(400) + "in"):
+  // the product overflows to Infinity, which would serialize verbatim into
+  // the normalized attribute. Keep the original bytes instead.
+  const converted = parseFloat(m[1]) * PT_PER_UNIT[m[2]]! * factor
+  if (!Number.isFinite(converted)) return value
+  return String(Math.round(converted))
 }
 
 function mapUriValue(value: string): string {
@@ -428,4 +433,22 @@ export function normalizeOoxmlXml(xml: string): string {
   }
   out += xml.slice(cursor)
   return out
+}
+
+const DUP_STYLE_REF_RE = /(?:<w:([pr])Style\b[^>]*\/>\s*)+(?=<w:\1Style\b[^>]*\/>)/g
+
+/** Cheap pre-check; dedupeStyleRefs is only worth calling when this is true. */
+export function hasDuplicateStyleRefs(xml: string): boolean {
+  DUP_STYLE_REF_RE.lastIndex = 0
+  return DUP_STYLE_REF_RE.test(xml)
+}
+
+/**
+ * Repeated w:pStyle / w:rStyle children of one property set: Word applies the
+ * last one (invalid per schema, written by some Markdown converters as
+ * `Heading1` + `MdHeading1`), so the earlier siblings are dropped here and
+ * every reader, string or node based, sees the winner.
+ */
+export function dedupeStyleRefs(xml: string): string {
+  return xml.replace(DUP_STYLE_REF_RE, '')
 }

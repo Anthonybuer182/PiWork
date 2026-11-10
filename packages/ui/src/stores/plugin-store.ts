@@ -24,6 +24,11 @@ interface PluginBridge {
   send: (pluginId: string, payload: unknown) => void;
   onMessage: (callback: (pluginId: string, payload: unknown) => void) => void;
   onEvent: (callback: (event: PluginEvent) => void) => void;
+  /** Per-plugin "show plugin messages in conversations" (host-owned). */
+  messages: {
+    muted: () => Promise<string[]>;
+    setMuted: (pluginId: string, muted: boolean) => Promise<{ ok: boolean; muted?: string[]; error?: string }>;
+  };
   /** Hand the shell's theme tokens to main, which fans them out to plugin views. */
   setTheme?: (tokens: Record<string, string>) => void;
 }
@@ -40,6 +45,8 @@ export interface PluginStoreState {
   loaded: boolean;
   /** Latest panel status per plugin (agent activity linkage). */
   panelStatuses: Record<string, PluginPanelStatus>;
+  /** Plugins whose messages are hidden from conversation timelines. */
+  mutedPlugins: string[];
 
   // ── Marketplace ──
   catalog: MarketEntry[];
@@ -51,6 +58,10 @@ export interface PluginStoreState {
   marketErrors: Record<string, string | undefined>;
 
   loadPlugins: () => Promise<void>;
+  /** Load the host's plugin-message mute list. */
+  loadMutedPlugins: () => Promise<void>;
+  /** Hide/show one plugin's messages in conversation timelines. */
+  setPluginMuted: (pluginId: string, muted: boolean) => Promise<boolean>;
   loadCatalog: (force?: boolean) => Promise<void>;
   installPlugin: (pluginId: string) => Promise<boolean>;
   uninstallPlugin: (pluginId: string, keepData?: boolean) => Promise<boolean>;
@@ -84,6 +95,7 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => ({
   installed: [],
   loaded: false,
   panelStatuses: {},
+  mutedPlugins: [],
 
   catalog: [],
   catalogLoading: false,
@@ -110,6 +122,34 @@ export const usePluginStore = create<PluginStoreState>()((set, get) => ({
     }
     set({ plugins: plugins ?? [], loaded: true });
     await refreshInstalled(set);
+    await get().loadMutedPlugins();
+  },
+
+  loadMutedPlugins: async () => {
+    const bridge = getPluginBridge();
+    if (!bridge) return;
+    try {
+      set({ mutedPlugins: (await bridge.messages.muted()) ?? [] });
+    } catch (err) {
+      console.error('[plugin-store] mute list failed:', err);
+    }
+  },
+
+  setPluginMuted: async (pluginId, muted) => {
+    const bridge = getPluginBridge();
+    if (!bridge) return false;
+    try {
+      const res = await bridge.messages.setMuted(pluginId, muted);
+      if (res.ok) {
+        set({ mutedPlugins: res.muted ?? [] });
+        return true;
+      }
+      console.error('[plugin-store] set mute failed:', res.error);
+      return false;
+    } catch (err) {
+      console.error('[plugin-store] set mute failed:', err);
+      return false;
+    }
   },
 
   loadCatalog: async (force = false) => {

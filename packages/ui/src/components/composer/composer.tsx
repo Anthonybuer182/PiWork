@@ -27,9 +27,23 @@ import { useI18n, type MessageKey } from '@/i18n';
 import { useCommandStore, commandDescription, type RegisteredCommand } from '@/stores/command-store';
 import { toast } from '@/stores/toast-store';
 import { usePluginStore } from '@/stores/plugin-store';
-import type { ContentBlock, Config, Skill } from '@pi/types';
+import { canSaveAttachment, pathForFile, saveAttachmentToWorkspace } from '@/lib/os-drop';
+import type { Attachment, ContentBlock, Config, PluginMessageData, SavedAttachment, Skill } from '@pi/types';
 import { SKILL_REFERENCE_MARKER } from '@pi/types';
-import type { Attachment } from '@pi/types';
+
+interface SendVariables {
+  content: string;
+  sessionId: string;
+  attachments: Attachment[];
+  /** Per-message skill references (the composer chips), captured at send time. */
+  skills: Skill[];
+  /**
+   * Deliver the turn as a plugin request card (`chat.send`): no optimistic
+   * user bubble, and the SDK stores a plugin message entry instead of a user
+   * message. The agent still sees `content`.
+   */
+  pluginMessage?: PluginMessageData;
+}
 
 export function Composer() {
   const { t } = useI18n();
@@ -91,7 +105,6 @@ export function Composer() {
     setValue,
     isStreaming,
     isDragging,
-    setIsStreaming,
     setIsDragging,
     showSlashMenu,
     slashQuery,
@@ -104,19 +117,16 @@ export function Composer() {
     updateAttachmentData,
     removeAttachment,
     clearAttachments,
-    clearStreamingBlocks,
-    setStreamingBlocks,
-    setStreamingUsage,
-    setContextUsage,
-    setSessionStats,
-    setMessageTiming,
-    setToolTiming,
-    setStreamError,
     triggerSend,
     clearEditingMessage,
-    setQueues,
     triggerScrollToBottom,
   } = useComposerStore();
+
+  // Whether the conversation on screen has a send in flight. Per-session:
+  // another conversation's run must not block this one's Send button.
+  const activePending = useComposerStore((s) =>
+    activeSessionId ? Boolean(s.sessionPending[activeSessionId]) : false,
+  );
 
   // Highlighted index for keyboard navigation in popup menus
   const [highlightedSlashIndex, setHighlightedSlashIndex] = useState(0);
@@ -131,15 +141,11 @@ export function Composer() {
   // Version counter to force ComposerInput refocus after file picker closes
   const [focusVersion, setFocusVersion] = useState(0);
 
-  // Tracks actual streaming state synchronously (avoids React state lag).
-  // Used by handleSteerSubmit to fallback to a regular submit when the stream
-  // has ended but React hasn't re-rendered yet.
-  const isActuallyStreaming = useRef(false);
-
-  // AbortController for clean cancellation of streaming via AbortSignal.
-  // Causes the proxy to return a dummy message (not throw), so onSuccess
-  // fires instead of onError, preserving the user message in the chat.
-  const abortControllerRef = useRef<AbortController | null>(null);
+  // AbortControllers per conversation, for clean cancellation via AbortSignal.
+  // The proxy returns a dummy message (not throw), so onSuccess fires instead
+  // of onError, preserving the user message in the chat. One per session
+  // because a window can have several runs in flight.
+  const abortControllersRef = useRef(new Map<string, AbortController>());
   const [commandDialog, setCommandDialog] = useState<SlashCommandDialogData | null>(null);
 
   // Config for model/think level
@@ -251,6 +257,9 @@ export function Composer() {
           size: file.size,
           mimeType: file.type || 'application/octet-stream',
           status: 'uploading',
+          // Persisted only long enough to copy the file when the message is
+          // sent (see sendMutation.onMutate).
+          sourcePath: pathForFile(file),
           createdAt: new Date().toISOString(),
         });
         // Read file content as base64 for sending to vision models
@@ -358,45 +367,85 @@ export function Composer() {
   const handleStopGeneration = useCallback(() => {
     if (!activeSessionId) return;
     // Trigger clean cancellation via AbortSignal → proxy returns dummy msg → onSuccess fires
-    abortControllerRef.current?.abort();
+    abortControllersRef.current.get(activeSessionId)?.abort();
     // Fire-and-forget server-side cleanup (don't block UI)
     sdk.chat.stopGeneration(activeSessionId).catch(() => {});
-    // Instant UI feedback: hide Stop button, show Send button
-    setIsStreaming(false);
-    isActuallyStreaming.current = false;
-  }, [sdk, activeSessionId, setIsStreaming]);
+    // Instant UI feedback: this conversation goes idle, others are untouched.
+    useComposerStore.getState().endSessionStream(activeSessionId, { clear: true });
+  }, [sdk, activeSessionId]);
 
   // Watch for retry trigger from ChatTimeline
   useEffect(() => {
     if (triggerSend > 0 && activeSessionId) {
-      const currentValue = useComposerStore.getState().value;
-      if (currentValue.trim()) {
-        sendMutation.mutate(currentValue);
-        setValue('');
+      const state = useComposerStore.getState();
+      const content = state.triggerContent;
+      const pluginMessage = state.triggerPluginMessage;
+      if (content.trim()) {
+        sendMutation.mutate({
+          content,
+          sessionId: activeSessionId,
+          attachments: [],
+          skills: [],
+          ...(pluginMessage ? { pluginMessage } : {}),
+        });
+        if (pluginMessage) {
+          // The plugin never touched the input: leave whatever the user was
+          // drafting exactly where it is; just consume the card.
+          state.setTriggerPluginMessage(null);
+        } else {
+          setValue('');
+        }
       }
     }
   }, [triggerSend]);
 
   // Store last user message for potential retry
   const lastUserMessageRef = useRef<string>('');
-  // Captured attachments so mutationFn can read them even after clearAttachments()
-  const capturedAttachmentsRef = useRef<typeof pendingAttachments>([]);
-
+  // Attachment id → where the send copied it. Filled in onMutate, read by
+  // mutationFn to build the prompt and the optimistic blocks.
+  const savedAttachmentsRef = useRef(new Map<string, SavedAttachment>());
   const sendMutation = useMutation({
-    onMutate: async (content: string) => {
-      abortControllerRef.current = new AbortController();
-      // Capture attachments BEFORE the await, since handleSubmit calls
-      // clearAttachments() synchronously after mutate(), and the await
-      // in cancelQueries yields control allowing clearAttachments to run.
-      const currentAttachments = useComposerStore.getState().pendingAttachments;
-      capturedAttachmentsRef.current = currentAttachments;
-
+    onMutate: async ({ content, sessionId, attachments, pluginMessage }: SendVariables) => {
+      // The conversation is part of the variables, not read again later:
+      // `activeSessionId` in the callbacks would point at whichever
+      // conversation is on screen when the run finishes.
+      abortControllersRef.current.set(sessionId, new AbortController());
+      useComposerStore.getState().setSessionPending(sessionId, true);
       // Cancel outgoing refetches so they don't overwrite our optimistic update
-      await queryClient.cancelQueries({ queryKey: ['session', activeSessionId] });
+      await queryClient.cancelQueries({ queryKey: ['session', sessionId] });
+
+      // Give every file attachment a real path before it reaches the
+      // conversation: the card can then open the right panel, a reload can
+      // find it again, and the model can read it without searching the disk.
+      const saved = new Map<string, SavedAttachment>();
+      if (canSaveAttachment()) {
+        await Promise.all(
+          attachments.map(async (att) => {
+            if (att.type === 'image') return;
+            try {
+              saved.set(
+                att.id,
+                await saveAttachmentToWorkspace({
+                  name: att.name,
+                  ...(att.sourcePath ? { sourcePath: att.sourcePath } : {}),
+                  ...(!att.sourcePath && att.data ? { dataBase64: att.data } : {}),
+                }),
+              );
+            } catch (err) {
+              // A failed copy never blocks the send; the message simply loses
+              // its preview path for this attachment.
+              console.warn(`[composer] failed to save attachment ${att.name}:`, err);
+            }
+          }),
+        );
+      }
+      // Merge by attachment id, never replace: two conversations can be
+      // sending at once, and each mutationFn must read its own entries.
+      for (const [id, info] of saved) savedAttachmentsRef.current.set(id, info);
 
       // Build user message blocks from attachments for inline preview
       const userBlocks: ContentBlock[] = [];
-      if (currentAttachments.length > 0) {
+      if (attachments.length > 0) {
         // Text content block
         if (content) {
           userBlocks.push({
@@ -405,7 +454,7 @@ export function Composer() {
             content,
           });
         }
-        for (const att of currentAttachments) {
+        for (const att of attachments) {
           if (att.type === 'image' && att.data) {
             userBlocks.push({
               id: `b-img-opt-${att.id}`,
@@ -420,68 +469,84 @@ export function Composer() {
             // finishes loading. This matches the reload path
             // (stripAttachmentSections) which creates file blocks purely
             // from the [Attached: ...] placeholder text.
+            const stored = saved.get(att.id);
             userBlocks.push({
               id: `b-file-opt-${att.id}`,
               type: 'file',
-              content: att.name,
+              content: stored?.name ?? att.name,
               mimeType: att.mimeType,
               data: att.data || undefined,
-              fileName: att.name,
+              fileName: stored?.name ?? att.name,
               fileSize: att.size,
+              workspacePath: stored?.path,
             });
           }
         }
       }
 
-      // Optimistically show the user message immediately
-      queryClient.setQueryData(['session', activeSessionId], (old: any) => {
+      // Optimistically show the user message immediately — or, for a plugin
+      // request, the request card, since that is what the run was started
+      // from. Either is replaced by the transcript when the send lands.
+      queryClient.setQueryData(['session', sessionId], (old: any) => {
         if (!old) return old;
-        return {
-          ...old,
-          messages: [
-            ...(old.messages || []),
-            {
+        const now = new Date().toISOString();
+        const message = pluginMessage
+          ? {
+              id: `optimistic-plugin-${pluginMessage.id}`,
+              sessionId,
+              role: 'plugin',
+              status: 'complete',
+              content: pluginMessage.text ?? '',
+              blocks: [],
+              ...(pluginMessage.card ? { card: pluginMessage.card } : {}),
+              ...(pluginMessage.files?.length ? { files: pluginMessage.files } : {}),
+              pluginId: pluginMessage.pluginId,
+              pluginMessageId: pluginMessage.id,
+              revision: pluginMessage.revision,
+              ...(pluginMessage.status ? { pluginStatus: pluginMessage.status } : {}),
+              ...(pluginMessage.title ? { title: pluginMessage.title } : {}),
+              ...(pluginMessage.quote ? { quote: pluginMessage.quote } : {}),
+              ...(pluginMessage.source ? { source: pluginMessage.source } : {}),
+              agentVisible: true,
+              triggered: true,
+              createdAt: now,
+              updatedAt: now,
+            }
+          : {
               id: `optimistic-${Date.now()}`,
-              sessionId: activeSessionId,
+              sessionId,
               role: 'user',
               status: 'complete',
               content,
               blocks: userBlocks.length > 0 ? userBlocks : [],
-              createdAt: new Date().toISOString(),
-              updatedAt: new Date().toISOString(),
-            },
-          ],
-        };
+              createdAt: now,
+              updatedAt: now,
+            };
+        return { ...old, messages: [...(old.messages || []), message] };
       });
 
     },
-    mutationFn: async (content: string) => {
-      if (!activeSessionId) return;
-      lastUserMessageRef.current = content;
-      clearStreamingBlocks();
-      setMessageTiming(null);
-      setSessionStats(null);
-      setStreamError(null);
-      setIsStreaming(true);
-      isActuallyStreaming.current = true;
+    mutationFn: async ({ content, sessionId, attachments, skills, pluginMessage }: SendVariables) => {
+      if (!pluginMessage) lastUserMessageRef.current = content;
+      useComposerStore.getState().beginSessionStream(sessionId);
 
       // If editing a message, navigate the tree first to branch from the edited entry
       const editEntryId = useComposerStore.getState().editingEntryId;
       if (editEntryId) {
         try {
-          await sdk.chat.navigateTree(activeSessionId, editEntryId);
+          await sdk.chat.navigateTree(sessionId, editEntryId);
         } catch (err) {
-          setStreamError(err instanceof Error ? err.message : t('无法在文件树中定位'));
-          setIsStreaming(false);
-          isActuallyStreaming.current = false;
+          useComposerStore.getState().endSessionStream(sessionId, {
+            clear: true,
+            error: err instanceof Error ? err.message : t('无法在文件树中定位'),
+          });
           throw err;
         }
       }
 
       // Build prompt text: decode and include text-based file contents,
       // append references for binary files
-      const currentAttachments = capturedAttachmentsRef.current;
-      const nonImageAtts = currentAttachments.filter((a) => a.type !== 'image' && a.name);
+      const nonImageAtts = attachments.filter((a) => a.type !== 'image' && a.name);
       let promptContent = content;
       if (nonImageAtts.length > 0) {
         const TEXT_MIMES = new Set([
@@ -495,6 +560,12 @@ export function Composer() {
 
         const fileSections: string[] = [];
         for (const att of nonImageAtts) {
+          const stored = savedAttachmentsRef.current.get(att.id);
+          const name = stored?.name ?? att.name;
+          // The path suffix is what lets the model open the attachment
+          // directly. The session reader strips it for display (and uses it
+          // to rebuild the file block after a reload).
+          const pathSuffix = stored ? ` -> ${stored.relativePath}` : '';
           if (att.data && TEXT_MIMES.has(att.mimeType)) {
             try {
               // atob returns binary string; decode UTF-8 bytes properly
@@ -504,14 +575,14 @@ export function Composer() {
                 bytes[j] = binary.charCodeAt(j);
               }
               const text = new TextDecoder().decode(bytes);
-              const ext = (att.name || '').split('.').pop() || '';
+              const ext = (name || '').split('.').pop() || '';
               const fenceExt = ext === 'tsx' ? 'tsx' : ext === 'jsx' ? 'jsx' : ext === 'md' ? 'md' : ext;
-              fileSections.push(`File: ${att.name}\n\`\`\`${fenceExt}\n${text}\n\`\`\``);
+              fileSections.push(`File: ${name}\n\`\`\`${fenceExt}\n${text}\n\`\`\`${pathSuffix}`);
             } catch {
-              fileSections.push(`[Attached: ${att.name} (${att.type}) - could not decode]`);
+              fileSections.push(`[Attached: ${name} (${att.type}) - could not decode]${pathSuffix}`);
             }
           } else {
-            fileSections.push(`[Attached: ${att.name} (${att.type})]`);
+            fileSections.push(`[Attached: ${name} (${att.type})]${pathSuffix}`);
           }
         }
         promptContent = `${content}\n\n${fileSections.join('\n\n')}`;
@@ -529,7 +600,7 @@ export function Composer() {
       // Per-message skill references from the `/` menu. This is an instruction
       // for THIS message only — the session's skill set is untouched, and the
       // model still sees every enabled skill in the standing index.
-      const referencedSkills = pendingSkillsRef.current;
+      const referencedSkills = skills;
       if (referencedSkills.length > 0) {
         const list = referencedSkills
           .map((skill) => `- ${skill.name}：${skill.description}`)
@@ -543,7 +614,7 @@ export function Composer() {
       // file mentions now match for consistency.
 
       // Collect image attachments with base64 data read
-      const imageAttachments = currentAttachments
+      const imageAttachments = attachments
         .filter((a) => a.type === 'image' && a.data)
         .map((a) => ({ name: a.name, mimeType: a.mimeType, data: a.data! }));
 
@@ -562,11 +633,12 @@ export function Composer() {
 
       function flushBlockUpdates() {
         pendingRaf = false;
-        // Guard: if streaming has already ended (onSuccess ran), don't
-        // re-populate streamingBlocks — this prevents a late rAF callback
-        // from restoring stale blocks after clearStreamingBlocks().
-        if (!useComposerStore.getState().isStreaming) return;
-        setStreamingBlocks(rafBlocks.current);
+        // Guard per conversation: if this run already ended, a late rAF must
+        // not restore stale blocks (the visible slot may belong to another
+        // conversation entirely).
+        const state = useComposerStore.getState();
+        if (!state.streams[sessionId]?.isStreaming) return;
+        state.updateSessionStream(sessionId, { blocks: rafBlocks.current });
       }
 
       function scheduleBlockFlush(blocks: ContentBlock[]) {
@@ -579,7 +651,7 @@ export function Composer() {
 
       await sdk.chat.sendMessageStream(
         {
-          sessionId: activeSessionId,
+          sessionId,
           content: promptContent,
           workspaceCwd: activeWorkspaceId ?? undefined,
           modelId: config?.defaultModelId,
@@ -587,6 +659,7 @@ export function Composer() {
           // Every globally enabled skill goes to the model; the model decides
           // which one applies. Per-message references ride in the content.
           skills: enabledSkillIds,
+          ...(pluginMessage ? { pluginMessage } : {}),
         },
         (chunk) => {
           if (chunk.type === 'message_start') {
@@ -599,39 +672,44 @@ export function Composer() {
             streamState = streamReducer(streamState, { type: 'text_delta', content: chunk.content });
             scheduleBlockFlush(streamState.blocks);
           } else if (chunk.type === 'usage' && chunk.usage) {
-            setStreamingUsage(chunk.usage);
+            useComposerStore.getState().updateSessionStream(sessionId, { usage: chunk.usage });
           } else if (chunk.type === 'context' && chunk.contextUsage) {
-            setContextUsage(chunk.contextUsage);
+            useComposerStore.getState().updateSessionStream(sessionId, { contextUsage: chunk.contextUsage });
           } else if (chunk.type === 'stats' && chunk.sessionStats) {
-            setSessionStats(chunk.sessionStats);
+            useComposerStore.getState().updateSessionStream(sessionId, { sessionStats: chunk.sessionStats });
           } else if (chunk.type === 'message_timing' && chunk.messageTiming) {
-            setMessageTiming(chunk.messageTiming);
+            useComposerStore.getState().updateSessionStream(sessionId, { messageTiming: chunk.messageTiming });
           } else if (chunk.type === 'tool_timing' && chunk.toolTiming) {
-            setToolTiming(chunk.toolTiming);
+            useComposerStore.getState().setSessionToolTiming(sessionId, chunk.toolTiming);
           } else if (chunk.type === 'queue_update' && chunk.queueState) {
-            setQueues(chunk.queueState.steering, chunk.queueState.followUp);
+            useComposerStore.getState().updateSessionStream(sessionId, {
+              steering: chunk.queueState.steering,
+              followUp: chunk.queueState.followUp,
+            });
           } else if (chunk.type === 'error') {
-            setStreamError(chunk.error || t('发生了未知错误'));
+            useComposerStore.getState().updateSessionStream(sessionId, {
+              streamError: chunk.error || t('发生了未知错误'),
+            });
           }
         },
-        abortControllerRef.current?.signal,
+        abortControllersRef.current.get(sessionId)?.signal,
       );
     },
-    onSuccess: () => {
-      // References are per-message: they must not leak into the next send.
-      setPendingSkills([]);
-      pendingSkillsRef.current = [];
+    onSuccess: (_data, variables) => {
+      const { sessionId } = variables;
       const state = useComposerStore.getState();
+      const stream = state.streams[sessionId];
 
-      // Clear editing state if in edit mode
-      if (state.editingEntryId) {
+      // Editing state belongs to the visible composer; a background send must
+      // not clear a draft the user is editing in another conversation.
+      if (state.editingEntryId && sessionId === useUIStore.getState().activeSessionId) {
         clearEditingMessage();
       }
 
-      // Capture streaming data before clearing state.
-      const blocks = state.streamingBlocks.map((b) => {
+      // Capture this conversation's live data before clearing its slot.
+      const blocks = (stream?.blocks ?? []).map((b) => {
         if (b.type === 'tool_call' && b.toolCallId) {
-          const ms = state.toolTimings.get(b.toolCallId);
+          const ms = stream?.toolTimings.get(b.toolCallId);
           if (ms != null) return { ...b, durationMs: ms };
         }
         return b;
@@ -642,24 +720,18 @@ export function Composer() {
         .map((b) => b.content)
         .join('');
 
-      const streamingUsage = state.streamingUsage;
+      const streamingUsage = stream?.usage ?? null;
 
-      // Clear streaming state BEFORE writing to cache to prevent a race
-      // condition where setQueryData triggers a re-render while isStreaming
-      // is still true and streamingBlocks still has data, causing the
-      // ChatTimeline to show both a cached message and a streaming message
-      // (duplicate assistant bubble with avatar).
-      clearStreamingBlocks();
-      setIsStreaming(false);
-      isActuallyStreaming.current = false;
+      // Clear this conversation's run BEFORE writing to cache: the slot it
+      // owned is gone, and any other conversation keeps its own state.
+      state.endSessionStream(sessionId, { clear: true });
 
       // Now promote the captured streaming data into the query cache as a
-      // single assistant message. At this point isStreaming is false, so
-      // ChatTimeline will only show the storedMessages (no streaming ghost).
+      // single assistant message so ChatTimeline transitions without a ghost.
       const now = new Date().toISOString();
       const assistantMsg = {
-        id: `msg-${activeSessionId}-${Date.now()}`,
-        sessionId: activeSessionId,
+        id: `msg-${sessionId}-${Date.now()}`,
+        sessionId,
         role: 'assistant' as const,
         status: 'complete' as const,
         modelId: config?.defaultModelId ?? 'unknown',
@@ -670,7 +742,7 @@ export function Composer() {
         updatedAt: now,
       };
 
-      queryClient.setQueryData(['session', activeSessionId], (old: any) => {
+      queryClient.setQueryData(['session', sessionId], (old: any) => {
         if (!old) return old;
         return {
           ...old,
@@ -678,9 +750,16 @@ export function Composer() {
         };
       });
 
+      // A run that finished while you were looking elsewhere should announce
+      // itself; the session list's spinner disappears at the same moment.
+      if (sessionId !== useUIStore.getState().activeSessionId) {
+        toast(t('后台会话已完成'));
+      }
+
       queryClient.invalidateQueries({ queryKey: ['files'] });
 
-      // Auto-preview the last generated file in the right panel
+      // Auto-preview the last generated file in the right panel. A background
+      // conversation must not take over the panel the user is looking at.
       const fileBlocks = blocks.filter((b) => b.type === 'file');
 
       // Only invalidate per-file preview queries when the AI actually used
@@ -693,7 +772,10 @@ export function Composer() {
         queryClient.invalidateQueries({ queryKey: ['office'] });
       }
 
-      if (fileBlocks.length > 0) {
+      if (
+        fileBlocks.length > 0 &&
+        sessionId === useUIStore.getState().activeSessionId
+      ) {
         const lastFile = fileBlocks[fileBlocks.length - 1];
         if (lastFile.workspacePath && isPreviewableInRightPanel(lastFile.workspacePath)) {
           setActivePreviewFile(lastFile.workspacePath);
@@ -704,19 +786,17 @@ export function Composer() {
       // sdk.chat.steer()/sdk.chat.followUp() and processed by the SDK's
       // internal queue. The SDK emits queue_update events that sync the UI.
     },
-    onError: (error: Error) => {
-      // User-initiated cancel via Stop button: don't rollback, don't show error
-      if (error.name === 'AbortError') {
-        clearStreamingBlocks();
-        setIsStreaming(false);
-        isActuallyStreaming.current = false;
-        return;
+    onError: (error: Error, variables) => {
+      const { sessionId } = variables;
+      const store = useComposerStore.getState();
+      if (sessionId) {
+        // User-initiated cancel via Stop: end the run without an error banner.
+        store.endSessionStream(sessionId, {
+          clear: true,
+          error: error.name === 'AbortError' ? null : error.message || t('发送失败'),
+        });
       }
-      // Clear streaming state first to prevent the same race condition
-      // as onSuccess (duplicate streaming ghost alongside the refresh).
-      clearStreamingBlocks();
-      setIsStreaming(false);
-      isActuallyStreaming.current = false;
+      if (error.name === 'AbortError' || !sessionId) return;
 
       // Re-read the session rather than restoring the pre-send snapshot.
       //
@@ -730,13 +810,15 @@ export function Composer() {
       // Re-reading makes the timeline show what is actually stored, whichever
       // way it went: no message if the send never left, the user's message if it
       // reached the model and the model refused.
-      void queryClient.invalidateQueries({ queryKey: ['session', activeSessionId] });
-      setStreamError(error.message || t('发送失败'));
+      void queryClient.invalidateQueries({ queryKey: ['session', sessionId] });
     },
-    onSettled: () => {
-      // Clear attachments after mutation completes (success or error),
-      // so the mutationFn can read them from the store during execution.
-      useComposerStore.getState().clearAttachments();
+    onSettled: (_data, _error, variables) => {
+      const { sessionId, attachments } = variables;
+      for (const att of attachments) savedAttachmentsRef.current.delete(att.id);
+      if (sessionId) {
+        useComposerStore.getState().setSessionPending(sessionId, false);
+        abortControllersRef.current.delete(sessionId);
+      }
     },
   });
 
@@ -921,7 +1003,7 @@ export function Composer() {
     if (
       (!value.trim() && pendingAttachments.length === 0 && pendingSkills.length === 0) ||
       !activeSessionId ||
-      sendMutation.isPending
+      activePending
     ) {
       return;
     }
@@ -1003,15 +1085,21 @@ export function Composer() {
       return;
     }
 
-    sendMutation.mutate(value);
+    const attachments = useComposerStore.getState().pendingAttachments;
+    const skills = pendingSkillsRef.current;
+    // These belong to THIS message; clear them now so a concurrent send in
+    // another conversation cannot pick them up.
+    setPendingSkills([]);
+    pendingSkillsRef.current = [];
+    sendMutation.mutate({ content: value, sessionId: activeSessionId, attachments, skills });
     setValue('');
     clearAttachments();
-  }, [value, activeSessionId, sendMutation, setValue, handleSlashCommand, sdk, queryClient, triggerScrollToBottom, pendingAttachments]);
+  }, [value, activeSessionId, activePending, setValue, handleSlashCommand, sdk, queryClient, triggerScrollToBottom, pendingAttachments]);
 
   // Read at call time: transcription takes seconds, and the user may start a
   // stream or switch conversations while it is in flight.
   const sendPendingRef = useRef(false);
-  sendPendingRef.current = sendMutation.isPending;
+  sendPendingRef.current = activePending;
 
   /** Insert a transcription into the composer, or send it when autoSend is on.
    *  The draft is kept when sending (not replaced), and a transcript that
@@ -1032,7 +1120,12 @@ export function Composer() {
       const draft = state.value.replace(/\s+$/, '');
       const next = draft ? `${draft} ${clean}` : clean;
       if (voiceSettings?.stt.autoSend && !sendPendingRef.current && !state.isStreaming) {
-        sendMutation.mutate(next);
+        sendMutation.mutate({
+          content: next,
+          sessionId: currentSession,
+          attachments: state.pendingAttachments,
+          skills: [],
+        });
         state.setValue('');
         state.clearAttachments();
         state.triggerScrollToBottom();
@@ -1065,11 +1158,15 @@ export function Composer() {
    *  to a regular submit so the message isn't silently lost. */
   const handleSteerSubmit = useCallback(() => {
     if (!value.trim() || !activeSessionId) return;
-    if (isActuallyStreaming.current) {
+    const isStreamingNow = () => {
+      const state = useComposerStore.getState();
+      return state.activeStreamSessionId === activeSessionId && state.isStreaming;
+    };
+    if (isStreamingNow()) {
       sdk.chat.steer(activeSessionId, value).catch((err) => {
         console.error('[Steer] Failed to steer:', err);
-        // If steer fails while actually streaming, fall back to regular submit
-        if (!isActuallyStreaming.current) {
+        // If steer fails because the stream just ended, send it normally.
+        if (!isStreamingNow()) {
           useComposerStore.getState().setTriggerSend(value);
         }
       });
@@ -1086,10 +1183,14 @@ export function Composer() {
    *  If the stream has already ended, fall back to a regular submit. */
   const handleFollowUpSubmit = useCallback(() => {
     if (!value.trim() || !activeSessionId) return;
-    if (isActuallyStreaming.current) {
+    const isStreamingNow = () => {
+      const state = useComposerStore.getState();
+      return state.activeStreamSessionId === activeSessionId && state.isStreaming;
+    };
+    if (isStreamingNow()) {
       sdk.chat.followUp(activeSessionId, value).catch((err) => {
         console.error('[FollowUp] Failed to follow up:', err);
-        if (!isActuallyStreaming.current) {
+        if (!isStreamingNow()) {
           useComposerStore.getState().setTriggerSend(value);
         }
       });
@@ -1268,7 +1369,7 @@ export function Composer() {
   return (
     <div
       className={cn(
-        'rounded-3xl border border-border bg-card shadow-sm mx-4 mb-4 overflow-visible transition-colors',
+        'rounded-3xl border border-border bg-card shadow-xs mx-4 mb-4 overflow-visible transition-colors',
         // 完全访问 states itself on its own control (red icon + label in
         // PermissionModeButton). Ringing the whole composer reads as "this
         // input is wrong" and paints every surrounding element red, so the
@@ -1438,7 +1539,7 @@ export function Composer() {
               (!value.trim() && pendingAttachments.length === 0 && pendingSkills.length === 0) ||
               !activeSessionId
             }
-            isLoading={sendMutation.isPending}
+            isLoading={activePending}
           />
         )}
         </div>

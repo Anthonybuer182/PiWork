@@ -7,14 +7,17 @@ import { useUIStore } from '@/stores/ui-store';
 import { useBuiltinModelsQuery, useVoiceSettingsQuery, hasVoiceApi } from '@/lib/voice/voice-client';
 import { stopSpeaking, useVoicePlaybackStore } from '@/stores/voice-playback-store';
 import { useComposerStore } from '@/stores/composer-store';
+import { usePluginStore } from '@/stores/plugin-store';
 import { Button } from '@/components/ui/button';
 import { stripAppendedContext } from '@/lib/quote-helpers';
+import { suppressedToolCards } from '@/lib/tool-card-collapse';
 import { MessageBubble } from './message-bubble';
+import { PluginMessageBubble } from './plugin-message-bubble';
 import { EmptyChat } from './empty-chat';
 import { StreamingIndicator } from './streaming-indicator';
 import { LoadingSpinner } from '@/components/common/loading-spinner';
 import { ErrorState } from '@/components/common/error-state';
-import type { Message, ContentBlock, TokenUsage, ToolCallBlock } from '@pi/types';
+import type { Message, ContentBlock, TokenUsage, ToolCallBlock, PluginMessage } from '@pi/types';
 import type { AssistantMessage } from '@pi/types';
 import { usePermissionStore } from '@/stores/permission-store';
 import { useAskStore } from '@/stores/ask-store';
@@ -128,8 +131,12 @@ function makeStreamingMessage(
  */
 function PendingApprovalFallback({ hostedToolCallIds }: { hostedToolCallIds: Set<string> }) {
   const pendingByToolCall = usePermissionStore((s) => s.pendingByToolCall);
+  const activeSessionId = useUIStore((s) => s.activeSessionId);
+  // Only this conversation's requests: a background run's approval must not
+  // appear — or be answerable — from another conversation's page.
   const orphaned = Object.values(pendingByToolCall).filter(
-    (req) => !hostedToolCallIds.has(req.toolCallId),
+    (req) =>
+      req.sessionId === activeSessionId && !hostedToolCallIds.has(req.toolCallId),
   );
   if (orphaned.length === 0) return null;
   return (
@@ -138,7 +145,7 @@ function PendingApprovalFallback({ hostedToolCallIds }: { hostedToolCallIds: Set
         <div
           key={req.requestId}
           data-permission-fallback={req.requestId}
-          className="overflow-hidden rounded-md border border-amber-400/50 shadow-sm"
+          className="overflow-hidden rounded-md border border-amber-400/50 shadow-xs"
         >
           <PermissionRequestCard request={req} />
         </div>
@@ -171,7 +178,7 @@ function PendingAskFallback({ hostedToolCallIds }: { hostedToolCallIds: Set<stri
         <div
           key={req.requestId}
           data-ask-fallback={req.requestId}
-          className="overflow-hidden rounded-md border border-sky-400/50 shadow-sm"
+          className="overflow-hidden rounded-lg border border-border bg-card shadow-xs"
         >
           <AskCard request={req} />
         </div>
@@ -216,6 +223,7 @@ export function ChatTimeline() {
   const sdk = useSDK();
   const queryClient = useQueryClient();
   const activeSessionId = useUIStore((s) => s.activeSessionId);
+  const mutedPlugins = usePluginStore((s) => s.mutedPlugins);
   const isStreaming = useComposerStore((s) => s.isStreaming);
   const streamingBlocks = useComposerStore((s) => s.streamingBlocks);
   const streamingUsage = useComposerStore((s) => s.streamingUsage);
@@ -260,7 +268,47 @@ export function ChatTimeline() {
     placeholderData: keepPreviousData,
   });
 
-  const storedMessages = session?.messages ?? [];
+  // Plugin messages can be muted per plugin (a user preference). Muting hides
+  // them from the timeline but does not delete the session entries: unmuting
+  // restores the history, and an `agentVisible` message still reaches the model.
+  const storedMessages = useMemo(() => {
+    const all = session?.messages ?? [];
+    if (mutedPlugins.length === 0) return all;
+    const muted = new Set(mutedPlugins);
+    return all.filter(
+      (m) => m.role !== 'plugin' || !muted.has((m as PluginMessage).pluginId),
+    );
+  }, [session?.messages, mutedPlugins]);
+
+  // Repeated edits of one file draw the same card every batch. Only the first
+  // and last call that touched a path within a run keep their card body; the
+  // rest stay as plain tool rows (still expandable, still red on failure).
+  // Computed from STORED messages only: a live run keeps every card visible
+  // and folds once when the turn is persisted, instead of a card vanishing
+  // under the user each time the next batch starts.
+  const suppressedCards = useMemo(() => suppressedToolCards(storedMessages), [storedMessages]);
+
+  // Plugin messages arrive outside the agent stream (a background event, a
+  // panel action). Main persists them as session entries and sends a signal;
+  // reloading the conversation is the single source of truth — the entry is
+  // already in the transcript, so no second in-memory merge path is needed.
+  useEffect(() => {
+    const api = (
+      window as unknown as {
+        electronAPI?: {
+          on: (channel: string, callback: (...args: unknown[]) => void) => void;
+          removeListener: (channel: string, callback: (...args: unknown[]) => void) => void;
+        };
+      }
+    ).electronAPI;
+    if (!api?.on) return;
+    const onPluginMessage = (payload: unknown) => {
+      const sessionId = (payload as { sessionId?: string } | null)?.sessionId;
+      if (sessionId) void queryClient.invalidateQueries({ queryKey: ['session', sessionId] });
+    };
+    api.on('pi:plugin:message', onPluginMessage);
+    return () => api.removeListener('pi:plugin:message', onPluginMessage);
+  }, [queryClient]);
 
   // Stable timestamp: capture once at the start of streaming
   if (isStreaming && !streamingStartRef.current) {
@@ -526,6 +574,9 @@ export function ChatTimeline() {
             }
 
             const message = item as Message;
+            if (message.role === 'plugin') {
+              return <PluginMessageBubble message={message as PluginMessage} />;
+            }
             const msgIndex = messages.indexOf(message);
             const isLast = msgIndex === messages.length - 1;
             const isAssistant = message.role === 'assistant';
@@ -536,6 +587,7 @@ export function ChatTimeline() {
                 contextUsage={isLast ? contextUsage ?? undefined : undefined}
                 messageTiming={isLast && isAssistant ? messageTiming ?? undefined : undefined}
                 toolTimings={isLast && isAssistant ? toolTimings : EMPTY_TOOL_TIMINGS}
+                suppressedCards={suppressedCards}
                 onEditMessage={handleEditMessage}
                 onConfirmEdit={handleConfirmEdit}
                 onCancelEdit={handleCancelEdit}
@@ -563,7 +615,7 @@ export function ChatTimeline() {
       {isStreaming && !isAtBottom && (
         <button
           onClick={scrollToBottom}
-          className="absolute bottom-4 right-4 z-10 flex h-9 w-9 items-center justify-center rounded-full border bg-background shadow-sm hover:bg-muted transition-colors"
+          className="absolute bottom-4 right-4 z-10 flex h-9 w-9 items-center justify-center rounded-full border bg-background shadow-xs hover:bg-muted transition-colors"
           aria-label={t('滚动到底部')}
         >
           <ArrowDown className="h-4 w-4" />

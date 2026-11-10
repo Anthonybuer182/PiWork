@@ -10,6 +10,7 @@ export interface TokenUsage {
 export interface ContextUsageInfo {
   tokens: number | null;
   contextWindow: number;
+  /** 0–100, as returned by the SDK's getContextUsage(). Not a 0–1 ratio. */
   percent: number | null;
 }
 

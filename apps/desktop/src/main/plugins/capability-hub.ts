@@ -1,8 +1,9 @@
 import { app, BrowserWindow, dialog, Notification, net } from 'electron';
 import type { OpenDialogOptions, SaveDialogOptions } from 'electron';
+import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'fs';
-import { join } from 'path';
-import type { CapabilityMethod, PluginEvent, PluginPanelStatus } from '@pi/types';
+import { join, isAbsolute } from 'path';
+import type { CapabilityMethod, PluginEvent, PluginPanelStatus, PluginMessageData, PluginMessageFile, PluginMessagePatch, PluginMessageSource, PluginMessageStatus, UiNode } from '@pi/types';
 import { PLUGIN_PROTOCOL_VERSION } from '@pi/types';
 import { deleteFileWithMtimeGuard, writeFileWithMtimeGuard } from '@pi/sdk-wrapper/adapters';
 import type { PluginRegistry } from './registry';
@@ -44,12 +45,194 @@ export interface CapabilityDeps {
   getPermissionMode?: (sessionId: string) => 'default' | 'full';
   /** Whether a TTS provider is ready; plugins get the error text when not. */
   voiceReady?: () => { ok: boolean; error?: string };
+  /**
+   * Called after a plugin write/delete lands. The host decides whether the
+   * path is part of an agent's standing context and rebuilds the affected
+   * live session — saving `.pi/SYSTEM.md` from the file viewer must apply to
+   * the next turn, not wait for a new session.
+   */
+  onContextFileWrite?: (filePath: string) => void;
+  /**
+   * Persist a plugin-originated message in a conversation (assigned once the
+   * chat service exists, like onContextFileWrite). The host owns the session
+   * file; a plugin never writes it directly.
+   */
+  appendPluginMessage?: (
+    sessionId: string,
+    data: PluginMessageData,
+  ) => Promise<{ entryId: string }>;
+  /** Append a revision of a plugin message (ownership/merge in the chat service). */
+  updatePluginMessage?: (
+    sessionId: string,
+    messageId: string,
+    pluginId: string,
+    patch: PluginMessagePatch,
+  ) => Promise<{ entryId: string; revision: number }>;
+  /** Append a tombstone revision for a plugin message. */
+  removePluginMessage?: (
+    sessionId: string,
+    messageId: string,
+    pluginId: string,
+  ) => Promise<{ entryId: string; revision: number }>;
+  /** Deliver a session-scoped signal to the window(s) showing that session. */
+  sendToSession?: (sessionId: string, channel: string, payload: unknown) => void;
 }
 
 interface CapabilitySpec {
   /** Manifest permission required to invoke; omit for always-allowed. */
   permission?: string;
   handler: (ctx: { pluginId: string; dataDir: string; params: Record<string, unknown> }) => Promise<unknown> | unknown;
+}
+
+/** The declarative component vocabulary the chat card renderer understands. */
+const DECLARATIVE_COMPONENTS = new Set([
+  'Column',
+  'Row',
+  'Text',
+  'Button',
+  'Card',
+  'Badge',
+  'List',
+  'Separator',
+  'Spinner',
+  'EmptyState',
+  'Input',
+  'Image',
+  'KeyValue',
+]);
+
+const MAX_CARD_BYTES = 64 * 1024;
+const MAX_CARD_DEPTH = 24;
+
+/** New plugin messages allowed per plugin+conversation per minute. Updates do not count. */
+const MAX_MESSAGE_POSTS_PER_MINUTE = 60;
+const MESSAGE_POST_WINDOW_MS = 60_000;
+
+/**
+ * How much of a quoted passage a `chat.send` request card stores for display.
+ * The full instruction still reaches the model through `agentText`; this is
+ * only the excerpt the card shows, and a selection can be very long.
+ */
+const MAX_CHAT_SEND_QUOTE = 4000;
+
+/**
+ * Validate a plugin card tree before it enters a transcript: bounded size,
+ * bounded depth, known components and well-formed event ids. A malformed tree
+ * would fail far from the cause (deep in a renderer) and be persisted forever.
+ */
+function validateCardTree(value: unknown, method = 'messages.post'): asserts value is UiNode {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${method}: card must be a declarative UI node`);
+  }
+  let size = 0;
+  try {
+    size = Buffer.byteLength(JSON.stringify(value), 'utf-8');
+  } catch {
+    throw new Error(`${method}: card must be JSON-serializable`);
+  }
+  if (size > MAX_CARD_BYTES) {
+    throw new Error(`${method}: card is too large (${size} bytes > ${MAX_CARD_BYTES})`);
+  }
+
+  const visit = (node: unknown, depth: number): void => {
+    if (depth > MAX_CARD_DEPTH) throw new Error(`${method}: card is nested too deeply`);
+    if (!node || typeof node !== 'object' || Array.isArray(node)) {
+      throw new Error(`${method}: every card child must be a node`);
+    }
+    const n = node as { component?: unknown; children?: unknown; events?: unknown };
+    if (typeof n.component !== 'string' || !DECLARATIVE_COMPONENTS.has(n.component)) {
+      throw new Error(
+        `${method}: unknown card component "${String(n.component)}" — see the declarative vocabulary`,
+      );
+    }
+    if (n.children !== undefined) {
+      if (!Array.isArray(n.children)) throw new Error(`${method}: card children must be an array`);
+      for (const child of n.children) visit(child, depth + 1);
+    }
+    if (n.events !== undefined) {
+      if (!n.events || typeof n.events !== 'object' || Array.isArray(n.events)) {
+        throw new Error(`${method}: card events must be an object`);
+      }
+    }
+  };
+  visit(value, 0);
+}
+
+function pluginMessageStatus(
+  value: unknown,
+  method = 'messages.post',
+): PluginMessageStatus | undefined {
+  if (value === undefined) return undefined;
+  if (
+    value === 'info' ||
+    value === 'success' ||
+    value === 'warning' ||
+    value === 'error' ||
+    value === 'loading'
+  ) {
+    return value;
+  }
+  throw new Error(
+    `${method}: status must be info, success, warning, error or loading`,
+  );
+}
+
+const MAX_MESSAGE_FILES = 20;
+
+/**
+ * Validate files the message should render as file-attachment cards.
+ *
+ * Absolute paths only (a plugin backend's cwd is not the user's workspace),
+ * and the file must exist. The host renders the card; the click goes through
+ * the same filePreview chain as the file tree.
+ */
+function pluginMessageFiles(value: unknown, method = 'messages'): PluginMessageFile[] | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (!Array.isArray(value)) throw new Error(`${method}: files must be an array`);
+  if (value.length > MAX_MESSAGE_FILES) {
+    throw new Error(`${method}: at most ${MAX_MESSAGE_FILES} files per message`);
+  }
+  return value.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error(`${method}: files[${index}] must be an object`);
+    }
+    const raw = entry as { path?: unknown; label?: unknown };
+    const path = typeof raw.path === 'string' ? raw.path.trim() : '';
+    if (!path) throw new Error(`${method}: files[${index}].path is required`);
+    if (!isAbsolute(path)) throw new Error(`${method}: files[${index}].path must be absolute`);
+    let info: ReturnType<typeof statSync> | null = null;
+    try {
+      info = statSync(path);
+    } catch {
+      /* reported below */
+    }
+    if (!info?.isFile()) {
+      throw new Error(`${method}: files[${index}] is not an existing file: ${path}`);
+    }
+    return {
+      path,
+      ...(typeof raw.label === 'string' && raw.label.trim() ? { label: raw.label.trim() } : {}),
+    };
+  });
+}
+
+/**
+ * Validate a request card's provenance line (`chat.send`): one short origin
+ * the user can read, not a place to smuggle extra prompt text.
+ */
+function pluginMessageSource(
+  value: unknown,
+  method = 'chat.send',
+): PluginMessageSource | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${method}: source must be an object`);
+  }
+  const raw = value as { label?: unknown; url?: unknown };
+  const label = typeof raw.label === 'string' ? raw.label.trim().slice(0, 200) : '';
+  const url = typeof raw.url === 'string' ? raw.url.trim().slice(0, 2000) : '';
+  if (!label && !url) return undefined;
+  return { ...(label ? { label } : {}), ...(url ? { url } : {}) };
 }
 
 /**
@@ -64,7 +247,30 @@ export class CapabilityHub {
   private readonly sendToRenderer?: (channel: string, payload: unknown) => void;
   private readonly getPermissionMode?: (sessionId: string) => 'default' | 'full';
   private readonly voiceReady?: () => { ok: boolean; error?: string };
+  private readonly onContextFileWrite?: (filePath: string) => void;
+  private readonly appendPluginMessage?: (
+    sessionId: string,
+    data: PluginMessageData,
+  ) => Promise<{ entryId: string }>;
+  private readonly updatePluginMessage?: (
+    sessionId: string,
+    messageId: string,
+    pluginId: string,
+    patch: PluginMessagePatch,
+  ) => Promise<{ entryId: string; revision: number }>;
+  private readonly removePluginMessage?: (
+    sessionId: string,
+    messageId: string,
+    pluginId: string,
+  ) => Promise<{ entryId: string; revision: number }>;
+  private readonly sendToSession?: (sessionId: string, channel: string, payload: unknown) => void;
   private readonly capabilities = new Map<string, CapabilitySpec>();
+  /**
+   * New-message timestamps per `${pluginId}:${sessionId}`, for the post rate
+   * limit. Updates and removes do not append here — a plugin revising one
+   * message must not be throttled as if it were spamming new ones.
+   */
+  private readonly messagePosts = new Map<string, number[]>();
 
   constructor(deps: CapabilityDeps) {
     this.registry = deps.registry;
@@ -74,6 +280,11 @@ export class CapabilityHub {
     this.sendToRenderer = deps.sendToRenderer;
     this.getPermissionMode = deps.getPermissionMode;
     this.voiceReady = deps.voiceReady;
+    this.onContextFileWrite = deps.onContextFileWrite;
+    this.appendPluginMessage = deps.appendPluginMessage;
+    this.updatePluginMessage = deps.updatePluginMessage;
+    this.removePluginMessage = deps.removePluginMessage;
+    this.sendToSession = deps.sendToSession;
 
     this.registerCapabilities();
   }
@@ -93,24 +304,67 @@ export class CapabilityHub {
     // one. Without this, a misbehaving plugin could inject instructions that
     // read as the user's own intent — the one trust boundary the rest of this
     // permissioned architecture cannot afford to leave open.
+    //
+    // It is also not the user's BUBBLE. The renderer delivers the turn as a
+    // plugin message (pi custom_message) and the transcript shows a request
+    // card: plugin icon and name, a short title, the passage it is about and
+    // where that came from. `text` is the copy the user reads; `agentText` is
+    // the instruction, prefixed with the attribution line for the model only.
+    // Structured fields are optional — a plain one-liner still renders as a
+    // plugin card instead of a fake user message.
     this.capabilities.set('chat.send', {
       handler: ({ pluginId, params }) => {
         const text = String(params.text ?? '').trim();
-        if (!text) throw new Error('chat.send: text is required');
+        const instruction =
+          typeof params.agentText === 'string' ? params.agentText.trim() : '';
+        if (!text && !instruction) {
+          throw new Error('chat.send: text (or agentText) is required');
+        }
         if (!this.sendToRenderer) throw new Error('chat.send: no renderer attached');
         const plugin = this.registry.get(pluginId);
         const name = plugin?.manifest.name ?? pluginId;
+
+        const title = typeof params.title === 'string' ? params.title.trim().slice(0, 200) : '';
+        const quote =
+          typeof params.quote === 'string' ? params.quote.trim().slice(0, MAX_CHAT_SEND_QUOTE) : '';
+        const source = pluginMessageSource(params.source);
+        const card = params.card;
+        if (card !== undefined) validateCardTree(card, 'chat.send');
+        const status = pluginMessageStatus(params.status, 'chat.send');
+        const files = pluginMessageFiles(params.files, 'chat.send');
+
+        const data: PluginMessageData = {
+          id: randomUUID(),
+          pluginId,
+          sessionId: typeof params.sessionId === 'string' ? params.sessionId.trim() : '',
+          revision: 1,
+          ...(text ? { text } : {}),
+          agentText: `[插件消息 · 来自 ${name}（${pluginId}）]\n${instruction || text}`,
+          ...(title ? { title } : {}),
+          ...(quote ? { quote } : {}),
+          ...(source ? { source } : {}),
+          ...(card !== undefined ? { card: card as UiNode } : {}),
+          ...(files?.length ? { files } : {}),
+          ...(status ? { status } : {}),
+          agentVisible: true,
+          triggered: true,
+          createdAt: Date.now(),
+        };
+
         // `workspaceId` is routing, not content: the shell delivers the message
         // to the window showing that workspace. A scheduled job must reach the
         // conversation it was scheduled from, not whichever window is focused.
         const workspaceId =
           typeof params.workspaceId === 'string' && params.workspaceId ? params.workspaceId : undefined;
         this.sendToRenderer('pi:chat:send', {
-          text: `[插件消息 · 来自 ${name}（${pluginId}）]\n${text}`,
+          // A renderer that predates plugin request cards still sends this as a
+          // typed turn — degraded, but the agent gets the attributed text.
+          text: data.agentText,
+          pluginMessage: data,
           pluginId,
           ...(workspaceId ? { workspaceId } : {}),
         });
-        return { ok: true };
+        return { ok: true, messageId: data.id };
       },
     });
 
@@ -190,6 +444,135 @@ export class CapabilityHub {
           new Notification({ title, body }).show();
         }
         return { ok: true };
+      },
+    });
+
+    // ── messages.post (permission: messages) ──
+    // A plugin-originated message in a conversation timeline. Persisted as a
+    // pi `custom` entry: part of the transcript, never sent to the model. The
+    // plugin must name the conversation — "current session" is ambiguous in a
+    // process-global backend with several windows.
+    this.capabilities.set('messages.post', {
+      permission: 'messages',
+      handler: async ({ pluginId, params }) => {
+        if (!this.appendPluginMessage) {
+          throw new Error('messages.post: the host has no conversation store attached yet');
+        }
+        const sessionId = String(params.sessionId ?? '').trim();
+        if (!sessionId) throw new Error('messages.post: sessionId is required');
+        const text = typeof params.text === 'string' ? params.text : undefined;
+        const card = params.card;
+        const files = pluginMessageFiles(params.files);
+        if (!text && !card && !files?.length) {
+          throw new Error('messages.post: text, card or files is required');
+        }
+        if (card !== undefined) validateCardTree(card);
+        const status = pluginMessageStatus(params.status);
+        if (
+          params.agentVisible !== undefined &&
+          typeof params.agentVisible !== 'boolean'
+        ) {
+          throw new Error('messages.post: agentVisible must be a boolean');
+        }
+        const agentVisible = params.agentVisible === true;
+
+        const rateKey = `${pluginId}:${sessionId}`;
+        const now = Date.now();
+        const recent = (this.messagePosts.get(rateKey) ?? []).filter(
+          (at) => now - at < MESSAGE_POST_WINDOW_MS,
+        );
+        if (recent.length >= MAX_MESSAGE_POSTS_PER_MINUTE) {
+          throw new Error(
+            `messages.post: rate limit exceeded (${MAX_MESSAGE_POSTS_PER_MINUTE}/min in this conversation)`,
+          );
+        }
+        recent.push(now);
+        this.messagePosts.set(rateKey, recent);
+
+        const data: PluginMessageData = {
+          id: randomUUID(),
+          pluginId,
+          sessionId,
+          revision: 1,
+          ...(card !== undefined ? { card: card as UiNode } : {}),
+          ...(text ? { text } : {}),
+          ...(files?.length ? { files } : {}),
+          ...(status ? { status } : {}),
+          ...(agentVisible ? { agentVisible: true } : {}),
+          createdAt: Date.now(),
+        };
+
+        const { entryId } = await this.appendPluginMessage(sessionId, data);
+        // The renderer reloads the conversation from the transcript; this is
+        // just "something changed", not a second source of truth.
+        this.sendToSession?.(sessionId, 'pi:plugin:message', { sessionId });
+        return { messageId: data.id, entryId };
+      },
+    });
+
+    // ── messages.update / messages.remove (permission: messages) ──
+    // Append a new revision (or a tombstone) of a message this plugin already
+    // posted. Omitted patch fields keep their value; `card: null` / `text: ''`
+    // clear them. Ownership is verified by the chat service, which can see the
+    // stored data.
+    this.capabilities.set('messages.update', {
+      permission: 'messages',
+      handler: async ({ pluginId, params }) => {
+        if (!this.updatePluginMessage) {
+          throw new Error('messages.update: the host has no conversation store attached yet');
+        }
+        const sessionId = String(params.sessionId ?? '').trim();
+        const messageId = String(params.messageId ?? '').trim();
+        if (!sessionId) throw new Error('messages.update: sessionId is required');
+        if (!messageId) throw new Error('messages.update: messageId is required');
+
+        const patch: PluginMessagePatch = {};
+        if (Object.prototype.hasOwnProperty.call(params, 'card')) {
+          if (params.card === null) patch.card = null;
+          else {
+            validateCardTree(params.card);
+            patch.card = params.card;
+          }
+        }
+        if (Object.prototype.hasOwnProperty.call(params, 'text')) {
+          if (typeof params.text !== 'string') throw new Error('messages.update: text must be a string');
+          patch.text = params.text;
+        }
+        if (Object.prototype.hasOwnProperty.call(params, 'status')) {
+          patch.status = params.status === null ? undefined : pluginMessageStatus(params.status);
+        }
+        if (Object.prototype.hasOwnProperty.call(params, 'files')) {
+          patch.files = params.files === null ? null : (pluginMessageFiles(params.files) ?? []);
+        }
+        if (Object.prototype.hasOwnProperty.call(params, 'agentVisible')) {
+          if (typeof params.agentVisible !== 'boolean') {
+            throw new Error('messages.update: agentVisible must be a boolean');
+          }
+          patch.agentVisible = params.agentVisible;
+        }
+        if (Object.keys(patch).length === 0) {
+          throw new Error('messages.update: nothing to update (card, text, status, files or agentVisible)');
+        }
+
+        const updated = await this.updatePluginMessage(sessionId, messageId, pluginId, patch);
+        this.sendToSession?.(sessionId, 'pi:plugin:message', { sessionId });
+        return { messageId, ...updated };
+      },
+    });
+
+    this.capabilities.set('messages.remove', {
+      permission: 'messages',
+      handler: async ({ pluginId, params }) => {
+        if (!this.removePluginMessage) {
+          throw new Error('messages.remove: the host has no conversation store attached yet');
+        }
+        const sessionId = String(params.sessionId ?? '').trim();
+        const messageId = String(params.messageId ?? '').trim();
+        if (!sessionId) throw new Error('messages.remove: sessionId is required');
+        if (!messageId) throw new Error('messages.remove: messageId is required');
+        const removed = await this.removePluginMessage(sessionId, messageId, pluginId);
+        this.sendToSession?.(sessionId, 'pi:plugin:message', { sessionId });
+        return { messageId, ...removed };
       },
     });
 
@@ -395,7 +778,11 @@ export class CapabilityHub {
           typeof params.contentB64 === 'string'
             ? Buffer.from(params.contentB64, 'base64')
             : String(params.content ?? '');
-        return writeFileWithMtimeGuard(path, content, expectedMtime);
+        const written = writeFileWithMtimeGuard(path, content, expectedMtime);
+        // No-op for ordinary files; rebuilds a live session when this was one
+        // of its prompt/context files.
+        this.onContextFileWrite?.(path);
+        return written;
       },
     });
 
@@ -404,11 +791,15 @@ export class CapabilityHub {
     // underneath the caller is the whole point of passing the expected mtime.
     this.capabilities.set('filesystem.delete', {
       permission: 'filesystem',
-      handler: ({ params }) =>
-        deleteFileWithMtimeGuard(
-          String(params.path ?? ''),
+      handler: ({ params }) => {
+        const path = String(params.path ?? '');
+        const deleted = deleteFileWithMtimeGuard(
+          path,
           typeof params.expectedMtime === 'number' ? params.expectedMtime : undefined,
-        ),
+        );
+        this.onContextFileWrite?.(path);
+        return deleted;
+      },
     });
 
     // ── office.read (permission: filesystem) — text-level office extraction ──

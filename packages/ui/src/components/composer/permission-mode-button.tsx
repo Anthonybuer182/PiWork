@@ -6,7 +6,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { useUIStore } from '@/stores/ui-store';
 import { usePermissionStore, type PermissionMode } from '@/stores/permission-store';
 import { useI18n, type MessageKey } from '@/i18n';
 
@@ -25,12 +24,8 @@ const MODE_LABELS: Record<PermissionMode, { title: MessageKey; hint: MessageKey 
  * a toggle that only pretends would be worse than none.
  */
 export function PermissionModeButton() {
-  const activeSessionId = useUIStore((s) => s.activeSessionId);
-  // Keyless state (no session yet) maps to main's 'default' key — same
-  // fallback the chat service uses when the first message creates a session.
-  const mode = usePermissionStore(
-    (s) => s.modeBySession[activeSessionId ?? 'default'] ?? 'default',
-  );
+  // One global mode, like the model and thinking-level pickers next to it.
+  const mode = usePermissionStore((s) => s.mode);
   const setMode = usePermissionStore((s) => s.setMode);
   const { t } = useI18n();
 
@@ -49,21 +44,12 @@ export function PermissionModeButton() {
         <Button
           size="sm"
           variant="ghost"
-          // No session yet: the mode would land on main's 'default' key, which
-          // the gate never consults once the real session exists — a picked
-          // 完全访问 would silently vanish. Disabled beats silently dropped;
-          // the composer auto-creates a session, so this window is brief.
-          disabled={!activeSessionId}
           className={
             isFull
               ? 'h-7 gap-1.5 px-2 text-xs text-red-600 dark:text-red-400 hover:text-red-600 dark:hover:text-red-400'
               : 'h-7 gap-1.5 px-2 text-xs text-muted-foreground'
           }
-          title={
-            !activeSessionId
-              ? t('会话创建后可设置权限模式')
-              : t('权限模式（新会话沿用上次选择，重启后恢复默认）')
-          }
+          title={t('权限模式（全局，重启后恢复默认）')}
         >
           {isFull ? (
             <ShieldAlert className="h-3.5 w-3.5" />
@@ -78,7 +64,7 @@ export function PermissionModeButton() {
         {(Object.keys(MODE_LABELS) as PermissionMode[]).map((key) => (
           <DropdownMenuItem
             key={key}
-            onClick={() => setMode(activeSessionId ?? 'default', key)}
+            onClick={() => setMode(key)}
             className="flex flex-col items-start gap-0.5 cursor-pointer"
           >
             <span

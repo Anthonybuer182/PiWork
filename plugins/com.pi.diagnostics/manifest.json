@@ -1,0 +1,26 @@
+{
+  "id": "com.pi.diagnostics",
+  "name": "运行诊断",
+  "description": "官方插件：查看当前会话的 agent 运行轨迹 —— 每轮模型耗时、工具调用、token 与缓存、错误和重试，开发时用来定位流程问题。",
+  "version": "0.1.0",
+  "apiVersion": 7,
+  "engines": {
+    "pi-desktop": ">=0.1.0"
+  },
+  "backend": "./dist/main.mjs",
+  "permissions": ["filesystem"],
+  "contributes": {
+    "panels": [
+      {
+        "id": "trace",
+        "title": "运行诊断",
+        "icon": "clock",
+        "entry": "./ui/index.html",
+        "keepAlive": "always",
+        "region": "right",
+        "scope": "session",
+        "order": 40
+      }
+    ]
+  }
+}

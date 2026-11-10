@@ -39,6 +39,7 @@
 - **面板 ↔ 后端**：面板只跟**自己插件的后端**说话，走一条宿主只转发、不检查内容的专用通道。
 - **面板 → agent**：后端用 `chat.send` 能力把消息发进当前对话（带来源标注）——面板上的一个按钮就能"叫醒" agent。见第 2 节阶段③。
 - **工具结果 → 对话**：工具可以返回一张声明式"卡片"，宿主把它渲染进对话流；用户点卡片上的按钮，事件回到后端的 `onCardEvent`。见第 2 节阶段④。
+- **插件 → 对话消息**：后端用 `ctx.messages.post` 往**指定会话**发一条插件消息（卡片/文本/状态）。它和 AI 记录存在同一个会话文件里，但**不进入 AI 上下文**；界面上是独立的插件消息气泡。见第 11 节。
 
 ### 分工
 
@@ -397,11 +398,21 @@ if (event === 'note.ask') {
 }
 ```
 
-关于 `chat.send`，三件事要知道：
+关于 `chat.send`，要知道这些：
 
 - **不需要声明权限**，但发出的消息永远带来源标注（「插件消息 · 来自 便签（com.example.note）」）——插件够得着对话，但拿不到用户的声音，agent 和用户都看得出这不是用户亲手打的。
 - 消息会像用户输入一样触发一个 agent 回合：上面那条消息发出后，agent 会自己去调 `note_read`，把整理结果回在对话里。
 - 它要求当前有一个打开的会话。
+- 对话里显示的不是用户气泡，而是一张**插件请求卡**（插件图标/名称、「已交给 AI」徽章）。`text` 是用户读到的文案，`agentText` 是给模型的指令——两者可以不同：
+  ```ts
+  await ctx.call('chat.send', {
+    agentText: '把选中的网页内容翻译成中文，结果用 browser_show 展示…',  // 只给模型
+    title: '翻译网页内容',                        // 卡片标题
+    quote: 'Trending',                            // 卡片里的引用块（最多 4000 字）
+    source: { label: 'GitHub Trending', url: 'https://github.com/trending' }, // 来源行
+  });
+  ```
+  `title` / `quote` / `source` / `agentText` 都可省略；只有 `text` 的普通消息同样渲染成插件卡片，绝不会变成假用户气泡。
 
 重新打包、拷贝、重启。
 
@@ -448,7 +459,22 @@ if (name === 'note_write') {
 }
 ```
 
-`card` 是一棵声明式的 UI 树（`{ component, props, children, events }`）——你只描述"长什么样"，宿主用它自带的组件渲染，你的插件不用发任何 UI 代码。`events: { onClick: 'undo' }` 的意思是：按钮被点击时，把 `undo` 这个事件 id 送回后端。完整的组件词汇表（`Column` / `Row` / `Card` / `Text` / `Badge` / `KeyValue` / `List` / `Button` / `Input` / `Image` / `Separator` / `Spinner` / `EmptyState`）见第 11 节。
+`card` 是一棵声明式的 UI 树（`{ component, props, children, events }`）——你只描述"长什么样"，宿主用它自带的组件渲染，你的插件不用发任何 UI 代码。`events: { onClick: 'undo' }` 的意思是：按钮被点击时，把 `undo` 这个事件 id 送回后端。完整的组件词汇表见下表。
+
+| 组件 | 常用 props |
+| --- | --- |
+| `Card` | `title`（顶部标题条）、`icon`（`file` / `folder` / `check` / `mail` / `calendar` / `clock` / `alert` / `info` / `link` / `sparkles`）、`status`（`success` / `info` / `warning` / `error` / `loading`，标题条右侧的状态点） |
+| `Row` / `Column` | `gap`（`sm` / `md` / `lg`）、`padding`、`grow: true`（撑满剩余宽度）；`Row` 另有 `justify`（`between` / `end` / `center`） |
+| `Text` | `text`、`variant`（`default` / `muted` / `small` / `title`）、`weight: 'bold'`、`mono: true`、`truncate: true` |
+| `Badge` | `text`——小号描边标签，放格式、状态这类短词 |
+| `Button` | `label`、`variant`（默认 `outline` 描边；`primary` 才是主色实心）、`disabled`；点击事件写成 `events: { onClick: 'eventId' }`，节点 `props` 会作为 `payload` 回到 `onCardEvent` |
+| `KeyValue` | `items` 既可以是 `{ key, value }` 对象，也可以是 `['key', value]` 数组 |
+| `List` | `items: [{ key, label, description?, badge? }]`；带 `events.onClick` 时整行可点 |
+| `Input` | `placeholder`、`value`，回车触发 `events.onSubmit` |
+| `Image` | `source`（base64，可配 `mimeType`）、`maxHeight` |
+| `Separator` / `Spinner` / `EmptyState` | 分隔线 / `label` / `title` + `description` |
+
+样式约定：卡片里不写颜色、字号——宿主按当前主题渲染，深浅色都跟着走。按钮默认是描边样式，一张卡最多留一个 `primary` 用来突出唯一的主操作。
 
 后端加 `onCardEvent` 回调（和 `onTool` 平级）：
 
@@ -652,6 +678,7 @@ const slotB = piSDK.liveSlot('page-b', document.getElementById('second-pane'), (
 | `onContextRequest(providerId, message, ctx)` | 宿主发消息前要上下文，返回要注入的文字 |
 | `onHostEvent(event, data, ctx)` | 宿主推了个事件：`session.changed`（`{ sessionId }`，所有后端）、`browser.urlChanged` / `browser.tabOpened`（`{ tabId, url }`，仅 `browser` 权限） |
 | `onCardEvent(toolName, eventId, kind, payload, ctx)` | 用户点了你返回到对话里的卡片按钮（`kind:'click'`）或在其中输入框回车（`kind:'submit'`）。事件是单向的；想让卡片反映后续状态，靠下一次工具结果返回新卡片 |
+| `onMessageAction(messageId, eventId, kind, payload, ctx, meta?)` | 用户点了你用 `ctx.messages.post` 发到对话里的插件消息卡片。`meta.sessionId` 是该消息所在的会话；用 `ctx.messages.update/remove` 改同一条消息 |
 
 `onPanelMounted` 的 `meta.sessionId`、`meta.tabId` 和 `onTool` 的 `call.sessionId` 用来把"当前文档 / 当前页面"解析到对应会话和标签——并发会话或同会话多标签共用一个全局 current 会串台。
 
@@ -668,6 +695,9 @@ const slotB = piSDK.liveSlot('page-b', document.getElementById('second-pane'), (
 | `ctx.panelAlive(panelId, timeoutMs?)` | 问某块面板还活着吗（尽力而为的探测） |
 | `ctx.openPanel(panelId, { focus })` | 打开自己的面板；`focus: false` 只亮角标不抢焦点。要带打开参数时直接用 `ctx.call('panel.open', { panelId, focus, params })`——SDK 的封装只传 focus |
 | `ctx.setBadge(panelId, n)` | 面板图标上的角标，传 `null` 清掉 |
+| `ctx.messages.post({ sessionId, card?, text?, status?, files?, agentVisible? })` | 往会话发一条插件消息；返回 `{ messageId, entryId }`。`sessionId` 必填（用 `meta.sessionId` 或 `call.sessionId`）；`files` 是绝对路径数组，宿主渲染成文件附件卡片；默认不进入 AI 上下文，`agentVisible: true` 才让模型看到 |
+| `ctx.messages.update({ sessionId, messageId, card?, text?, status?, files?, agentVisible? })` | 更新自己发过的消息；省略的字段保持不变，`card: null` / `text: ''` / `files: null` 清空。`agentVisible: true` 表示这一版也进入 AI 上下文。返回新 `revision` |
+| `ctx.messages.remove({ sessionId, messageId })` | 撤回自己发过的消息（追加墓碑，不改写历史） |
 | `ctx.log.info / warn / error(msg)` | 写进应用日志，前缀是你的插件 id |
 
 ### 能力清单（`ctx.call` 的全部可用方法）
@@ -678,7 +708,8 @@ const slotB = piSDK.liveSlot('page-b', document.getElementById('second-pane'), (
 | 存储 | `storage.get` / `storage.set` / `storage.delete` | `storage` | 插件私有键值对，落盘持久 |
 | 通知 | `notify.show` | `notify` | 系统通知 |
 | 面板 | `panel.open` / `panel.close` / `panel.focusTab` / `panel.updateTab` / `panel.setStatus` | 无 | 只能操作**自己的**面板（`ctx.openPanel` / `ctx.setBadge` 是它们的封装）。`panel.open` 可带 `params`，原样交给面板的 `onPanelMounted`；`panel.focusTab` 聚焦一个已经打开的标签（不按参数匹配）；`panel.updateTab` 改宿主标签的标题/参数 |
-| 对话 | `chat.send` | 无 | 发消息进当前对话。消息会带来源标注（「插件消息 · 来自 你的插件名」），agent 和用户都看得出不是用户亲手打的——插件够得着对话，但拿不到用户的声音 |
+| 对话 | `chat.send` | 无 | 叫醒当前对话的 agent 并开始一个回合。对话流里显示**插件请求卡**（不是用户气泡）：`text` 给用户看，`agentText` 给模型（自动带来源标注），可选 `title` / `quote`（最多 4000 字）/ `source`（`{ label, url }`）/ `card` / `files` / `status`。插件够得着对话，但拿不到用户的声音 |
+| 对话 | `messages.post` / `update` / `remove` | `messages` | 往**指定会话**发/改/撤回插件消息（卡片/文本/文件/状态）。存进会话记录、可随会话回放，默认**不进入 AI 上下文**；`agentVisible: true` 才让模型看到这一版。`sessionId` 必填；卡片是声明式 UI 树；`files` 是绝对路径数组，渲染成文件附件卡片；更新是追加 revision，读取时折叠最新；删除是追加墓碑。用户可在插件中心静音某个插件的消息 |
 | 对话框 | `dialog.openFile` / `dialog.saveFile` | 无 | 系统文件对话框。用户亲手选就是授权。`openFile` 返回 `{ canceled, path, paths }`，`saveFile` 返回 `{ canceled, path }` |
 | 文件 | `filesystem.read` / `write` / `delete` | `filesystem` | 任意绝对路径。`read` 返回 UTF-8 文本（≤2MB；docx/xlsx/pptx 用 `office.read`）；`write` 支持 `content`（文本）或 `contentB64`（二进制），`expectedMtime` 冲突检测；`delete` 同样支持 `expectedMtime` |
 | Office | `office.read` | `filesystem` | 提取 docx / pptx / xlsx 等文档的文本内容（≤20MB） |
@@ -843,6 +874,7 @@ setTimeout(tick, next ? clamp(next - now, 250, 30_000) : 30_000);
 |------|------|
 | `storage` | 插件私有键值对（每插件独立目录，互不可见） |
 | `notify` | 系统通知 |
+| `messages` | 往会话里发插件消息（`messages.post`）；默认不进入 AI 上下文 |
 | `browser` | 驱动宿主浏览器自动化，并解锁 `liveSlot` 的 `page` / `page-b` 引擎槽 |
 | `network:<域名>` | 出站网络（域名白名单，可多条） |
 | `filesystem` | 读写文件，**任意绝对路径**（含二进制），不限工作区 |
@@ -1062,7 +1094,85 @@ node scripts/build-market.mjs --out ./dist-market
 
 `type` 填**工具名**。声明后，工具结果里的 `card`（声明式 UI 树：`Column` / `Row` / `Card` / `Text` / `Badge` / `KeyValue` / `List` / `Button` / `Input` / `Image` / `Separator` / `Spinner` / `EmptyState`）由宿主渲染进对话，工具运行中还会把参数实时渲染成「生成中」卡片（`streaming: false` 可关闭）。卡片里的 Button / Input 是**活的**：用户点击/回车，事件带着节点上声明的 `eventId` 回到后端的 `onCardEvent`。旧版客户端或没实现 `onCardEvent` 的后端，按钮退化成展示——不会坏，只是不动。
 
-**领域惯例：你工具的产出物，就用你自己的卡片展示。** 日程本插件的条目卡片、文件查看器的「文档已更新」卡片（office_edit 保存成功后返回：文件名 + 格式徽章 + 「在查看器中打开」按钮）都是这么做。把上下文（如文件路径）放进按钮的 `props`——点击时它作为 `payload` 回到 `onCardEvent`，这样对话里堆了多少张卡片，每张打开的都还是它自己那份产出物。
+**领域惯例：你工具的产出物，就用你自己的卡片展示。** 日程本插件的条目卡片、文件查看器的「文档已创建 / 文档已更新」卡片（office_edit 保存成功后返回：文件图标 + 标题条 + 文件名 + 格式徽章 + 「打开」按钮）都是这么做。把上下文（如文件路径）放进按钮的 `props`——点击时它作为 `payload` 回到 `onCardEvent`，这样对话里堆了多少张卡片，每张打开的都还是它自己那份产出物。
+
+### `ctx.messages.post` — 插件主动消息
+
+工具结果卡片是"agent 调了你的工具"的产物。如果插件想在**没有工具调用**时往会话里放一条消息（后台任务完成、面板里的操作结果、定时推送），用 `ctx.messages.post`：
+
+```js
+await ctx.messages.post({
+  sessionId: meta.sessionId, // 必填；从 onPanelMounted / onTool 的 meta 拿
+  text: '邮件已发送',
+  status: 'success',
+  files: [{ path: '/workspace/Q3.pdf', label: 'Q3 报告' }], // 可选：文件附件卡片
+  card: {
+    component: 'Card',
+    props: { title: '邮件已发送' },
+    children: [
+      { component: 'Text', props: { text: '收件人：张三' } },
+      { component: 'Button', props: { label: '查看邮件' }, events: { onClick: 'open' } },
+    ],
+  },
+});
+```
+
+要点：
+
+- **`sessionId` 必填**。插件后端是进程级的，多会话/多窗口下"当前对话"不唯一；从面板的 `meta.sessionId` 或工具的 `call.sessionId` 拿，不要猜。
+- 消息**存进同一个会话记录**（pi 的 `custom` 条目），随会话回放；但**不进入 AI 上下文**，不耗 token。
+  - 只有显式传 `agentVisible: true` 时，这一版会追加一条 `custom_message` 条目，模型才能看到它。模型只看到 `text`（或卡片标题），卡片和文件不会发送给模型；所以需要 AI 理解的内容请写进 `text`。
+  - `agentVisible` 是逐次选择的：默认关闭；一次可见不会让后续每次 update 都自动进入上下文。
+- 界面上是**独立的插件消息气泡**（带插件名/图标），不和 AI 回复混在一起。曾经 `agentVisible` 的消息会带「AI 可见」小徽章。
+- 用户可以在**插件中心**把某个插件的「在会话里显示插件消息」关掉（静音）。静音只隐藏界面上的气泡，**不会删除消息**，也不会阻止 `agentVisible` 的内容进入模型上下文；重新打开后历史还在。
+- `files` 里的路径必须是**绝对路径且文件存在**；宿主渲染成和文件树一致的文件附件卡片，点击走 `filePreview` 链打开右栏。
+- 宿主对 `post` 有频率限制（60 条/分钟/插件+会话），`update` / `remove` 不计入——高频内容请更新同一条消息，不要不断 post。
+- 需要 `messages` 权限。
+
+**更新和撤回**：`post` 返回的 `messageId` 就是后续的句柄。更新是**追加一个新 revision**，读取时折叠最新；删除是追加墓碑。两者都不改写历史行。
+
+```js
+const { messageId } = await ctx.messages.post({ sessionId, text: '发送中', status: 'loading' });
+
+// 发送完成后更新同一条消息
+await ctx.messages.update({
+  sessionId,
+  messageId,
+  text: '邮件已发送',
+  status: 'success',
+  card: { component: 'Card', props: { title: '邮件已发送' } },
+});
+
+// 不需要了就撤回
+await ctx.messages.remove({ sessionId, messageId });
+```
+
+需要 agent 也知道时，显式打开：
+
+```js
+await ctx.messages.post({
+  sessionId,
+  text: '收到一封新邮件：张三 / Q3 周报。需要我处理吗？',
+  agentVisible: true,
+});
+```
+
+**卡片交互**：插件消息里的 Button / Input 是活的。用户点击/回车，事件带着 `messageId`、`eventId`、`payload` 和 `sessionId` 回到后端的 `onMessageAction`；后端通常直接 `update` 同一条消息：
+
+```js
+async onMessageAction(messageId, eventId, kind, payload, ctx, meta) {
+  if (eventId === 'retry') {
+    await ctx.messages.update({
+      sessionId: meta.sessionId,
+      messageId,
+      text: '重试中…',
+      status: 'loading',
+    });
+  }
+}
+```
+
+`update` 的省略字段保持不变；`card: null` / `text: ''` 清空；只有消息的 `pluginId` 和当前插件一致时才能改/删。
 
 ### contributes.filePreview — 文件树路由
 

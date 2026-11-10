@@ -70,6 +70,16 @@ import type { ReactNode } from 'react';
  *  not GenOffice revisions, but docs' App.tsx imports it unconditionally. */
 export const AI_REVISION_AUTHOR = 'AI Assistant';
 
+/**
+ * Upstream exports this beside `AiPanel` (it resolves the Settings user name).
+ * docs' App.tsx imports the pair from `./ai/AiPanel`, which this module
+ * replaces, so the export has to exist here too. There is no GenOffice Settings
+ * user to read — the host agent is the author.
+ */
+export function aiRevisionAuthor(): string {
+  return AI_REVISION_AUTHOR;
+}
+
 /** The host agent, reached exactly the way the composer reaches it. */
 function sendToHost(text: string): void {
   const sdk = (window as unknown as {

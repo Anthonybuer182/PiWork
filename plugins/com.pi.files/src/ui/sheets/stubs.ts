@@ -1,7 +1,7 @@
 /**
  * Stubs for GenOffice's `DesktopApi` (window.desktopApi).
  *
- * 66 members, of which the renderer calls a scattered handful during bootstrap —
+ * 100 members, of which the renderer calls a scattered handful during bootstrap —
  * none of them guessable from the outside (the first slides run died on
  * `clipboardProbe`). Each returns the SHAPE its declaration promises, so a
  * stubbed call degrades to "feature unavailable" rather than blowing up
@@ -14,10 +14,13 @@
  * than edit — but do check it in: it is read far more often than written.
  */
 export const sheetsApiStubs: Record<string, unknown> = {
+  openSourcePath: () => Promise.resolve(),
   getLanguage: () => Promise.resolve(null),
   onLanguageChanged: () => undefined,
   getTheme: () => Promise.resolve(null),
   onThemeChanged: () => () => undefined,
+  getDocumentTheme: () => Promise.resolve(null),
+  onDocumentThemeChanged: () => () => undefined,
   getAutoSaveDefault: () => Promise.resolve(null),
   onAutoSaveDefaultChanged: () => () => undefined,
   getAiPanelPrefs: () => Promise.resolve(null),
@@ -25,13 +28,36 @@ export const sheetsApiStubs: Record<string, unknown> = {
   onAiPanelPrefsChanged: () => () => undefined,
   onChromePressed: () => () => undefined,
   selectWorkbook: () => Promise.resolve(null),
+  openEncryptedWorkbook: () => Promise.resolve(null),
+  updateWorkbookPassword: () => undefined,
   selectWorkbooksForMerge: () => Promise.resolve([]),
   openWorkbooksForMerge: () => Promise.resolve([]),
+  reopenWorkbook: () => Promise.resolve(null),
+  onSidecarCrashed: () => () => undefined,
   readWorkbookRange: () => Promise.resolve(null),
   readWorkbookFormulas: () => Promise.resolve(null),
+  findWorkbookCells: () => Promise.resolve(null),
+  listWorkbookConnections: () => Promise.resolve(null),
+  refreshWorkbookConnection: () => Promise.resolve(null),
+  readWorkbookRowOutline: () => Promise.resolve(null),
   recalcWorkbook: () => Promise.resolve(null),
+  listExternalLinks: () => Promise.resolve(null),
+  updateExternalLinks: () => Promise.resolve(null),
+  readExternalLinkUsage: () => Promise.resolve(null),
+  selectExternalLinkSource: () => Promise.resolve(null),
+  listWorkbookTabs: () => Promise.resolve([]),
+  armWorkbookPick: () => Promise.resolve(''),
+  sendWorkbookPickSelection: () => Promise.resolve(),
+  cancelWorkbookPick: () => Promise.resolve(),
+  onWorkbookPickArmed: () => () => undefined,
+  onWorkbookPickSelected: () => () => undefined,
+  onWorkbookPickCancelled: () => () => undefined,
+  revealLinkSource: () => undefined,
   readWorkbookMedia: () => Promise.resolve(null),
   readPivotDefinition: () => Promise.resolve(null),
+  readSlicerState: () => Promise.resolve(null),
+  readWorkbookRedactions: () => Promise.resolve(null),
+  readWorkbookQueries: () => Promise.resolve(null),
   readLocalImage: () => Promise.resolve(null),
   captureScreenSources: () => Promise.resolve(null),
   captureScreenSource: () => Promise.resolve(null),
@@ -43,6 +69,7 @@ export const sheetsApiStubs: Record<string, unknown> = {
   autoRenameWorkbook: () => undefined,
   exportPdf: () => Promise.resolve(null),
   printWorkbook: () => Promise.resolve(null),
+  listPrinters: () => Promise.resolve([]),
   exportCsv: () => Promise.resolve(null),
   confirmCsvSave: () => Promise.resolve(null),
   createDocument: () => Promise.resolve(null),
@@ -62,8 +89,15 @@ export const sheetsApiStubs: Record<string, unknown> = {
   hasQueuedWorkbook: () => Promise.resolve(false),
   consumeHeadlessExport: () => Promise.resolve(null),
   headlessExportDone: () => undefined,
+  getUserDisplayName: () => Promise.resolve(''),
+  onUserDisplayNameChanged: () => () => undefined,
   getAiSettings: () => Promise.resolve(null),
   setAiSettings: () => Promise.resolve(),
+  onAiSettingsChanged: () => () => undefined,
+  openAiModelSettings: () => Promise.resolve(),
+  openSkillsSettings: () => Promise.resolve(),
+  skillsList: () => Promise.resolve([]),
+  skillText: () => Promise.resolve(''),
   aiChat: () => Promise.resolve(null),
   aiStream: () => Promise.resolve(),
   aiStreamCancel: () => Promise.resolve(),

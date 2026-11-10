@@ -1,6 +1,6 @@
 import type { TokenUsage } from './usage.js';
 
-export type MessageRole = 'user' | 'assistant' | 'system';
+export type MessageRole = 'user' | 'assistant' | 'system' | 'plugin';
 
 export type MessageStatus = 'pending' | 'streaming' | 'complete' | 'error';
 
@@ -110,4 +110,34 @@ export interface AssistantMessage extends Message {
 
 export interface SystemMessage extends Message {
   role: 'system';
+}
+
+/**
+ * A plugin-originated message in the timeline.
+ *
+ * Persisted as a pi `custom` session entry, so it is part of the transcript
+ * and replays with the conversation, but it is not sent to the model. The
+ * renderer gives it its own style (plugin name/icon) instead of blending it
+ * into assistant replies.
+ */
+export interface PluginMessage extends Message {
+  role: 'plugin';
+  pluginId: string;
+  /** The plugin's own stable id for this message (updates share it). */
+  pluginMessageId: string;
+  revision: number;
+  card?: import('./plugin/ui-tree.js').UiNode;
+  files?: import('./plugin/plugin-message.js').PluginMessageFile[];
+  /** Visual state the plugin chose: info / success / warning / error / loading. */
+  pluginStatus?: import('./plugin/plugin-message.js').PluginMessageStatus;
+  /** True when this revision also entered model context (agentVisible). */
+  agentVisible?: boolean;
+  /** Short headline for a request card, e.g. 「解释网页内容」. */
+  title?: string;
+  /** The passage the request is about, rendered as a quote block. */
+  quote?: string;
+  /** Where that passage came from (page, document, file). */
+  source?: import('./plugin/plugin-message.js').PluginMessageSource;
+  /** This message started an agent turn (posted through `chat.send`). */
+  triggered?: boolean;
 }

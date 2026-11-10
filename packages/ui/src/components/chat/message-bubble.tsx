@@ -25,6 +25,8 @@ interface MessageBubbleProps {
   contextUsage?: ContextUsageInfo;
   messageTiming?: MessageTiming;
   toolTimings?: Map<string, number>;
+  /** Tool-call ids whose plugin card body is folded away (see suppressedToolCards). */
+  suppressedCards?: ReadonlySet<string>;
   /** Callback when user clicks "Edit" on a user message */
   onEditMessage?: (message: Message) => void;
   /** Callback when user confirms inline edit with new content */
@@ -37,7 +39,12 @@ interface MessageBubbleProps {
  * Pair tool_call blocks with their corresponding tool_result blocks.
  * Returns an array of rendered elements, where tool_call + result are grouped.
  */
-function renderBlocks(blocks: ContentBlock[], isStreaming: boolean, toolTimings: Map<string, number>) {
+function renderBlocks(
+  blocks: ContentBlock[],
+  isStreaming: boolean,
+  toolTimings: Map<string, number>,
+  suppressedCards?: ReadonlySet<string>,
+) {
   const resultMap = new Map<string, ToolResultBlock>();
   const elements: React.ReactNode[] = [];
 
@@ -79,6 +86,7 @@ function renderBlocks(blocks: ContentBlock[], isStreaming: boolean, toolTimings:
             result={result}
             isStreaming={isStreaming && !result}
             durationMs={toolMs}
+            showPluginCard={!suppressedCards?.has(tcBlock.toolCallId)}
           />,
         );
         break;
@@ -176,6 +184,7 @@ function MessageBubbleImpl({
   contextUsage,
   messageTiming,
   toolTimings = EMPTY_TOOL_TIMINGS,
+  suppressedCards,
   onEditMessage,
   onConfirmEdit,
   onCancelEdit,
@@ -208,6 +217,10 @@ function MessageBubbleImpl({
   // messages read cleanly. (The quote feature itself is gone — this is purely
   // for conversations recorded before its removal.)
   const displayContent = isUser ? extractAppendedQuotes(message.content).display : message.content;
+
+  // Attachment-only sends carry no text (`[Attached: …]` is stripped before
+  // display), so the text bubble only exists when there is something to say.
+  const hasUserText = isUser && displayContent.trim().length > 0;
 
   const handleCopy = async () => {
     try {
@@ -253,7 +266,7 @@ function MessageBubbleImpl({
                   ref={textareaRef}
                   className={cn(
                     'rounded-3xl bg-muted px-4 py-2.5 text-sm w-full min-w-[260px]',
-                    'resize-none outline-none ring-1 ring-border focus:ring-foreground/20',
+                    'resize-none outline-hidden ring-1 ring-border focus:ring-foreground/20',
                     'placeholder:text-muted-foreground/60 overflow-hidden',
                   )}
                   value={editingContent}
@@ -280,13 +293,13 @@ function MessageBubbleImpl({
                   </Button>
                 </div>
               </div>
-            ) : (
+            ) : hasUserText ? (
               <div className={cn(
                 'max-w-full rounded-3xl bg-muted px-4 py-2.5 text-sm',
               )}>
                 <p className="whitespace-pre-wrap">{renderTokenizedText(displayContent)}</p>
               </div>
-            )}
+            ) : null}
             {hasUserMedia && (
               <div className="flex flex-col gap-1 mt-1 max-w-full">
                 {renderBlocks(userMediaBlocks, !!isStreaming, toolTimings)}
@@ -299,7 +312,7 @@ function MessageBubbleImpl({
           </div>
         ) : (
           <div className="flex flex-col">
-            {renderBlocks(message.blocks, !!isStreaming, toolTimings)}
+            {renderBlocks(message.blocks, !!isStreaming, toolTimings, suppressedCards)}
           </div>
         )}
         {/* Action row: timestamp + metrics + hover buttons */}

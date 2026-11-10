@@ -58,6 +58,7 @@ const shimSwap = {
       ['@genoffice/ai-provider', 'ai-provider.ts'],
       ['@genoffice/ai-provider/browser', 'ai-provider.ts'],
       ['@genoffice/electron-utils/headless-export', 'electron-utils.ts'],
+      ['@genoffice/electron-utils/safe-external-url', 'electron-utils.ts'],
       // Type-only everywhere it appears (the two `ai/*-skill.ts` files).
       ['@genoffice/agent-core', 'agent-core.ts'],
     ]);
@@ -80,14 +81,22 @@ const genofficeResolver = {
       if (!m) return null;
       const [, pkg, sub] = m;
       const base = join(VENDOR, 'packages', pkg, 'src');
+      // Assets exported from the package root (e.g. font-metrics'
+      // `word-faces.json`) are not mirrored under src/.
+      const rootFile = join(VENDOR, 'packages', pkg, sub ?? '');
       if (!sub) return { path: join(base, 'index.ts') };
       // The subpath may already carry its extension (`@genoffice/ui/tokens.css`),
       // in which case appending another one produces `tokens.css.ts`.
-      if (/\.[a-z0-9]+$/i.test(sub)) return { path: join(base, sub) };
+      if (/\.[a-z0-9]+$/i.test(sub)) {
+        if (existsSync(join(base, sub))) return { path: join(base, sub) };
+        if (existsSync(rootFile)) return { path: rootFile };
+        return { path: join(base, sub) };
+      }
       for (const ext of ['.tsx', '.ts', '.css', '.json']) {
         const p = join(base, `${sub}${ext}`);
         if (existsSync(p)) return { path: p };
       }
+      if (existsSync(rootFile)) return { path: rootFile };
       return { path: join(base, `${sub}.ts`) };
     });
   },
@@ -269,6 +278,26 @@ const cssInject = {
   },
 };
 
+/**
+ * Answers GenOffice's off-thread docx parser with an inline one.
+ *
+ * The docs renderer creates a module Worker with
+ * `new Worker(new URL('./parse-worker.ts', import.meta.url))`. esbuild does not
+ * turn that into a second bundle, so the URL points at a `.ts` path the plugin
+ * origin does not serve: the worker 404s, the open falls back to a blank
+ * document, and the status bar explains nothing. Inline parsing is what
+ * `parseDocxOffThread` itself does when Worker is unavailable — and a plugin
+ * panel is not the app's main UI, so the main thread is acceptable here.
+ */
+const parseOffThreadInline = {
+  name: 'parse-off-thread-inline',
+  setup(b) {
+    b.onResolve({ filter: /(^|\/)parse-off-thread(\.ts)?$/ }, () => ({
+      path: join(ROOT, 'src', 'ui', 'docx', 'parse-inline.ts'),
+    }));
+  },
+};
+
 const result = await build({
   entryPoints: [join(ROOT, 'src', 'ui', 'panel', 'main.ts')],
   outdir: OUT,
@@ -327,7 +356,7 @@ const result = await build({
   // is served from (`contributes.panels[].entry`).
   publicPath: '/ui-dist/panel/',
   resolveExtensions: ['.tsx', '.ts', '.js'],
-  plugins: [aiPanelSwap, shimSwap, urlAsset, genofficeResolver, rawText, cssInject, nodeBuiltins],
+  plugins: [aiPanelSwap, shimSwap, urlAsset, genofficeResolver, rawText, cssInject, nodeBuiltins, parseOffThreadInline],
 });
 
 // Fonts: the layout-fidelity payload. Served at /fonts/* so the rewritten

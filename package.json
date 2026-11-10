@@ -15,7 +15,7 @@
     "url": "https://github.com/Anthonybuer182/PiWork.git"
   },
   "engines": {
-    "node": ">=20.0.0",
+    "node": ">=20.19.0",
     "pnpm": ">=9.0.0"
   },
   "scripts": {
@@ -26,6 +26,8 @@
     "dev:desktop": "turbo run dev --filter=@pi/desktop",
     "dev:desktop:plugins": "node scripts/dev-plugin.mjs",
     "dev:desktop:raw": "turbo run dev --filter=@pi/desktop",
+    "diag:sessions": "node scripts/diagnostics/session-report.mjs",
+    "diag:sessions:all": "node scripts/diagnostics/session-report.mjs --all --limit 500",
     "plugins:publish": "node scripts/publish-plugins.mjs",
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",

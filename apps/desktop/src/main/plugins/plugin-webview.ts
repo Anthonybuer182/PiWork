@@ -3,24 +3,28 @@ import type { BrowserWindow, WebContents } from 'electron';
 import { WebContentsView, shell } from 'electron';
 import { panelUrl } from '@pi/types';
 import type { BrowserManager } from '@main/browser/browser-manager';
-import type { LiveSlotHandler, LiveSlotRegistry } from './slots';
+import type {
+  LiveSlotHandler,
+  LiveSlotRegistry,
+  LiveSlotSnapshotLayer,
+} from './slots';
 import type { PluginRegistry } from './registry';
 
 /**
  * Name of the engine live slot a plugin page can bind with
- * `piSDK.liveSlot(ENGINE_SLOT_NAME, element)`. The host registers
- * `<pluginId>:<ENGINE_SLOT_NAME>` for plugins holding the `browser`
- * permission; the slot's view is the shared browser engine, not a page.
- * Must not collide with any panel id of that plugin.
+ * `piSDK.liveSlot(ENGINE_SLOT_NAME, element)`. A plugin holding the `browser`
+ * permission gets one such slot PER HOST TAB (`<pluginId>:engine:page:<tabKey>`),
+ * bound lazily from the page's attach payload; the slot positions that tab's
+ * engine view, not the plugin page itself. Must not collide with any panel id
+ * of that plugin.
  */
 export const ENGINE_SLOT_NAME = 'page';
 
 /**
- * The split view's secondary engine slot. A plugin page holding `browser`
- * permission may bind a SECOND element with `piSDK.liveSlot(ENGINE_SLOT_B_NAME,
- * element)`; when shown, the engine displays two tabs side by side — the
- * focused one in the primary slot, the split partner here. Focus (address
- * bar, navigation, agent tools) always stays with the primary.
+ * The secondary engine slot a browser page binds for its own in-page split.
+ * It is per host tab like `page`; the right-column split uses two separate
+ * host tabs (each with its own `page` slot) instead. Focus (address bar,
+ * navigation, agent tools) always stays with the primary.
  */
 export const ENGINE_SLOT_B_NAME = 'page-b';
 
@@ -51,8 +55,15 @@ export class PluginWebViews {
   private readonly views = new Map<string, WebContentsView>();
   /** Slots we have registered a handler for, so re-registration is cheap. */
   private readonly registered = new Set<string>();
-  /** Engine slots (`<pluginId>:page`) this class registered — cleanup must NOT close their view. */
+  /** Engine slots this class registered — cleanup must NOT close their view. */
   private readonly engineRegistered = new Set<string>();
+  /** Engine slots per host tab (`page` / `page-b`), so hiding one pane leaves the other alone. */
+  private readonly engineSlotsByTab = new Map<string, Set<string>>();
+  /** Engine slot → the engine tab it currently shows (snapshot target). */
+  private readonly engineTagBySlot = new Map<string, string>();
+  /** Host tab key ↔ the panel slot that hosts its page. */
+  private readonly tabByPanelSlot = new Map<string, string>();
+  private readonly panelSlotByTab = new Map<string, string>();
   /**
    * Last theme the shell pushed. A view created after that push would
    * otherwise never learn the shell's colours, because the shell only
@@ -198,6 +209,10 @@ export class PluginWebViews {
     this.views.clear();
     this.registered.clear();
     this.engineRegistered.clear();
+    this.engineSlotsByTab.clear();
+    this.engineTagBySlot.clear();
+    this.tabByPanelSlot.clear();
+    this.panelSlotByTab.clear();
   }
 
   /**
@@ -207,109 +222,10 @@ export class PluginWebViews {
    * which is also where stale slots get reconciled away).
    */
   sync(): void {
-    const { registry, liveSlots } = this.opts;
-
-    for (const plugin of registry.all()) {
-      if (!plugin.enabled || plugin.state === 'incompatible' || plugin.state === 'error') continue;
-      const pluginId = plugin.manifest.id;
-
-      // ── Engine slot ──
-      // A plugin page holding `browser` permission may bind the shared browser
-      // engine into its own layout via `piSDK.liveSlot('page', el)`. The view
-      // is the host's singleton — the plugin only positions it.
-      const wantsEngine = (plugin.manifest.permissions ?? []).includes('browser');
-      if (wantsEngine && this.opts.browserManager) {
-        // Several host tabs share this one engine view. A hidden tab's live
-        // slot reports 0×0 (hide) while the newly active tab's slot reports
-        // bounds (show); whichever IPC lands last must not hide a page that
-        // just became visible. A hide is therefore deferred one tick and only
-        // wins if no show happened in between.
-        let engineShowSeq = 0;
-        const engineSlotId = `${pluginId}:${ENGINE_SLOT_NAME}`;
-        const panelIds = new Set((plugin.manifest.contributes?.panels ?? []).map((p) => p.id));
-        if (panelIds.has(ENGINE_SLOT_NAME)) {
-          console.warn(
-            `[plugin-view] plugin "${pluginId}" has a panel named "${ENGINE_SLOT_NAME}" — ` +
-              `engine slot not registered (slot ids would collide)`,
-          );
-        } else if (!this.engineRegistered.has(engineSlotId)) {
-          this.engineRegistered.add(engineSlotId);
-          this.registered.add(engineSlotId);
-          const bm = this.opts.browserManager;
-          liveSlots.register(engineSlotId, {
-            attach: () => {
-              if (!bm.isConnected()) bm.connect().catch(() => {});
-            },
-            show: (bounds, tag) => {
-              // `bounds` are the PLUGIN PAGE's local coordinates — the page
-              // measured its own slot div, with the page's top-left as origin.
-              // The engine view is positioned in window-content coordinates,
-              // so translate by whichever panel view currently hosts the page.
-              // `tag` names WHICH engine tab to show (the panel's active one);
-              // without it the manager's active tab shows. showTab enforces the
-              // one-visible invariant (all other tabs to 0×0, target re-topped).
-              engineShowSeq++;
-              const host = this.attachedPanelView(pluginId);
-              if (!host) {
-                bm.hide();
-                return;
-              }
-              const hostBounds = host.getBounds();
-              bm.showTab(tag ?? undefined, {
-                x: hostBounds.x + bounds.x,
-                y: hostBounds.y + bounds.y,
-                width: bounds.width,
-                height: bounds.height,
-              });
-            },
-            hide: () => {
-              const seq = ++engineShowSeq;
-              setTimeout(() => {
-                if (engineShowSeq === seq) bm.hide();
-              }, 60);
-            },
-          });
-        }
-        // The split view's second pane — same translation, but it sizes its
-        // tab BESIDE the primary instead of enforcing the one-visible rule.
-        const engineSlotBId = `${pluginId}:${ENGINE_SLOT_B_NAME}`;
-        if (
-          !panelIds.has(ENGINE_SLOT_B_NAME) &&
-          !this.engineRegistered.has(engineSlotBId)
-        ) {
-          this.engineRegistered.add(engineSlotBId);
-          this.registered.add(engineSlotBId);
-          const bm = this.opts.browserManager;
-          liveSlots.register(engineSlotBId, {
-            attach: () => {
-              if (!bm.isConnected()) bm.connect().catch(() => {});
-            },
-            show: (bounds, tag) => {
-              const host = this.attachedPanelView(pluginId);
-              if (!host || !tag) {
-                bm.hideSecondary();
-                return;
-              }
-              const hostBounds = host.getBounds();
-              bm.showSecondary(tag, {
-                x: hostBounds.x + bounds.x,
-                y: hostBounds.y + bounds.y,
-                width: bounds.width,
-                height: bounds.height,
-              });
-            },
-            hide: () => bm.hideSecondary(),
-          });
-        }
-      }
-
-      // ── Panel slots ──
-      // Deliberately NOT pre-registered: one multi-instance panel can have N
-      // views, and their slot ids only exist once a host tab mounts. The
-      // factory installed in the constructor creates (and validates) the
-      // handler from the renderer's attach payload.
-    }
-
+    // Panel views and engine slots are created LAZILY from the first attach
+    // payload: a multi-instance panel's tab key (and therefore its engine
+    // slot) is not known until the host tab mounts. `sync` only reconciles
+    // slots whose plugin was uninstalled, disabled or broke.
     this.reconcile();
   }
 
@@ -324,6 +240,8 @@ export class PluginWebViews {
     slotId: string,
     meta?: Record<string, unknown>,
   ): LiveSlotHandler | undefined {
+    if (meta?.engine === true) return this.createEngineSlot(slotId, meta);
+
     const pluginId = String(meta?.pluginId ?? '');
     const panelId = String(meta?.panelId ?? '');
     const entry = String(meta?.entry ?? '');
@@ -342,6 +260,8 @@ export class PluginWebViews {
     if (!panel || panel.entry !== entry) return undefined;
 
     this.registered.add(slotId);
+    this.tabByPanelSlot.set(slotId, tabKey);
+    this.panelSlotByTab.set(tabKey, slotId);
     return {
       attach: () => {
         this.ensureView(slotId, pluginId, panelId, entry, tabKey);
@@ -365,15 +285,153 @@ export class PluginWebViews {
         }
         // The panel view remounts with its page exactly as it was — no resize
         // inside the page, so its live slot will not re-report and the engine
-        // view positioned there stays hidden. Replay it (both panes when a
-        // split is showing).
-        const engineId = `${pluginId}:${ENGINE_SLOT_NAME}`;
-        if (this.engineRegistered.has(engineId)) void this.opts.liveSlots.reshow(engineId);
-        const engineIdB = `${pluginId}:${ENGINE_SLOT_B_NAME}`;
-        if (this.engineRegistered.has(engineIdB)) void this.opts.liveSlots.reshow(engineIdB);
+        // view positioned there stays hidden. Replay THIS tab's engine slots
+        // (a split's other pane replays its own when it becomes visible).
+        for (const engineId of this.engineSlotsByTab.get(tabKey) ?? []) {
+          void this.opts.liveSlots.reshow(engineId);
+        }
       },
       hide: () => this.hideSlot(slotId),
       destroy: () => this.destroySlot(slotId),
+      snapshot: () => this.snapshotSlot(slotId),
+    };
+  }
+
+  /**
+   * Capture a panel slot as a stack: the panel view itself, then every engine
+   * view embedded in its page at its offset. The engine views are siblings of
+   * the panel in the window's view tree, not children, so capturing the panel
+   * alone would leave a hole where the page is.
+   *
+   * Returns [] when the slot is not on screen (nothing worth freezing) or the
+   * platform returns an empty image; the caller then falls back to hiding.
+   */
+  private async snapshotSlot(slotId: string): Promise<LiveSlotSnapshotLayer[]> {
+    const view = this.views.get(slotId);
+    if (!view || view.webContents.isDestroyed() || !this.attached.has(slotId)) return [];
+    const panel = view.getBounds();
+    if (panel.width <= 0 || panel.height <= 0) return [];
+
+    const panelImage = await view.webContents.capturePage();
+    if (panelImage.isEmpty()) return [];
+    const layers: LiveSlotSnapshotLayer[] = [
+      {
+        dataUrl: panelImage.toDataURL(),
+        x: 0,
+        y: 0,
+        width: panel.width,
+        height: panel.height,
+      },
+    ];
+
+    const tabKey = this.tabByPanelSlot.get(slotId);
+    for (const engineId of (tabKey && this.engineSlotsByTab.get(tabKey)) || []) {
+      const tag = this.engineTagBySlot.get(engineId);
+      const engineView = tag ? this.opts.browserManager?.getTabView(tag) : null;
+      if (!engineView || engineView.webContents.isDestroyed()) continue;
+      const bounds = engineView.getBounds();
+      if (bounds.width <= 0 || bounds.height <= 0) continue;
+      const image = await engineView.webContents.capturePage();
+      if (image.isEmpty()) continue;
+      layers.push({
+        dataUrl: image.toDataURL(),
+        x: bounds.x - panel.x,
+        y: bounds.y - panel.y,
+        width: bounds.width,
+        height: bounds.height,
+      });
+    }
+    return layers;
+  }
+
+  /**
+   * A plugin page's embedded engine view (`piSDK.liveSlot('page', el)`),
+   * scoped to the host tab that reported it.
+   *
+   * `plugin-webview` owns one handler per tab and engine slot name. Two
+   * panels can be on screen at once (right-column split), and each needs its
+   * own engine rectangle; the handler therefore translates bounds against the
+   * tab's OWN panel view, never "whichever panel is attached first".
+   */
+  private createEngineSlot(
+    slotId: string,
+    meta: Record<string, unknown>,
+  ): LiveSlotHandler | undefined {
+    const bm = this.opts.browserManager;
+    if (!bm) return undefined;
+    const m = /^([^:]+):engine:(page(?:-b)?):(.+)$/.exec(slotId);
+    if (!m) return undefined;
+    const [, pluginId, name, encodedTab] = m;
+    const tabKey = decodeURIComponent(encodedTab || String(meta.tabKey ?? ''));
+    if (!tabKey) return undefined;
+    const plugin = this.opts.registry.get(pluginId);
+    if (
+      !plugin ||
+      !plugin.enabled ||
+      plugin.state === 'incompatible' ||
+      plugin.state === 'error' ||
+      !(plugin.manifest.permissions ?? []).includes('browser')
+    ) {
+      return undefined;
+    }
+    const panelIds = new Set((plugin.manifest.contributes?.panels ?? []).map((p) => p.id));
+    if (panelIds.has(name)) {
+      console.warn(
+        `[plugin-view] plugin "${pluginId}" has a panel named "${name}" — ` +
+          `engine slot not registered (slot ids would collide)`,
+      );
+      return undefined;
+    }
+
+    this.registered.add(slotId);
+    this.engineRegistered.add(slotId);
+    let slots = this.engineSlotsByTab.get(tabKey);
+    if (!slots) {
+      slots = new Set();
+      this.engineSlotsByTab.set(tabKey, slots);
+    }
+    slots.add(slotId);
+
+    let lastTag = '';
+    let hideSeq = 0;
+    return {
+      attach: () => {
+        if (!bm.isConnected()) bm.connect().catch(() => {});
+      },
+      show: (bounds, tag) => {
+        hideSeq++;
+        const panelSlot = this.panelSlotByTab.get(tabKey);
+        const view = panelSlot ? this.views.get(panelSlot) : undefined;
+        if (!view || !panelSlot || !this.attached.has(panelSlot) || !tag) {
+          // The hosting panel is gone or this slot has no target: never leave
+          // a stale engine rectangle above the UI.
+          if (lastTag) bm.hideTab(lastTag);
+          lastTag = '';
+          this.engineTagBySlot.delete(slotId);
+          return;
+        }
+        if (lastTag && lastTag !== tag) bm.hideTab(lastTag);
+        lastTag = tag;
+        this.engineTagBySlot.set(slotId, tag);
+        const host = view.getBounds();
+        bm.showTabTile(tag, {
+          x: host.x + bounds.x,
+          y: host.y + bounds.y,
+          width: bounds.width,
+          height: bounds.height,
+        });
+      },
+      hide: () => {
+        // A hide arriving right after a show is the panel's display:none
+        // report racing its re-show; give the show one tick to win.
+        const seq = ++hideSeq;
+        setTimeout(() => {
+          if (hideSeq !== seq) return;
+          if (lastTag) bm.hideTab(lastTag);
+          lastTag = '';
+          this.engineTagBySlot.delete(slotId);
+        }, 60);
+      },
     };
   }
 
@@ -410,31 +468,13 @@ export class PluginWebViews {
     this.attached.delete(slotId);
     // The panel went away, so any engine view positioned inside its page must
     // go too — a hidden panel with a live engine rectangle would eat clicks.
-    const pluginId = slotId.slice(0, slotId.indexOf(':'));
-    this.detachEngineSlots(pluginId);
-  }
-
-  /** Hide the engine slot(s) of one plugin (handler.hide — the view itself is untouched). */
-  private detachEngineSlots(pluginId: string): void {
-    for (const id of this.engineRegistered) {
-      if (id.startsWith(`${pluginId}:`)) this.opts.liveSlots.detach(id);
+    // ONLY this tab's engine slots: the split's other pane keeps its page.
+    const tabKey = this.tabByPanelSlot.get(slotId);
+    if (tabKey) {
+      for (const id of this.engineSlotsByTab.get(tabKey) ?? []) {
+        this.opts.liveSlots.detach(id);
+      }
     }
-  }
-
-  /**
-   * The plugin's panel view that is currently on screen — the coordinate
-   * anchor for translating page-local engine-slot bounds into window space.
-   * A plugin page can only report while its view is attached, so exactly one
-   * of these exists whenever an engine slot shows; if none does, the caller
-   * hides the engine rather than positioning it somewhere imaginary.
-   */
-  private attachedPanelView(pluginId: string): WebContentsView | null {
-    for (const slotId of this.attached) {
-      if (!slotId.startsWith(`${pluginId}:`)) continue;
-      const view = this.views.get(slotId);
-      if (view && !view.webContents.isDestroyed()) return view;
-    }
-    return null;
   }
 
   /** Hide every panel view — the stale-overlay guard for renderer reloads. */
@@ -468,6 +508,22 @@ export class PluginWebViews {
     this.views.delete(slotId);
     this.registered.delete(slotId);
     this.mounted.delete(slotId);
+
+    // This tab will never come back under the same key: release its engine
+    // slot handlers (hiding the engine view, not closing it — the engine and
+    // its session belong to the host).
+    const tabKey = this.tabByPanelSlot.get(slotId);
+    if (tabKey) {
+      for (const engineId of [...(this.engineSlotsByTab.get(tabKey) ?? [])]) {
+        this.opts.liveSlots.unregister(engineId);
+        this.engineRegistered.delete(engineId);
+        this.registered.delete(engineId);
+        this.engineTagBySlot.delete(engineId);
+      }
+      this.engineSlotsByTab.delete(tabKey);
+      if (this.panelSlotByTab.get(tabKey) === slotId) this.panelSlotByTab.delete(tabKey);
+      this.tabByPanelSlot.delete(slotId);
+    }
     // Tell the backend this tab is gone before the page dies, so per-tab
     // state (the viewer's open document, "current file" bookkeeping) is
     // released. The send is queued to the renderer; closing on the next tick
@@ -504,6 +560,7 @@ export class PluginWebViews {
         this.opts.liveSlots.unregister(slotId);
         this.engineRegistered.delete(slotId);
         this.registered.delete(slotId);
+        this.engineTagBySlot.delete(slotId);
       } else {
         this.destroySlot(slotId);
       }
@@ -623,7 +680,11 @@ export class PluginWebViews {
     // linger. Same-document (SPA) navigations keep the page alive — skip them.
     view.webContents.on('did-start-navigation', (_e, _url, isInPlace, isMainFrame) => {
       if (!isMainFrame || isInPlace) return;
-      this.detachEngineSlots(pluginId);
+      // Only THIS tab's engine slot loses its reporter; a split's other pane
+      // keeps showing its page.
+      for (const id of (tabKey ? this.engineSlotsByTab.get(tabKey) : undefined) ?? []) {
+        this.opts.liveSlots.detach(id);
+      }
     });
 
     this.views.set(slotId, view);

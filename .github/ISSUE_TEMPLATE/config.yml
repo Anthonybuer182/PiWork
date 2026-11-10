@@ -1,0 +1,3 @@
+# 空白 issue 会让「设置 → 关于 → 报告问题」这类带诊断信息的入口失效，
+# 所以只允许通过上面的表单提交。
+blank_issues_enabled: false

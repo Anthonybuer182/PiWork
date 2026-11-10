@@ -23,6 +23,7 @@ export { Select, SelectGroup, SelectValue, SelectTrigger, SelectContent, SelectL
 export { Slot } from './components/ui/slot';
 
 export { cn, isTextEditableFile, isPreviewableInRightPanel, openWithSystemApp } from './lib/utils';
+export { openDroppedPaths } from './lib/open-dropped';
 
 // Multi-window helpers (no-ops in the web build).
 export {
@@ -83,7 +84,6 @@ export { SettingsDialog, SettingsRailButton } from './components/settings';
 export { UsageBar } from './components/usage';
 export { ErrorBoundary, LoadingSpinner, EmptyState, ErrorState, ConfirmDialog } from './components/common';
 export { FileTree, FileTreeNode } from './components/file';
-export { ContextPanel } from './components/context';
 
 export { PluginCenter } from './components/plugins/plugin-center';
 export { DeclarativeRenderer } from './components/plugins/declarative/declarative-renderer';

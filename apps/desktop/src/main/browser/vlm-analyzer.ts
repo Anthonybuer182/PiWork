@@ -5,8 +5,8 @@
  * Runs OUTSIDE the agent session so the agent's text-only model never
  * sees base64 image data. Only the text description is returned.
  *
- * Uses the same ModelRegistry and AuthStorage as the main app to find
- * available VLM-capable models and their API keys.
+ * Uses the app's shared model registry (a read facade over the pi 1.x
+ * ModelRuntime) to find available VLM-capable models and their API keys.
  */
 
 import type { ModelRegistry } from '@earendil-works/pi-coding-agent';

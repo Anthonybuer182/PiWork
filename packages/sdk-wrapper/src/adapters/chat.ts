@@ -1,10 +1,12 @@
 import * as path from 'path';
-import { statSync, readFileSync } from 'node:fs';
+import { statSync, readFileSync, existsSync } from 'node:fs';
 import type { ChatService, SendMessageParams, StreamChunk } from '../services/chat.js';
-import type { Message, AssistantMessage, ContentBlock, ToolResultBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, AgentContextConfig, AgentContextReloadResult, AgentToolInfo, AppendSegmentInfo, ContextFileInfo, ContextFileScope, PromptFileInfo, ModelCapabilities } from '@pi/types';
+import type { Message, AssistantMessage, ContentBlock, ToolResultBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, AgentContextConfig, AgentContextReloadResult, AgentToolInfo, AppendSegmentInfo, ContextFileInfo, ContextFileScope, PromptFileInfo, GlobalContextFile, GlobalContextInfo, ModelCapabilities, PluginMessageData, PluginMessagePatch } from '@pi/types';
+import { PLUGIN_MESSAGE_CUSTOM_TYPE } from '@pi/types';
 import { ASK_TOOL_NAME, TODO_TOOL_NAME } from '@pi/types';
-import { createAgentSession, SessionManager, ModelRegistry, AuthStorage, DefaultResourceLoader, getAgentDir, SettingsManager, formatSkillsForPrompt } from '@earendil-works/pi-coding-agent';
-import type { AgentSession } from '@earendil-works/pi-coding-agent';
+import { createAgentSession, SessionManager, DefaultResourceLoader, getAgentDir, SettingsManager, formatSkillsForPrompt, createMcpExtension, createToolSearchExtension } from '@earendil-works/pi-coding-agent';
+import type { AgentSession, InlineExtension, McpExtensionOptions, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
+import { createModelRegistry, getSharedModelRuntime } from './model-runtime.js';
 import { extractThinkContent } from '../utils/think-parser.js';
 import { deleteFileWithMtimeGuard, writeFileWithMtimeGuard } from '../utils/safe-write.js';
 import { detectWrittenFiles } from '../utils/file-detection.js';
@@ -23,6 +25,14 @@ import { migrateModelsConfig, modelCapabilitiesOf } from './config.js';
  * here; `excludeTools` (the user's global switches) still filters it.
  */
 export const ACTIVE_BUILTIN_TOOLS = ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'];
+
+/**
+ * The filenames the SDK tries, in order, for a directory's context file.
+ *
+ * The first one that exists wins; the rest are not read. Mirrored here so the
+ * Settings page can report which candidate is actually in effect.
+ */
+const GLOBAL_CONTEXT_NAMES = ['AGENTS.md', 'AGENTS.MD', 'CLAUDE.md', 'CLAUDE.MD'] as const;
 
 /**
  * Real chat adapter using createAgentSessionFromServices.
@@ -252,6 +262,20 @@ export function buildAppendSystemPromptOverride(
   ];
 }
 
+/**
+ * MCP wiring. Servers live in `mcp.json` (read by the SDK's own extension), so
+ * the host only decides whether this workspace has any enabled server and how
+ * the extension is configured.
+ */
+export interface McpChatOptions {
+  /** Built per session that has MCP enabled; see `createMcpExtension`. */
+  extensionOptions: () => McpExtensionOptions;
+  /** Whether this workspace has at least one enabled MCP server. */
+  enabled: (cwd: string) => boolean;
+  /** Tool the model uses to discover deferred MCP tools. Default: `tool_search`. */
+  discoveryTool?: string;
+}
+
 export interface RealChatServiceOptions {
   customToolsProvider?: () => unknown[];
   /** Enabled plugins' PLUGIN.md index. Read per session, so installs take effect without a restart. */
@@ -270,11 +294,94 @@ export interface RealChatServiceOptions {
    * by a stale renderer.
    */
   getGlobalDisabledTools?: () => string[];
+  /** MCP servers, when the host supports them. Omit to keep MCP off entirely. */
+  mcp?: McpChatOptions;
+}
+
+/**
+ * Tear a cached session down the way the SDK expects.
+ *
+ * Extensions receive `session_shutdown`; the MCP extension closes its stdio
+ * children and HTTP streams there. Dropping a session with `unsubscribe()`
+ * alone (what this adapter used to do) leaves those processes running, so
+ * every workspace switch or plugin reload would leak one process per server.
+ */
+export async function retireSession(
+  session: AgentSession,
+  reason: 'quit' | 'reload' | 'new' = 'new',
+): Promise<void> {
+  try {
+    await session.extensionRunner.emit({ type: 'session_shutdown', reason });
+  } catch { /* best-effort */ }
+  try { session.dispose(); } catch { /* best-effort */ }
+}
+
+/** Latest stored revision of one plugin message in a session, if any. */
+function findLatestPluginMessage(
+  manager: SessionManager,
+  messageId: string,
+): { entry: unknown; data: PluginMessageData } | null {
+  let latest: { entry: unknown; data: PluginMessageData } | null = null;
+  for (const entry of manager.getEntries()) {
+    if (entry.type !== 'custom' && entry.type !== 'custom_message') continue;
+    if ((entry as { customType?: string }).customType !== PLUGIN_MESSAGE_CUSTOM_TYPE) continue;
+    const data =
+      entry.type === 'custom'
+        ? (entry as { data?: PluginMessageData }).data
+        : (entry as { details?: PluginMessageData }).details;
+    if (!data || data.id !== messageId) continue;
+    if (!latest || (data.revision ?? 0) >= (latest.data.revision ?? 0)) {
+      latest = { entry, data };
+    }
+  }
+  return latest;
+}
+
+/**
+ * The text a `custom_message` entry sends to the model. `agentText` wins when
+ * the visible copy and the instruction differ (a `chat.send` request); cards
+ * and files cannot be sent, so a card-only message falls back to its title (or
+ * a plain line) — enough for the model to know something happened, without
+ * inventing content.
+ */
+function pluginMessageContextText(data: PluginMessageData): string {
+  if (typeof data.agentText === 'string' && data.agentText.trim()) return data.agentText;
+  if (typeof data.text === 'string' && data.text.trim()) return data.text;
+  const title = data.title ?? (data.card?.props as Record<string, unknown> | undefined)?.title;
+  if (typeof title === 'string' && title.trim()) return title.trim();
+  return `Plugin message from ${data.pluginId}`;
+}
+
+/**
+ * Deliver a turn as a plugin message rather than a typed one.
+ *
+ * The pi entry is a `custom_message` (role `custom`) carrying the plugin
+ * message data in `details`, so the transcript replays a plugin card instead
+ * of a user bubble — the plugin never gets the user's voice — while the model
+ * still receives the text and the run starts exactly as a prompt would start
+ * it. Streaming, tools and persistence are the SDK's normal run.
+ */
+async function promptPluginTurn(
+  session: AgentSession,
+  params: SendMessageParams,
+): Promise<void> {
+  const data: PluginMessageData = { ...params.pluginMessage!, sessionId: params.sessionId };
+  await session.sendCustomMessage(
+    {
+      customType: PLUGIN_MESSAGE_CUSTOM_TYPE,
+      content: params.content,
+      // The host draws the card from `details`; pi's own display flag is for
+      // its terminal UI, which this host does not use.
+      display: false,
+      details: data,
+    },
+    { triggerTurn: true },
+  );
 }
 
 export function createRealChatService(
   cwd: string,
-  modelRegistry?: ModelRegistry,
+  modelRuntime?: ModelRuntime,
   settingsManager?: SettingsManager,
   options?: RealChatServiceOptions,
 ): ChatService {
@@ -299,15 +406,26 @@ export function createRealChatService(
   // Track last message end time per session for thinking time calculation
   const sessionTimings = new Map<string, number>();
 
-  // Shared ModelRegistry — picks up built-in models + models from ~/.pi/agent/models.json
-  const registry = modelRegistry ?? ModelRegistry.create(AuthStorage.inMemory());
+  // Shared ModelRuntime — picks up built-in models + models from ~/.pi/agent/models.json.
+  // pi 1.x resolves models/auth through ModelRuntime (async); the registry is a
+  // synchronous read facade over it, created on first use.
+  let runtimePromise: Promise<ModelRuntime> | undefined = modelRuntime
+    ? Promise.resolve(modelRuntime)
+    : undefined;
+  let registry: ModelRegistry | undefined;
 
-  /** Find a model in the registry by its ID string.
+  async function modelAccess(): Promise<{ runtime: ModelRuntime; registry: ModelRegistry }> {
+    runtimePromise ??= getSharedModelRuntime();
+    const runtime = await runtimePromise;
+    registry ??= createModelRegistry(runtime);
+    return { runtime, registry };
+  }
+
+  /** Find a model among the available ones by its ID string.
    *  Supports "provider/modelId" format for disambiguation.
    *  When multiple models share the same ID, prefers models with configured
    *  auth (from models.json or env vars) over built-in ones without auth. */
-  function findModelById(modelId: string) {
-    const available = registry.getAvailable();
+  function findModelById(modelId: string, available: ReturnType<ModelRegistry['getAvailable']>) {
     // An aggregator provider may name its model "deepseek/deepseek-flash", so
     // the id itself can contain a slash. Splitting first would read "deepseek"
     // as a provider and look up an id that does not exist. An exact id match
@@ -341,6 +459,32 @@ export function createRealChatService(
   // so the streaming adapter and the session loader share one implementation.
   // detectWrittenFiles and getMimeType are imported from ../utils/file-detection.js
 
+  /**
+   * Extensions to load for a workspace.
+   *
+   * MCP is opt-in per workspace: with no enabled servers the app behaves
+   * exactly as before (no extension, no `tool_search`). When servers exist the
+   * SDK's own MCP extension owns the protocol, transports and tool lifecycle;
+   * `tool_search` is what makes `deferred` tools reachable for the model.
+   */
+  function mcpExtensionFactories(workCwd: string): InlineExtension[] {
+    if (!options?.mcp?.enabled(workCwd)) return [];
+    return [
+      {
+        name: 'mcp',
+        factory: createMcpExtension(options.mcp.extensionOptions()),
+        builtin: true,
+        replaceable: true,
+      },
+      {
+        name: 'tool-search',
+        factory: createToolSearchExtension(),
+        builtin: true,
+        replaceable: true,
+      },
+    ];
+  }
+
   async function createResourceLoader(
     workCwd: string,
     selectedSkillIds?: string[],
@@ -353,6 +497,7 @@ export function createRealChatService(
     const resourceLoader = new DefaultResourceLoader({
       cwd: workCwd,
       agentDir: getAgentDir(),
+      extensionFactories: mcpExtensionFactories(workCwd),
       appendSystemPromptOverride: buildAppendSystemPromptOverride(pluginDocs, toolNames, capabilities),
       skillsOverride: selectedSkillIds
         ? (base) => {
@@ -393,6 +538,7 @@ export function createRealChatService(
         effectiveCapabilities = modelCapabilitiesOf(stale.session.model) ?? null;
       }
       try { stale.unsubscribe(); } catch { /* best-effort */ }
+      await retireSession(stale.session, 'new');
       activeSessions.delete(key);
       staleSessions.delete(key);
     }
@@ -444,6 +590,7 @@ export function createRealChatService(
       }
       // cwd / skills / tools / capabilities mismatch — tear down and create a new session
       cached.unsubscribe();
+      await retireSession(cached.session, 'new');
       activeSessions.delete(key);
     }
     let sessionManager: SessionManager;
@@ -462,6 +609,13 @@ export function createRealChatService(
     const toolNames = toolNamesOf(customTools);
     for (const name of effectiveDisabled) toolNames.delete(name);
 
+    // `tool_search` is how the model reaches deferred MCP tools. It is only
+    // added when this workspace has MCP servers, so an MCP-free workspace
+    // keeps exactly the same tool list as before.
+    if (options?.mcp?.enabled(workCwd)) {
+      toolNames.add(options.mcp.discoveryTool ?? 'tool_search');
+    }
+
     // `tools` is an ALLOWLIST in the SDK, not just "which built-ins to switch
     // on": `createAgentSession` turns it into `allowedToolNames`, and
     // `_refreshToolRegistry` filters custom tools through the same set. Passing
@@ -471,10 +625,11 @@ export function createRealChatService(
     // aggregate still listed it. So: built-ins we want ON, plus every custom
     // tool the providers contributed. Disabled names still come off via
     // `excludeTools`, which is the denylist for both families.
+    const { runtime } = await modelAccess();
     const { session } = await createAgentSession({
       cwd: workCwd,
       sessionManager,
-      modelRegistry: registry, // share registry so custom models are visible
+      modelRuntime: runtime, // share the runtime so custom models are visible
       resourceLoader: await createResourceLoader(workCwd, skills, toolNames, effectiveCapabilities),
       settingsManager,         // share settings so shell path is respected
       tools: [...ACTIVE_BUILTIN_TOOLS, ...toolNames],
@@ -484,6 +639,11 @@ export function createRealChatService(
       // built-ins and custom tools alike.
       excludeTools: effectiveDisabled.length > 0 ? effectiveDisabled : undefined,
     });
+
+    // Extensions only start when the host binds them: `session_start` is
+    // emitted here, and that is what makes the MCP extension connect its
+    // servers. Without this call the extensions load but never run.
+    await session.bindExtensions({});
 
     // Host-level per-session hooks (permission gate, audit, …). Runs before the
     // session is cached so the gate is live for the very first prompt.
@@ -623,6 +783,67 @@ export function createRealChatService(
       out.push(...pair);
     }
     return out;
+  }
+
+  /**
+   * Read one file in the agent dir, tolerating absence.
+   *
+   * Kept separate from `readPromptFile` because these rows also carry the
+   * shadowed AGENTS.md candidates, which are a fact about the whole directory
+   * rather than about one file.
+   */
+  function readGlobalFile(
+    kind: GlobalContextFile['kind'],
+    filePath: string,
+    shadowed: string[] = [],
+  ): GlobalContextFile {
+    try {
+      const content = readFileSync(filePath, 'utf-8');
+      const st = statSync(filePath);
+      return {
+        kind,
+        path: filePath,
+        exists: true,
+        content,
+        bytes: Buffer.byteLength(content, 'utf-8'),
+        chars: content.length,
+        mtimeMs: st.mtimeMs,
+        shadowed,
+      };
+    } catch {
+      return {
+        kind,
+        path: filePath,
+        exists: false,
+        content: null,
+        bytes: 0,
+        chars: 0,
+        mtimeMs: 0,
+        shadowed,
+      };
+    }
+  }
+
+  /**
+   * The global files Settings → 上下文 edits.
+   *
+   * The agent dir is outside every workspace, so this is the only reader for
+   * them. AGENTS.md follows the SDK's candidate order; the variants that lose
+   * are reported so the page can say why editing one would do nothing.
+   */
+  function getGlobalContextInfo(): GlobalContextInfo {
+    const agentDir = getAgentDir();
+    const candidates = GLOBAL_CONTEXT_NAMES.map((name) => path.join(agentDir, name));
+    const existing = candidates.filter((p) => existsSync(p));
+    const active = existing[0] ?? candidates[0];
+    return {
+      agentDir,
+      files: [
+        readGlobalFile('system', path.join(agentDir, 'SYSTEM.md')),
+        readGlobalFile('append', path.join(agentDir, 'APPEND_SYSTEM.md')),
+        readGlobalFile('agents', active, existing.slice(1)),
+      ],
+    };
   }
 
   async function readAgentContextConfig(
@@ -839,12 +1060,16 @@ export function createRealChatService(
   }
 
   /**
-   * Rebuild a live session's prompt from disk.
+   * Rebuild every live session in a workspace from disk.
    *
    * Context files are read when a session is built, so an AGENTS.md edit is
    * otherwise invisible until the user starts a new session. `session.reload()`
    * re-reads the resource loader and rebuilds the base prompt from it, which
    * makes the edit apply to the next turn.
+   *
+   * A workspace can have several live sessions (one per conversation, possibly
+   * in different windows), and each has its own resource loader — rebuilding
+   * only the first would leave the others on the old prompt.
    *
    * Refuses while anything is streaming: `reload()` resets global API providers
    * and tears down the extension runtime, which is not something to do under a
@@ -853,22 +1078,19 @@ export function createRealChatService(
    */
   async function reloadAgentContext(workspacePath: string): Promise<AgentContextReloadResult> {
     const resolvedWorkspace = path.resolve(workspacePath);
-    let live: AgentSession | undefined;
+    const live: AgentSession[] = [];
     for (const cached of activeSessions.values()) {
-      if (path.resolve(cached.cwd) === resolvedWorkspace) {
-        live = cached.session;
-        break;
-      }
+      if (path.resolve(cached.cwd) === resolvedWorkspace) live.push(cached.session);
     }
     // No session yet: the file is read when one is created, so the edit lands
     // on its own without anything to rebuild.
-    if (!live) return { applied: false, reason: 'no-session' };
+    if (live.length === 0) return { applied: false, reason: 'no-session' };
 
     for (const cached of activeSessions.values()) {
       if (cached.session.isStreaming) return { applied: false, reason: 'busy' };
     }
 
-    await live.reload();
+    for (const session of live) await session.reload();
     return { applied: true };
   }
 
@@ -893,6 +1115,70 @@ export function createRealChatService(
     }
   }
 
+  /**
+   * Rebuild any live session whose standing context was just edited through an
+   * ordinary file write.
+   *
+   * The file viewer and other plugins write through `filesystem.write`, which
+   * knows nothing about agent context. Without this, saving `.pi/SYSTEM.md` in
+   * the file tree looks like it did nothing until a new session is created —
+   * there is no host editor writing through its own API any more. Called after
+   * every plugin write/delete; the filename check keeps the cost to a few
+   * string comparisons for ordinary files.
+   */
+  async function reloadAgentContextForFile(
+    filePath: string,
+    preferredWorkspace?: string,
+  ): Promise<AgentContextReloadResult> {
+    const resolvedFile = path.resolve(filePath);
+    const fileDir = path.dirname(resolvedFile);
+    const name = path.basename(resolvedFile);
+    const isPromptName = name === 'SYSTEM.md' || name === 'APPEND_SYSTEM.md';
+    const isContextName = (GLOBAL_CONTEXT_NAMES as readonly string[]).includes(name);
+    if (!isPromptName && !isContextName) return { applied: false, reason: 'no-session' };
+
+    const agentDir = path.resolve(getAgentDir());
+    // A global prompt/context file is read by every workspace.
+    const affectsEveryWorkspace = fileDir === agentDir;
+
+    const targets = new Set<string>();
+    for (const cached of activeSessions.values()) {
+      const cwd = path.resolve(cached.cwd);
+      let hit = affectsEveryWorkspace;
+      if (!hit && isPromptName) {
+        hit = fileDir === path.join(cwd, PROMPT_CONFIG_DIR);
+      }
+      if (!hit && isContextName) {
+        // The loader reads a context file from the workspace and from every
+        // ancestor directory, so a write anywhere on that chain matters.
+        let dir = cwd;
+        for (;;) {
+          if (dir === fileDir) {
+            hit = true;
+            break;
+          }
+          const parent = path.dirname(dir);
+          if (parent === dir) break;
+          dir = parent;
+        }
+      }
+      if (hit) targets.add(cwd);
+    }
+
+    const results = new Map<string, AgentContextReloadResult>();
+    for (const cwd of targets) results.set(cwd, await reloadAfterWrite(cwd));
+
+    if (preferredWorkspace) {
+      return (
+        results.get(path.resolve(preferredWorkspace)) ?? {
+          applied: false,
+          reason: 'no-session',
+        }
+      );
+    }
+    return results.values().next().value ?? { applied: false, reason: 'no-session' };
+  }
+
   return {
     /** Tear down all cached sessions so the next prompt rebuilds them
      *  (used when the plugin tool/skill set changes at runtime). */
@@ -905,9 +1191,19 @@ export function createRealChatService(
           continue;
         }
         try { cached.unsubscribe(); } catch { /* best-effort */ }
+        void retireSession(cached.session, 'reload');
         activeSessions.delete(key);
         staleSessions.delete(key);
       }
+    },
+
+    /** Retire every cached session. Called on app quit so extensions (notably
+     *  MCP stdio servers) get `session_shutdown` instead of dying with us. */
+    async dispose(): Promise<void> {
+      const sessions = [...activeSessions.values()].map((entry) => entry.session);
+      activeSessions.clear();
+      staleSessions.clear();
+      await Promise.all(sessions.map((session) => retireSession(session, 'quit')));
     },
 
     getAgentContextConfig(
@@ -922,15 +1218,36 @@ export function createRealChatService(
       return reloadAgentContext(workspacePath);
     },
 
+    getGlobalContextInfo(): Promise<GlobalContextInfo> {
+      return Promise.resolve(getGlobalContextInfo());
+    },
+
+    reloadAgentContextForFile(
+      filePath: string,
+      preferredWorkspace?: string,
+    ): Promise<AgentContextReloadResult> {
+      return reloadAgentContextForFile(filePath, preferredWorkspace);
+    },
+
     async writeContextFile({ workspacePath, path: filePath, content, expectedMtime }) {
       // Guard first: a refused write must not leave a half-applied reload.
       const file = writeFileWithMtimeGuard(filePath, content, expectedMtime);
-      return { file, reload: await reloadAfterWrite(workspacePath) };
+      // Path-based rather than workspace-based: a global file affects every
+      // live workspace, and the caller's workspace is only the one whose
+      // outcome the UI reports. No workspace open still writes — the next
+      // session reads it from disk.
+      return {
+        file,
+        reload: await reloadAgentContextForFile(filePath, workspacePath),
+      };
     },
 
     async deleteContextFile({ workspacePath, path: filePath, expectedMtime }) {
       const deleted = deleteFileWithMtimeGuard(filePath, expectedMtime);
-      return { deleted, reload: await reloadAfterWrite(workspacePath) };
+      return {
+        deleted,
+        reload: await reloadAgentContextForFile(filePath, workspacePath),
+      };
     },
 
     async sendMessage(params: SendMessageParams): Promise<Message> {
@@ -938,8 +1255,9 @@ export function createRealChatService(
       // depends on the requested model's input modalities, and a model added
       // to models.json since startup must be resolvable here.
       migrateModelsConfig();
-      registry.refresh();
-      const requestedModel = params.modelId ? findModelById(params.modelId) : undefined;
+      const { registry } = await modelAccess();
+      await registry.refresh();
+      const requestedModel = params.modelId ? findModelById(params.modelId, registry.getAvailable()) : undefined;
       if (params.modelId && !requestedModel) {
         throw new Error(`Model "${params.modelId}" not found. Please configure a valid model in Settings or set the correct API key environment variable.`);
       }
@@ -962,7 +1280,11 @@ export function createRealChatService(
                 mimeType: a.mimeType,
               }))
           : undefined;
-        await session.prompt(params.content, images?.length ? { images } : undefined);
+        if (params.pluginMessage) {
+          await promptPluginTurn(session, params);
+        } else {
+          await session.prompt(params.content, images?.length ? { images } : undefined);
+        }
 
       // Get session stats for cost/usage on the returned message
       let totalUsage: TokenUsage | undefined;
@@ -1005,8 +1327,9 @@ export function createRealChatService(
       // Same ordering as sendMessage: refresh, resolve the requested model,
       // then build the session with that model's capability note.
       migrateModelsConfig();
-      registry.refresh();
-      const requestedModel = params.modelId ? findModelById(params.modelId) : undefined;
+      const { registry } = await modelAccess();
+      await registry.refresh();
+      const requestedModel = params.modelId ? findModelById(params.modelId, registry.getAvailable()) : undefined;
       if (params.modelId && !requestedModel) {
         const errMsg = `Model "${params.modelId}" not found. Please configure a valid model in Settings or set the correct API key environment variable.`;
         onChunk({ type: 'error', error: errMsg });
@@ -1386,7 +1709,11 @@ export function createRealChatService(
               }))
           : undefined;
 
-        await session.prompt(params.content, images?.length ? { images } : undefined);
+        if (params.pluginMessage) {
+          await promptPluginTurn(session, params);
+        } else {
+          await session.prompt(params.content, images?.length ? { images } : undefined);
+        }
 
         // Build final usage for returned message
         let totalUsage: TokenUsage | undefined;
@@ -1455,25 +1782,137 @@ export function createRealChatService(
       }
     },
 
+    /**
+     * Persist a plugin message as a pi `custom` entry.
+     *
+     * Using the live session's manager when the conversation is open keeps the
+     * append on the same writer the agent loop uses; for a closed conversation
+     * SessionManager.open() gives the file its own writer. The entry type is a
+     * display/state entry (NOT custom_message), so it never enters the model
+     * context.
+     */
+    async appendPluginMessage(
+      sessionId: string,
+      data: PluginMessageData,
+    ): Promise<{ entryId: string }> {
+      const cached = activeSessions.get(sessionId);
+      const manager = cached?.session.sessionManager ?? SessionManager.open(sessionId);
+      // `custom` = display/state only (never model context). `custom_message`
+      // participates in context, so it is an explicit opt-in on the message.
+      const entryId = data.agentVisible
+        ? manager.appendCustomMessageEntry(
+            PLUGIN_MESSAGE_CUSTOM_TYPE,
+            pluginMessageContextText(data),
+            true,
+            data,
+          )
+        : manager.appendCustomEntry(PLUGIN_MESSAGE_CUSTOM_TYPE, data);
+      return { entryId };
+    },
+
+    /**
+     * Append a new revision of a plugin message. Append-only: readers fold to
+     * the highest revision, so an update never rewrites history. Ownership is
+     * checked here (the capability layer cannot see the stored data).
+     */
+    async updatePluginMessage(
+      sessionId: string,
+      messageId: string,
+      pluginId: string,
+      patch: PluginMessagePatch,
+    ): Promise<{ entryId: string; revision: number }> {
+      const cached = activeSessions.get(sessionId);
+      const manager = cached?.session.sessionManager ?? SessionManager.open(sessionId);
+      const latest = findLatestPluginMessage(manager, messageId);
+      if (!latest) throw new Error(`messages.update: no message "${messageId}" in this session`);
+      if (latest.data.pluginId !== pluginId) {
+        throw new Error(`messages.update: message "${messageId}" belongs to another plugin`);
+      }
+      if (latest.data.removed) throw new Error(`messages.update: message "${messageId}" was removed`);
+
+      const next: PluginMessageData = {
+        ...latest.data,
+        revision: (latest.data.revision ?? 0) + 1,
+        updatedAt: Date.now(),
+      };
+      if (Object.prototype.hasOwnProperty.call(patch, 'card')) {
+        if (patch.card === null) delete next.card;
+        else next.card = patch.card;
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'text')) {
+        if (!patch.text) delete next.text;
+        else next.text = patch.text;
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'status')) {
+        if (!patch.status) delete next.status;
+        else next.status = patch.status;
+      }
+      if (Object.prototype.hasOwnProperty.call(patch, 'files')) {
+        if (patch.files === null || patch.files?.length === 0) delete next.files;
+        else next.files = patch.files;
+      }
+      // Updates are UI-only unless this revision explicitly opts into context.
+      // Once a message has been shared, the flag stays true on the stored data
+      // (the model has seen it; hiding the badge later would be misleading).
+      const enterContext = patch.agentVisible === true;
+      if (enterContext || latest.data.agentVisible === true) next.agentVisible = true;
+
+      const entryId = enterContext
+        ? manager.appendCustomMessageEntry(
+            PLUGIN_MESSAGE_CUSTOM_TYPE,
+            pluginMessageContextText(next),
+            true,
+            next,
+          )
+        : manager.appendCustomEntry(PLUGIN_MESSAGE_CUSTOM_TYPE, next);
+      return { entryId, revision: next.revision };
+    },
+
+    async removePluginMessage(
+      sessionId: string,
+      messageId: string,
+      pluginId: string,
+    ): Promise<{ entryId: string; revision: number }> {
+      const cached = activeSessions.get(sessionId);
+      const manager = cached?.session.sessionManager ?? SessionManager.open(sessionId);
+      const latest = findLatestPluginMessage(manager, messageId);
+      if (!latest) throw new Error(`messages.remove: no message "${messageId}" in this session`);
+      if (latest.data.pluginId !== pluginId) {
+        throw new Error(`messages.remove: message "${messageId}" belongs to another plugin`);
+      }
+      if (latest.data.removed) throw new Error(`messages.remove: message "${messageId}" was already removed`);
+      const next: PluginMessageData = {
+        ...latest.data,
+        revision: (latest.data.revision ?? 0) + 1,
+        removed: true,
+        updatedAt: Date.now(),
+      };
+      const entryId = manager.appendCustomEntry(PLUGIN_MESSAGE_CUSTOM_TYPE, next);
+      return { entryId, revision: next.revision };
+    },
+
     async stopGeneration(sessionId?: string): Promise<void> {
       if (sessionId) {
         const entry = activeSessions.get(sessionId);
         if (entry) {
           try { await entry.session.abort(); } catch { /* ignore */ }
           entry.unsubscribe();
+          await retireSession(entry.session, 'new');
           activeSessions.delete(sessionId);
           staleSessions.delete(sessionId);
         }
         return;
       }
       // Abort all active sessions (backward compatibility)
-      for (const [, { session }] of activeSessions) {
+      const sessions = [...activeSessions.values()].map((entry) => entry.session);
+      for (const session of sessions) {
         try {
           await session.abort();
         } catch { /* ignore */ }
       }
       activeSessions.clear();
       staleSessions.clear();
+      await Promise.all(sessions.map((session) => retireSession(session, 'new')));
     },
 
     async steer(sessionId: string, content: string, images?: { name: string; mimeType: string; data: string }[]): Promise<void> {

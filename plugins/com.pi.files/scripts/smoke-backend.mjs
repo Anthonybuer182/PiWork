@@ -16,7 +16,7 @@
  *
  * Run from the plugin root:  node scripts/smoke-backend.mjs
  */
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
@@ -137,15 +137,18 @@ console.log(`  fixture: ${deckPath} (${original.length} bytes)\n`);
   );
 }
 
-// ── unwired domains/extensions answer plainly ──────────────────────────
+// ── guide domains: pdf is wired, structural read of a pdf is not ───────
 //
-// pdf is the remaining one. These assertions used to name docx, which stopped
-// being unwired when GenOffice's editor bridge was switched on — keep them
-// pointed at a format that genuinely has no path, so a future wiring shows up
-// here as a failure rather than as a stale claim.
+// `office_guide({domain:"pdf"})` now serves the pdf_edit vocabulary (GenOffice's
+// pdf-lib page surgery), while `office_read` on a PDF still has no text path —
+// those are different questions and this pins both.
 {
   const r = await callTool('office_guide', { domain: 'pdf' });
-  check('an unwired domain says so', /not wired yet/.test(r.content?.[0]?.text ?? ''), r.content?.[0]?.text?.slice(0, 100));
+  const guide = r.content?.[0]?.text ?? '';
+  check('office_guide serves the PDF ops', /insertBlankPage/.test(guide) && /merge/.test(guide), guide.slice(0, 160));
+  check('the PDF guide points at pdf_convert', /pdf_convert/.test(guide));
+  const unwired = await callTool('office_guide', { domain: 'odt' });
+  check('an unwired domain says so', /not wired yet/.test(unwired.content?.[0]?.text ?? ''));
   const r2 = await callTool('office_read', { path: join(dir, 'nope.pdf') });
   check('an unwired extension says so', /not wired yet/.test(r2.content?.[0]?.text ?? ''));
 }
@@ -217,6 +220,341 @@ console.log(`  fixture: ${deckPath} (${original.length} bytes)\n`);
   check('the file on disk matches what was handed to the host', onDisk.equals(written.get(deckPath)));
 }
 
+// ── an edit tells the open viewer to re-read the file ──────────────────
+//
+// The renderer holds the parsed deck in memory, and office_edit writes the
+// file from THIS process. Without a signal the panel keeps drawing the
+// pre-edit deck until its tab is reopened — the "preview is stale after an
+// edit" bug, which creation never showed because opening a tab mounts and
+// reads. This pins the signal that closes that gap.
+{
+  const events = [];
+  let listener = null;
+  const port = {
+    postMessage: (m) => {
+      if (m?.kind === 'event') events.push({ event: m.event, data: m.data, tabId: m.tabId });
+    },
+    on: (event, cb) => {
+      if (event === 'message') listener = cb;
+    },
+    start: () => {},
+  };
+  hostSend({ type: 'ui-port' }, [port]);
+  // A tab showing the deck. `panelId`/`tabId` are what teach the SDK which
+  // ports to route this panel's traffic to.
+  listener({
+    data: {
+      kind: 'event',
+      panelId: 'viewer',
+      tabId: 'viewer',
+      event: 'panel.mounted',
+      data: { tabId: 'viewer', params: { file: deckPath } },
+    },
+  });
+
+  const edit = await callTool('office_edit', {
+    path: deckPath,
+    ops: [{ op: 'addBlankSlide', target: { slide: 0 } }],
+  });
+  check('the edit that should notify applied', edit.details?.applied === true, edit.content?.[0]?.text);
+  const changed = events.find((e) => e.event === 'ui.fileChanged');
+  check(
+    'a tool edit tells the open viewer the bytes changed',
+    changed?.data?.path === deckPath,
+    JSON.stringify(events.map((e) => e.event)),
+  );
+  check(
+    'the signal is distinct from ui.render',
+    !events.some((e) => e.event === 'ui.fileChanged' && !e.data?.path),
+  );
+}
+
+// ── office_create: new files with no Python in sight ───────────────────
+//
+// The agent used to reach for python-pptx when asked for a new deck. These
+// pin the replacement: the same engines the read/edit paths use, one call,
+// atomic content, and a hard refusal to clobber an existing file.
+{
+  const createdPath = join(dir, 'created.pptx');
+  const r = await callTool('office_create', {
+    path: createdPath,
+    ops: [{ op: 'addBlankSlide', target: { slide: 0 } }],
+  });
+  check('office_create reports created', r.details?.created === true, r.content?.[0]?.text);
+  check('the create went through the host capability', written.has(createdPath));
+  writeFileSync(createdPath, written.get(createdPath));
+  const reread = await callTool('office_read', { path: createdPath });
+  check(
+    'the created deck is a real deck the engine can read back',
+    reread.details?.slideCount === 2,
+    `slideCount=${reread.details?.slideCount}`,
+  );
+
+  const refused = await callTool('office_create', { path: createdPath });
+  check(
+    'office_create refuses to clobber an existing file',
+    /already exists/.test(refused.error ?? ''),
+    refused.error,
+  );
+}
+{
+  // The documented one-shot example: a blank deck plus a centered text box,
+  // exactly what "create a PPT saying i am weiqun" needs — no Python.
+  const textPath = join(dir, 'hello.pptx');
+  const r = await callTool('office_create', {
+    path: textPath,
+    ops: [
+      {
+        op: 'addElement',
+        target: { slide: 0 },
+        kind: 'textbox',
+        offset: { x: 914400, y: 2286000, cx: 10363200, cy: 2286000 },
+        paragraphs: [
+          { runs: [{ text: 'i am weiqun', fontSize: 44, bold: true }], align: 'center' },
+        ],
+        bodyPr: { anchor: 'ctr' },
+      },
+    ],
+  });
+  check(
+    'office_create applies a text element in the same call',
+    r.details?.created === true && (r.details?.records?.length ?? 0) === 1,
+    r.error ?? JSON.stringify(r.details),
+  );
+}
+{
+  const badPath = join(dir, 'bad-create.pptx');
+  const r = await callTool('office_create', {
+    path: badPath,
+    ops: [{ op: 'addBlankSlide', target: { slide: 99 } }],
+  });
+  check('a rejected create batch writes nothing', !written.has(badPath));
+  check(
+    'a rejected create batch returns typed failures',
+    Array.isArray(r.details?.failures) && r.details.failures.length > 0,
+    JSON.stringify(r.details),
+  );
+}
+{
+  const xlsxPath = join(dir, 'created.xlsx');
+  const r = await callTool('office_create', {
+    path: xlsxPath,
+    sheetName: 'Budget',
+    ops: [{ sheet: 'Budget', cell: 'A1', value: 'hello' }],
+  });
+  check('office_create creates a workbook', r.details?.created === true, r.content?.[0]?.text);
+  writeFileSync(xlsxPath, written.get(xlsxPath));
+  const read = await callTool('office_read', { path: xlsxPath });
+  check(
+    'the created workbook carries its first cells',
+    /A1=hello/.test(read.content?.[0]?.text ?? ''),
+    read.content?.[0]?.text,
+  );
+}
+{
+  // GenOffice's own grid → workbook path: a table arrives as CSV, numbers stay
+  // numeric, and the result is a workbook office_read can address by cell.
+  const csvPath = join(dir, 'csv-created.xlsx');
+  const r = await callTool('office_create', {
+    path: csvPath,
+    sheetName: '预算',
+    csv: '项目,金额\n房租,3000\n餐饮,1200',
+  });
+  check('office_create accepts a CSV grid', r.details?.created === true, r.error ?? r.content?.[0]?.text);
+  writeFileSync(csvPath, written.get(csvPath));
+  const read = await callTool('office_read', { path: csvPath });
+  const body = read.content?.[0]?.text ?? '';
+  check(
+    'the CSV grid became addressable cells',
+    /A1=项目/.test(body) && /B2=3000/.test(body) && /A3=餐饮/.test(body),
+    body,
+  );
+}
+{
+  // .csv is a file too: GenOffice's create path writes a UTF-8 BOM so Excel
+  // reopens it as UTF-8 instead of the local ANSI code page.
+  const csvPath = join(dir, 'created-plain.csv');
+  const r = await callTool('office_create', { path: csvPath, csv: 'a,b\n1,2' });
+  check('office_create creates a CSV', r.details?.created === true, r.error ?? r.content?.[0]?.text);
+  const bytes = written.get(csvPath);
+  check(
+    'the CSV is BOM + the given text',
+    bytes && bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf && bytes.toString('utf8').includes('a,b\n1,2'),
+    bytes ? bytes.subarray(0, 20).toString('hex') : 'no bytes',
+  );
+}
+{
+  const rel = await callTool('office_create', { path: 'relative.pptx' });
+  check('a relative path is refused', /absolute/.test(rel.error ?? ''), rel.error);
+  const unsupported = await callTool('office_create', { path: join(dir, 'plain.txt') });
+  check(
+    'an unsupported extension is refused',
+    /not supported/.test(unsupported.error ?? ''),
+    unsupported.error,
+  );
+}
+
+// ── PDF: create, page surgery, and PDF → Office conversion ─────────────
+//
+// All of this is GenOffice's own headless layer: blank-pdf.ts for the blank
+// page, save-pdf.ts's pdf-lib helpers for the surgery, and pdf2docx for the
+// rebuild. The wasm next to dist/main.mjs is what makes the conversion work in
+// a plugin process — this block is the check that it is actually there.
+{
+  const { PDFDocument } = await import('pdf-lib');
+
+  const createdPdf = join(dir, 'created.pdf');
+  const c = await callTool('office_create', {
+    path: createdPdf,
+    pages: 3,
+    pageSize: 'Letter',
+  });
+  check('office_create creates a PDF', c.details?.created === true, c.error ?? c.content?.[0]?.text);
+  writeFileSync(createdPdf, written.get(createdPdf));
+  const pdf = await PDFDocument.load(readFileSync(createdPdf));
+  check('the PDF has the requested pages', pdf.getPageCount() === 3);
+  const { width, height } = pdf.getPage(0).getSize();
+  check(
+    'the PDF has the requested paper size',
+    Math.round(width) === 612 && Math.round(height) === 792,
+    JSON.stringify({ width, height }),
+  );
+
+  const extracted = join(dir, 'extracted.pdf');
+  const e = await callTool('pdf_edit', {
+    path: createdPdf,
+    outputPath: extracted,
+    ops: [{ op: 'extractPages', pages: [0, 2] }],
+  });
+  check('pdf_edit extracts pages', e.details?.applied === true, e.error ?? e.content?.[0]?.text);
+  writeFileSync(extracted, written.get(extracted));
+  check(
+    'the extracted PDF has two pages',
+    (await PDFDocument.load(readFileSync(extracted))).getPageCount() === 2,
+  );
+
+  const merged = join(dir, 'merged.pdf');
+  const m = await callTool('pdf_edit', {
+    path: extracted,
+    outputPath: merged,
+    ops: [{ op: 'merge', sources: [createdPdf] }],
+  });
+  check('pdf_edit merges PDFs', m.details?.applied === true, m.error ?? m.content?.[0]?.text);
+  writeFileSync(merged, written.get(merged));
+  check(
+    'the merged PDF has five pages',
+    (await PDFDocument.load(readFileSync(merged))).getPageCount() === 5,
+  );
+
+  const inPlace = await callTool('pdf_edit', {
+    path: createdPdf,
+    outputPath: createdPdf,
+    ops: [{ op: 'insertBlankPage', afterPageIndex: 0 }],
+  });
+  check('an in-place edit needs overwrite', /overwrite/.test(inPlace.error ?? ''), inPlace.error);
+
+  const deleted = join(dir, 'deleted.pdf');
+  const d = await callTool('pdf_edit', {
+    path: merged,
+    outputPath: deleted,
+    ops: [{ op: 'deletePages', pages: [0, 1] }],
+  });
+  check('pdf_edit deletes pages', d.details?.applied === true, d.error ?? d.content?.[0]?.text);
+  writeFileSync(deleted, written.get(deleted));
+  check(
+    'the trimmed PDF has three pages',
+    (await PDFDocument.load(readFileSync(deleted))).getPageCount() === 3,
+  );
+
+  const split = await callTool('pdf_edit', {
+    path: createdPdf,
+    outputPath: join(dir, 'split-out'),
+    ops: [{ op: 'split', everyPages: 2 }],
+  });
+  check(
+    'pdf_edit splits into several files',
+    (split.details?.files?.length ?? 0) === 2,
+    split.error ?? JSON.stringify(split.details),
+  );
+
+  // PDF text insertion: GenOffice's text-edit layer resolves a system font,
+  // subsets it with harfbuzz and writes a real text object.
+  const textEditOut = join(dir, 'text-edited.pdf');
+  const te = await callTool('pdf_edit', {
+    path: createdPdf,
+    outputPath: textEditOut,
+    ops: [{ op: 'insertText', text: 'PDF-EDIT-TEXT', pageIndex: 0, x: 72, y: 700, fontSize: 14 }],
+  });
+  check('pdf_edit inserts text', te.details?.applied === true, te.error ?? te.content?.[0]?.text);
+  writeFileSync(textEditOut, written.get(textEditOut));
+  check(
+    'the text edit produced a different PDF',
+    !readFileSync(textEditOut).equals(readFileSync(createdPdf)),
+  );
+
+  // office_create with text, then PDF → DOCX: both must carry the text, which
+  // is the whole point (and the reason pdfium + harfbuzz wasm are bundled).
+  const srcPdf = join(dir, 'convert.pdf');
+  const createdText = await callTool('office_create', {
+    path: srcPdf,
+    text: 'CONVERT-MARKER',
+  });
+  check(
+    'office_create writes text into a PDF',
+    createdText.details?.created === true && createdText.details?.textLines === 1,
+    createdText.error ?? createdText.content?.[0]?.text,
+  );
+  writeFileSync(srcPdf, written.get(srcPdf));
+  const outDocx = join(dir, 'converted.docx');
+  const cv = await callTool('pdf_convert', { path: srcPdf, to: 'docx', outputPath: outDocx });
+  check('pdf_convert creates a docx', cv.details?.converted === true, cv.error ?? cv.content?.[0]?.text);
+  writeFileSync(outDocx, written.get(outDocx));
+  const JSZip = (await import('jszip')).default;
+  const zip = await JSZip.loadAsync(readFileSync(outDocx));
+  const xml = (await zip.file('word/document.xml')?.async('string')) ?? '';
+  check('the converted docx carries the PDF text', xml.includes('CONVERT-MARKER'), xml.slice(0, 200));
+
+  // The text layer's system-font fallback is what makes CJK possible; pin it
+  // (macOS resolves PingFang/Heiti; Linux/Windows resolve their own CJK face).
+  const cjkPdf = join(dir, 'cjk.pdf');
+  const cjkCreated = await callTool('office_create', { path: cjkPdf, text: '你好，世界' });
+  check(
+    'office_create writes CJK text into a PDF',
+    cjkCreated.details?.created === true && cjkCreated.details?.textLines === 1,
+    cjkCreated.error ?? cjkCreated.content?.[0]?.text,
+  );
+  writeFileSync(cjkPdf, written.get(cjkPdf));
+  const cjkDocx = join(dir, 'cjk-converted.docx');
+  const cjkConverted = await callTool('pdf_convert', {
+    path: cjkPdf,
+    to: 'docx',
+    outputPath: cjkDocx,
+  });
+  check(
+    'CJK PDF converts to docx',
+    cjkConverted.details?.converted === true,
+    cjkConverted.error ?? cjkConverted.content?.[0]?.text,
+  );
+  writeFileSync(cjkDocx, written.get(cjkDocx));
+  const cjkZip = await JSZip.loadAsync(readFileSync(cjkDocx));
+  const cjkXml = (await cjkZip.file('word/document.xml')?.async('string')) ?? '';
+  check('the converted docx carries the CJK text', cjkXml.includes('你好'), cjkXml.slice(0, 200));
+
+  // PDF → PNG: pdfium rasterizes, GenOffice's own encoder writes the file.
+  const render = await callTool('pdf_render', { path: srcPdf, outputDir: join(dir, 'png-out'), scale: 1 });
+  check(
+    'pdf_render renders the page',
+    (render.details?.files?.length ?? 0) === 1,
+    render.error ?? JSON.stringify(render.details),
+  );
+  const png = written.get(join(dir, 'png-out', 'convert-p1.png'));
+  check(
+    'the rendered file is a PNG',
+    png && png[0] === 0x89 && png.toString('ascii', 1, 4) === 'PNG',
+    png ? png.subarray(0, 8).toString('hex') : 'no bytes',
+  );
+}
+
 // ── docx: the panel carries the edit, this side only routes it ─────────
 //
 // A docx has no headless engine here — GenOffice's document model IS a live
@@ -248,6 +586,8 @@ console.log(`  fixture: ${deckPath} (${original.length} bytes)\n`);
       setTimeout(() => {
         if (command === 'read_document') reply(requestId, true, { result: { text: 'FAKE DOCUMENT CONTEXT' } });
         else if (command === 'apply_ops') reply(requestId, true, { result: { summary: 'ok', mutated: true } });
+        else if (command === 'insert_content' || command === 'replace_blocks')
+          reply(requestId, true, { result: { summary: 'ok', mutated: true } });
         else if (command === 'save_document') reply(requestId, true, { result: { ok: true, path: payload.path } });
         else reply(requestId, false, { error: `unexpected command ${command}` });
       }, 0);
@@ -260,11 +600,32 @@ console.log(`  fixture: ${deckPath} (${original.length} bytes)\n`);
 
   hostSend({ type: 'ui-port' }, [fakeUiPort]);
   // Which document the viewer has open — this is what the guard reads.
-  portListener({ data: { kind: 'event', event: 'panel.mounted', data: { params: { file: docxPath } } } });
+  // Tagged with panelId/tabId exactly as the real preload sends them: with
+  // another port already speaking for this panel (the re-read test above),
+  // untagged traffic has no owner and the SDK can only guess which port to
+  // route `mcp-command` to.
+  portListener({
+    data: {
+      kind: 'event',
+      panelId: 'viewer',
+      tabId: 'viewer',
+      event: 'panel.mounted',
+      data: { tabId: 'viewer', params: { file: docxPath } },
+    },
+  });
   // The real panel announces readiness once its editor has the document
   // loaded; office_edit waits for this before sending any command. Without it
   // the backend would wait the full 60s for an announcement that never comes.
-  portListener({ data: { kind: 'request', id: 'ready-1', method: 'mcp.ready', params: { path: docxPath } } });
+  portListener({
+    data: {
+      kind: 'request',
+      id: 'ready-1',
+      panelId: 'viewer',
+      tabId: 'viewer',
+      method: 'mcp.ready',
+      params: { path: docxPath },
+    },
+  });
 
   const guide = await callTool('office_guide', { domain: 'docx' });
   check('office_guide serves the docx vocabulary', /findReplace/.test(guide.content?.[0]?.text ?? ''));
@@ -313,6 +674,38 @@ console.log(`  fixture: ${deckPath} (${original.length} bytes)\n`);
     /viewer/i.test(wrong.error ?? '') && /other\.docx|smoke\.docx/.test(wrong.error ?? ''),
     wrong.error,
   );
+
+  // office_create docx: the blank is written first, then the content batch
+  // runs through the same live editor. The smoke harness has no real panel to
+  // mount and announce, so pre-announce readiness for the new path — in the
+  // app, office_create opens it and waits for exactly this signal.
+  const createdDocx = join(dir, 'created.docx');
+  portListener({
+    data: {
+      kind: 'request',
+      panelId: 'viewer',
+      tabId: 'viewer',
+      method: 'mcp.ready',
+      params: { path: createdDocx },
+    },
+  });
+  pushed.length = 0;
+  const created = await callTool('office_create', {
+    path: createdDocx,
+    ops: [{ op: 'insert_content', html: '<p>Hello from office_create</p>' }],
+  });
+  check(
+    'office_create creates a docx',
+    created.details?.created === true,
+    created.error ?? created.content?.[0]?.text,
+  );
+  check('the docx blank landed on disk first', written.has(createdDocx));
+  check(
+    'the docx content ran through the live editor',
+    pushed.some((p) => p.command === 'insert_content'),
+    pushed.map((p) => p.command).join(','),
+  );
+  check('the created docx was saved after the batch', pushed.at(-1)?.command === 'save_document', pushed.at(-1)?.command);
 }
 
 // ── xlsx: the third engine, end to end ─────────────────────────────────
@@ -508,7 +901,7 @@ console.log(`  fixture: ${deckPath} (${original.length} bytes)\n`);
   const byFolder = await callTool('files_search', { root: dir, query: 'reports' });
   check(
     'files_search matches folder names, so siblings are discoverable',
-    (byFolder.content?.[0]?.text ?? '').includes(mdPath),
+    (byFolder.content?.[0]?.text ?? '').includes(docxPath),
     byFolder.content?.[0]?.text,
   );
 
@@ -518,25 +911,41 @@ console.log(`  fixture: ${deckPath} (${original.length} bytes)\n`);
   check('details carry absolute paths for office_read', newest.details?.results?.every((r) => r.path.startsWith(dir)), JSON.stringify(newest.details?.results?.[0]));
 
   // The freshness contract: an edit outside the app must show up in the next
-  // answer. Changing the text AND the size rules out a same-mtime edge.
-  writeFileSync(mdPath, '# 会议记录（修订版）\n\n正文加了一行。\n');
-  const edited = await callTool('files_search', { root: dir, query: '修订版' });
+  // answer. Rebuild the sharedStrings workbook with new cell text; the size and
+  // mtime both change, ruling out a same-mtime edge.
+  const revisedBook = new JSZip();
+  revisedBook.file(
+    'xl/workbook.xml',
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheets><sheet name="预算表" sheetId="1"/></sheets></workbook>',
+  );
+  revisedBook.file(
+    'xl/sharedStrings.xml',
+    '<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>修订版预算</t></si></sst>',
+  );
+  revisedBook.file(
+    'xl/worksheets/sheet1.xml',
+    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData><row r="1"><c r="A1" t="s"><v>0</v></c></row></sheetData></worksheet>',
+  );
+  writeFileSync(sharedPath, await revisedBook.generateAsync({ type: 'nodebuffer' }));
+  const edited = await callTool('files_search', { root: dir, query: '修订版预算' });
   check(
     'an external edit is reflected on the next search',
-    (edited.content?.[0]?.text ?? '').includes('会议记录（修订版）'),
+    (edited.content?.[0]?.text ?? '').includes(sharedPath),
     edited.content?.[0]?.text,
   );
 
+  // Plain text is deliberately outside the index (PLUGIN.md: use grep).
   const mdBody = await callTool('files_search', { root: dir, query: '加了一行' });
   check(
-    'files_search matches md body text, not just the heading',
-    (mdBody.content?.[0]?.text ?? '').includes(mdPath),
+    'plain-text bodies stay out of the index',
+    !(mdBody.content?.[0]?.text ?? '').includes(mdPath),
     mdBody.content?.[0]?.text,
   );
 
   rmSync(mdPath);
-  const afterDelete = await callTool('files_search', { root: dir, query: '修订版' });
-  check('a deleted file disappears from the index', !(afterDelete.content?.[0]?.text ?? '').includes(mdPath), afterDelete.content?.[0]?.text);
+  rmSync(sharedPath);
+  const afterDelete = await callTool('files_search', { root: dir, query: '修订版预算' });
+  check('a deleted file disappears from the index', !(afterDelete.content?.[0]?.text ?? '').includes(sharedPath), afterDelete.content?.[0]?.text);
 }
 
 rmSync(dir, { recursive: true, force: true });

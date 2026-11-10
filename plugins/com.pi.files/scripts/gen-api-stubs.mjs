@@ -22,7 +22,7 @@
  *   node scripts/gen-api-stubs.mjs sheets
  */
 import { readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -147,6 +147,13 @@ ${lines.join('\n')}
 };
 `;
 
-const dest = join(ROOT, 'src', 'ui', app, 'stubs.ts');
+// docs' shim lives under docx/ (historical name); its stubs sit beside the
+// shims it is spread into rather than in a `docs/` directory.
+const dest =
+  app === 'docs'
+    ? join(ROOT, 'src', 'ui', 'docx', 'shims', 'stubs.ts')
+    : join(ROOT, 'src', 'ui', app, 'stubs.ts');
 writeFileSync(dest, out);
-console.log(`[stubs] ${spec.iface}: ${members.length} member(s) → src/ui/${app}/stubs.ts`);
+console.log(
+  `[stubs] ${spec.iface}: ${members.length} member(s) → ${relative(ROOT, dest)}`,
+);

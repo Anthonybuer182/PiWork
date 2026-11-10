@@ -8,7 +8,7 @@ import type {
   VoicePreferencesPatch,
 } from '@pi/types';
 import { useI18n, type MessageKey } from '@/i18n';
-import { formatBytes } from '@/lib/voice/format';
+import { formatBytes } from '@/lib/format';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';

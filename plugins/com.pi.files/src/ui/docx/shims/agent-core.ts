@@ -89,3 +89,32 @@ export const COMPLETED_VIA_TOOLS_TEXT = '[completed-via-tools]';
 export function composeSkills(..._args: unknown[]): unknown[] {
   return [];
 }
+
+/** A skill the user attached to one message, from the composer. */
+export interface AttachedSkill {
+  name: string;
+  body: string;
+}
+
+/**
+ * Prepends attached skill text to the instruction, verbatim as upstream does.
+ *
+ * Pure string composition, so it is safe to keep real: sheets calls it while
+ * building a message, and returning the instruction unchanged would silently
+ * drop a user-picked skill. Nothing here reaches a provider — the resulting
+ * text is what the host agent receives.
+ */
+export function withAttachedSkills(
+  instruction: string,
+  skills: readonly AttachedSkill[],
+): string {
+  if (!skills || skills.length === 0) return instruction;
+  const blocks = skills
+    .map((s) => `<skill name="${s.name.replace(/"/g, '')}">\n${s.body.trim()}\n</skill>`)
+    .join('\n\n');
+  return (
+    `The user attached the following skill${skills.length > 1 ? 's' : ''} to this request. ` +
+    `Follow their steps and constraints with the tools you have; where a skill and general ` +
+    `guidance disagree, the skill wins.\n\n${blocks}\n\nUser request:\n${instruction}`
+  );
+}
