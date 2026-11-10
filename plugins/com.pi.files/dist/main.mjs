@@ -134712,29 +134712,32 @@ var text = /* @__PURE__ */ __name((t, details) => ({
   content: [{ type: "text", text: t }],
   details
 }), "text");
-var docCard = /* @__PURE__ */ __name((filePath, opCount, ext, mode = "updated") => ({
+var docCard = /* @__PURE__ */ __name((filePath, ext, mode = "updated") => ({
   component: "Card",
-  props: { title: mode === "created" ? "\u6587\u6863\u5DF2\u521B\u5EFA" : "\u6587\u6863\u5DF2\u66F4\u65B0" },
+  props: {
+    title: mode === "created" ? "\u6587\u6863\u5DF2\u521B\u5EFA" : "\u6587\u6863\u5DF2\u66F4\u65B0",
+    icon: "file",
+    status: "success"
+  },
   children: [
     {
       component: "Row",
-      props: { gap: 2 },
+      props: { justify: "between", gap: "md" },
       children: [
-        { component: "Text", props: { text: basename3(filePath), weight: "bold" } },
-        { component: "Badge", props: { text: ext.toUpperCase() } }
+        {
+          component: "Row",
+          props: { gap: "md", grow: true },
+          children: [
+            { component: "Text", props: { text: basename3(filePath), weight: "bold", truncate: true } },
+            { component: "Badge", props: { text: ext.toUpperCase() } }
+          ]
+        },
+        {
+          component: "Button",
+          props: { label: "\u6253\u5F00", variant: "outline", path: filePath },
+          events: { onClick: "open_viewer" }
+        }
       ]
-    },
-    {
-      component: "Text",
-      props: {
-        text: mode === "created" ? `\u5DF2\u65B0\u5EFA${opCount > 0 ? `\u5E76\u5E94\u7528 ${opCount} \u4E2A\u64CD\u4F5C` : ""}` : `\u5DF2\u5E94\u7528 ${opCount} \u4E2A\u64CD\u4F5C\u5E76\u4FDD\u5B58`,
-        variant: "muted"
-      }
-    },
-    {
-      component: "Button",
-      props: { label: "\u5728\u67E5\u770B\u5668\u4E2D\u6253\u5F00", path: filePath },
-      events: { onClick: "open_viewer" }
     }
   ]
 }), "docCard");
@@ -134915,7 +134918,7 @@ async function toolEdit(p, sessionId) {
         applied: true,
         mtime: written2?.mtime
       }),
-      card: docCard(path, cellOps.length, ext)
+      card: docCard(path, ext)
     };
   }
   if (ext === "docx") {
@@ -134948,7 +134951,7 @@ ${plan}`, {
         mtime: info2?.mtimeMs,
         steps
       }),
-      card: docCard(path, ops.length, ext)
+      card: docCard(path, ext)
     };
   }
   if (ext !== "pptx") {
@@ -134987,7 +134990,7 @@ Fix the listed op(s) and resend the whole batch.`,
       `applied ${result.records?.length ?? ops.length} op(s) to ${path} and saved (${bytes.length} bytes)`,
       { applied: true, records: result.records ?? [], mtime: written?.mtime }
     ),
-    card: docCard(path, result.records?.length ?? ops.length, ext)
+    card: docCard(path, ext)
   };
 }
 __name(toolEdit, "toolEdit");
@@ -135050,7 +135053,7 @@ async function toolCreate(p, sessionId) {
         path,
         mtime: written2?.mtime
       }),
-      card: docCard(path, 0, ext, "created")
+      card: docCard(path, ext, "created")
     };
   }
   if (ext === "pdf") {
@@ -135098,7 +135101,7 @@ async function toolCreate(p, sessionId) {
           mtime: written2?.mtime
         }
       ),
-      card: docCard(path, textLines, ext, "created")
+      card: docCard(path, ext, "created")
     };
   }
   if (ext === "xlsx") {
@@ -135119,7 +135122,7 @@ async function toolCreate(p, sessionId) {
           mtime: written2?.mtime
         }
       ),
-      card: docCard(path, ops.length, ext, "created")
+      card: docCard(path, ext, "created")
     };
   }
   if (ext === "docx") {
@@ -135132,7 +135135,7 @@ async function toolCreate(p, sessionId) {
           path,
           mtime: written2?.mtime
         }),
-        card: docCard(path, 0, ext, "created")
+        card: docCard(path, ext, "created")
       };
     }
     const commands = planDocxCommands(ops, false);
@@ -135157,7 +135160,7 @@ async function toolCreate(p, sessionId) {
         mtime: info?.mtimeMs,
         steps
       }),
-      card: docCard(path, ops.length, ext, "created")
+      card: docCard(path, ext, "created")
     };
   }
   const opened = await openPptx(await createBlankPptx());
@@ -135190,7 +135193,7 @@ Fix the listed op(s) and resend the whole batch. No file was written.`,
         mtime: written?.mtime
       }
     ),
-    card: docCard(path, ops.length, ext, "created")
+    card: docCard(path, ext, "created")
   };
 }
 __name(toolCreate, "toolCreate");
@@ -135258,7 +135261,7 @@ async function toolPdfEdit(p) {
         mtime: written?.mtime
       }
     ),
-    card: docCard(outputPath, ops.length, "pdf")
+    card: docCard(outputPath, "pdf")
   };
 }
 __name(toolPdfEdit, "toolPdfEdit");
@@ -135305,7 +135308,7 @@ Notes:
         mtime: written?.mtime
       }
     ),
-    card: docCard(outputPath, result.pages, to, "created")
+    card: docCard(outputPath, to, "created")
   };
 }
 __name(toolPdfConvert, "toolPdfConvert");

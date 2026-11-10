@@ -459,7 +459,22 @@ if (name === 'note_write') {
 }
 ```
 
-`card` 是一棵声明式的 UI 树（`{ component, props, children, events }`）——你只描述"长什么样"，宿主用它自带的组件渲染，你的插件不用发任何 UI 代码。`events: { onClick: 'undo' }` 的意思是：按钮被点击时，把 `undo` 这个事件 id 送回后端。完整的组件词汇表（`Column` / `Row` / `Card` / `Text` / `Badge` / `KeyValue` / `List` / `Button` / `Input` / `Image` / `Separator` / `Spinner` / `EmptyState`）见第 11 节。
+`card` 是一棵声明式的 UI 树（`{ component, props, children, events }`）——你只描述"长什么样"，宿主用它自带的组件渲染，你的插件不用发任何 UI 代码。`events: { onClick: 'undo' }` 的意思是：按钮被点击时，把 `undo` 这个事件 id 送回后端。完整的组件词汇表见下表。
+
+| 组件 | 常用 props |
+| --- | --- |
+| `Card` | `title`（顶部标题条）、`icon`（`file` / `folder` / `check` / `mail` / `calendar` / `clock` / `alert` / `info` / `link` / `sparkles`）、`status`（`success` / `info` / `warning` / `error` / `loading`，标题条右侧的状态点） |
+| `Row` / `Column` | `gap`（`sm` / `md` / `lg`）、`padding`、`grow: true`（撑满剩余宽度）；`Row` 另有 `justify`（`between` / `end` / `center`） |
+| `Text` | `text`、`variant`（`default` / `muted` / `small` / `title`）、`weight: 'bold'`、`mono: true`、`truncate: true` |
+| `Badge` | `text`——小号描边标签，放格式、状态这类短词 |
+| `Button` | `label`、`variant`（默认 `outline` 描边；`primary` 才是主色实心）、`disabled`；点击事件写成 `events: { onClick: 'eventId' }`，节点 `props` 会作为 `payload` 回到 `onCardEvent` |
+| `KeyValue` | `items` 既可以是 `{ key, value }` 对象，也可以是 `['key', value]` 数组 |
+| `List` | `items: [{ key, label, description?, badge? }]`；带 `events.onClick` 时整行可点 |
+| `Input` | `placeholder`、`value`，回车触发 `events.onSubmit` |
+| `Image` | `source`（base64，可配 `mimeType`）、`maxHeight` |
+| `Separator` / `Spinner` / `EmptyState` | 分隔线 / `label` / `title` + `description` |
+
+样式约定：卡片里不写颜色、字号——宿主按当前主题渲染，深浅色都跟着走。按钮默认是描边样式，一张卡最多留一个 `primary` 用来突出唯一的主操作。
 
 后端加 `onCardEvent` 回调（和 `onTool` 平级）：
 
@@ -1079,7 +1094,7 @@ node scripts/build-market.mjs --out ./dist-market
 
 `type` 填**工具名**。声明后，工具结果里的 `card`（声明式 UI 树：`Column` / `Row` / `Card` / `Text` / `Badge` / `KeyValue` / `List` / `Button` / `Input` / `Image` / `Separator` / `Spinner` / `EmptyState`）由宿主渲染进对话，工具运行中还会把参数实时渲染成「生成中」卡片（`streaming: false` 可关闭）。卡片里的 Button / Input 是**活的**：用户点击/回车，事件带着节点上声明的 `eventId` 回到后端的 `onCardEvent`。旧版客户端或没实现 `onCardEvent` 的后端，按钮退化成展示——不会坏，只是不动。
 
-**领域惯例：你工具的产出物，就用你自己的卡片展示。** 日程本插件的条目卡片、文件查看器的「文档已更新」卡片（office_edit 保存成功后返回：文件名 + 格式徽章 + 「在查看器中打开」按钮）都是这么做。把上下文（如文件路径）放进按钮的 `props`——点击时它作为 `payload` 回到 `onCardEvent`，这样对话里堆了多少张卡片，每张打开的都还是它自己那份产出物。
+**领域惯例：你工具的产出物，就用你自己的卡片展示。** 日程本插件的条目卡片、文件查看器的「文档已创建 / 文档已更新」卡片（office_edit 保存成功后返回：文件图标 + 标题条 + 文件名 + 格式徽章 + 「打开」按钮）都是这么做。把上下文（如文件路径）放进按钮的 `props`——点击时它作为 `payload` 回到 `onCardEvent`，这样对话里堆了多少张卡片，每张打开的都还是它自己那份产出物。
 
 ### `ctx.messages.post` — 插件主动消息
 

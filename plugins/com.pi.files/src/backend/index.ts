@@ -391,38 +391,41 @@ const text = (t: string, details?: unknown): ToolResult => ({
  * opens ITS document even when several edits are stacked in one conversation.
  * Cards render only what the host can draw from data; the plugin ships no UI
  * code.
+ *
+ * One line of content, not three: the icon + title say what happened, the row
+ * says which file, and the action sits on the right where the eye ends. The
+ * batch size is already the tool row's preview ("迎国庆.pptx · 6 个操作").
  */
 const docCard = (
   filePath: string,
-  opCount: number,
   ext: string,
   mode: 'updated' | 'created' = 'updated',
 ): unknown => ({
   component: 'Card',
-  props: { title: mode === 'created' ? '文档已创建' : '文档已更新' },
+  props: {
+    title: mode === 'created' ? '文档已创建' : '文档已更新',
+    icon: 'file',
+    status: 'success',
+  },
   children: [
     {
       component: 'Row',
-      props: { gap: 2 },
+      props: { justify: 'between', gap: 'md' },
       children: [
-        { component: 'Text', props: { text: basename(filePath), weight: 'bold' } },
-        { component: 'Badge', props: { text: ext.toUpperCase() } },
+        {
+          component: 'Row',
+          props: { gap: 'md', grow: true },
+          children: [
+            { component: 'Text', props: { text: basename(filePath), weight: 'bold', truncate: true } },
+            { component: 'Badge', props: { text: ext.toUpperCase() } },
+          ],
+        },
+        {
+          component: 'Button',
+          props: { label: '打开', variant: 'outline', path: filePath },
+          events: { onClick: 'open_viewer' },
+        },
       ],
-    },
-    {
-      component: 'Text',
-      props: {
-        text:
-          mode === 'created'
-            ? `已新建${opCount > 0 ? `并应用 ${opCount} 个操作` : ''}`
-            : `已应用 ${opCount} 个操作并保存`,
-        variant: 'muted',
-      },
-    },
-    {
-      component: 'Button',
-      props: { label: '在查看器中打开', path: filePath },
-      events: { onClick: 'open_viewer' },
     },
   ],
 });
@@ -662,7 +665,7 @@ async function toolEdit(p: Record<string, unknown>, sessionId?: string | null): 
         applied: true,
         mtime: (written as { mtime?: number })?.mtime,
       }),
-      card: docCard(path, cellOps.length, ext),
+      card: docCard(path, ext),
     };
   }
   if (ext === 'docx') {
@@ -710,7 +713,7 @@ async function toolEdit(p: Record<string, unknown>, sessionId?: string | null): 
         mtime: info?.mtimeMs,
         steps,
       }),
-      card: docCard(path, ops.length, ext),
+      card: docCard(path, ext),
     };
   }
   if (ext !== 'pptx') {
@@ -760,7 +763,7 @@ async function toolEdit(p: Record<string, unknown>, sessionId?: string | null): 
       `applied ${result.records?.length ?? ops.length} op(s) to ${path} and saved (${bytes.length} bytes)`,
       { applied: true, records: result.records ?? [], mtime: (written as { mtime?: number })?.mtime },
     ),
-    card: docCard(path, result.records?.length ?? ops.length, ext),
+    card: docCard(path, ext),
   };
 }
 
@@ -860,7 +863,7 @@ async function toolCreate(p: Record<string, unknown>, sessionId?: string | null)
         path,
         mtime: (written as { mtime?: number })?.mtime,
       }),
-      card: docCard(path, 0, ext, 'created'),
+      card: docCard(path, ext, 'created'),
     };
   }
 
@@ -913,7 +916,7 @@ async function toolCreate(p: Record<string, unknown>, sessionId?: string | null)
           mtime: (written as { mtime?: number })?.mtime,
         },
       ),
-      card: docCard(path, textLines, ext, 'created'),
+      card: docCard(path, ext, 'created'),
     };
   }
 
@@ -940,7 +943,7 @@ async function toolCreate(p: Record<string, unknown>, sessionId?: string | null)
           mtime: (written as { mtime?: number })?.mtime,
         },
       ),
-      card: docCard(path, ops.length, ext, 'created'),
+      card: docCard(path, ext, 'created'),
     };
   }
 
@@ -957,7 +960,7 @@ async function toolCreate(p: Record<string, unknown>, sessionId?: string | null)
           path,
           mtime: (written as { mtime?: number })?.mtime,
         }),
-        card: docCard(path, 0, ext, 'created'),
+        card: docCard(path, ext, 'created'),
       };
     }
     const commands = planDocxCommands(ops as unknown as DocxOp[], false);
@@ -985,7 +988,7 @@ async function toolCreate(p: Record<string, unknown>, sessionId?: string | null)
         mtime: info?.mtimeMs,
         steps,
       }),
-      card: docCard(path, ops.length, ext, 'created'),
+      card: docCard(path, ext, 'created'),
     };
   }
 
@@ -1018,7 +1021,7 @@ async function toolCreate(p: Record<string, unknown>, sessionId?: string | null)
         mtime: (written as { mtime?: number })?.mtime,
       },
     ),
-    card: docCard(path, ops.length, ext, 'created'),
+    card: docCard(path, ext, 'created'),
   };
 }
 
@@ -1097,7 +1100,7 @@ async function toolPdfEdit(p: Record<string, unknown>): Promise<ToolResult> {
         mtime: (written as { mtime?: number })?.mtime,
       },
     ),
-    card: docCard(outputPath, ops.length, 'pdf'),
+    card: docCard(outputPath, 'pdf'),
   };
 }
 
@@ -1154,7 +1157,7 @@ async function toolPdfConvert(p: Record<string, unknown>): Promise<ToolResult> {
         mtime: (written as { mtime?: number })?.mtime,
       },
     ),
-    card: docCard(outputPath, result.pages, to, 'created'),
+    card: docCard(outputPath, to, 'created'),
   };
 }
 
