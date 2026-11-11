@@ -23,10 +23,26 @@ export interface SendMessageParams {
    * agent sees `content` and starts the turn normally.
    */
   pluginMessage?: PluginMessageData;
+  /**
+   * Send this turn on a new branch instead of at the current leaf.
+   *
+   * The entry id is the user message being replaced — pi's tree navigation
+   * branches from its parent and returns its text, so the new message becomes
+   * a sibling version of the old one. The old version stays in the file and
+   * remains reachable through the version switcher.
+   */
+  branchFrom?: string;
+  /**
+   * Re-run the turn that started at this entry: branch from it and send its
+   * stored prompt again — the raw text and images, not the cleaned-up copy the
+   * UI displays — so the retry asks exactly the same thing. Takes precedence
+   * over `branchFrom`, which is about the message being sent, not replayed.
+   */
+  replayTurn?: { entryId: string };
 }
 
 export interface StreamChunk {
-  type: 'text' | 'block' | 'usage' | 'context' | 'stats' | 'message_start' | 'message_timing' | 'tool_timing' | 'queue_update' | 'done' | 'error';
+  type: 'text' | 'block' | 'usage' | 'context' | 'stats' | 'message_start' | 'message_timing' | 'tool_timing' | 'queue_update' | 'turn_start' | 'done' | 'error';
   content?: string;
   block?: ContentBlock;
   error?: string;
@@ -37,6 +53,14 @@ export interface StreamChunk {
   toolTiming?: ToolTiming;
   /** Current state of the steering and follow-up queues */
   queueState?: QueueState;
+  /**
+   * Entry id of the user message this run started from.
+   *
+   * Sent once, right after the SDK persists the turn's starting message. The
+   * renderer's optimistic bubble then has a real identity — without it, edit
+   * and retry are unavailable until the conversation is re-read from disk.
+   */
+  entryId?: string;
 }
 
 export interface NavigateTreeOptions {
@@ -44,6 +68,8 @@ export interface NavigateTreeOptions {
   summarize?: boolean;
   /** Custom instructions for the summary prompt */
   customInstructions?: string;
+  /** If true, `customInstructions` replaces the default prompt instead of adding to it */
+  replaceInstructions?: boolean;
   /** Label to attach to the branch summary entry */
   label?: string;
 }
@@ -67,6 +93,14 @@ export interface ChatService {
   /** Optional: tear down cached sessions so the next prompt rebuilds them
    *  (plugin tool/skill sets changing at runtime). */
   invalidateSessions?(): void;
+  /**
+   * Whether this conversation currently has a run or compaction in flight.
+   *
+   * Operations that copy or rewrite a transcript — creating a branch from a
+   * reply — must refuse while the source is moving. Only the chat service
+   * knows: it owns the live sessions.
+   */
+  isSessionBusy?(sessionId: string): boolean;
   /** Optional: retire every cached session (app quit). Extensions such as MCP
    *  close their child processes on `session_shutdown`. */
   dispose?(): Promise<void>;
@@ -123,6 +157,16 @@ export interface ChatService {
    * @param options - Navigation options (summarize, label, etc.)
    */
   navigateTree(sessionId: string, entryId: string, options?: NavigateTreeOptions): Promise<NavigateTreeResult>;
+  /**
+   * Show a different version of a turn.
+   *
+   * `entryId` is any turn-start entry (a user message). The conversation moves
+   * to the deepest point of that version's subtree — the version as the user
+   * last left it — not to the entry itself. Unlike `navigateTree`, this is a
+   * choice of view rather than an edit: nothing is put in the editor, and the
+   * choice is recorded in the session file so a reload comes back to it.
+   */
+  switchBranch(sessionId: string, entryId: string): Promise<{ leafId: string }>;
   /**
    * Compacts the conversation context to reduce token usage.
    * Summarizes older messages while preserving key context and decisions.

@@ -1,5 +1,19 @@
 import type { Message } from './message.js';
 
+/**
+ * The pi custom-entry type that records where the conversation was left.
+ *
+ * A pi session file is an append-only tree whose current position ("leaf") is
+ * simply the last entry. Switching to an earlier branch does not append
+ * anything, so without a marker the file would reopen at the newest entry and
+ * the switch would be forgotten. Marking appends an invisible entry as a child
+ * of the chosen branch tip — the same mechanism pi itself uses for any other
+ * custom entry — which makes the file's last entry belong to that branch.
+ *
+ * The entry never enters model context: `custom` entries are host state.
+ */
+export const SESSION_LEAF_CUSTOM_TYPE = 'piwork.session-leaf';
+
 export type SessionStatus = 'active' | 'archived' | 'deleted';
 
 export interface Session {

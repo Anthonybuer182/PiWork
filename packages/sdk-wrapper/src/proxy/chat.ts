@@ -77,6 +77,10 @@ export function createProxyChatService(transport: Transport): ChatService {
       return transport.request('chat.navigateTree', { sessionId, entryId, options }) as Promise<NavigateTreeResult>;
     },
 
+    async switchBranch(sessionId: string, entryId: string) {
+      return transport.request('chat.switchBranch', { sessionId, entryId }) as ReturnType<ChatService['switchBranch']>;
+    },
+
     async compact(sessionId: string, customInstructions?: string) {
       return transport.request('chat.compact', { sessionId, customInstructions }) as Promise<CompactResult>;
     },

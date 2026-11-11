@@ -109,12 +109,22 @@ interface ComposerState {
    * request card instead of a typed user message.
    */
   triggerPluginMessage: PluginMessageData | null;
-  /** Editing mode: the raw entry ID being edited */
-  editingEntryId: string | null;
   /** Editing mode: the UI message ID being edited (for reference) */
   editingMessageId: string | null;
   /** Editing mode: current text content of the editing textarea */
   editingContent: string;
+  /**
+   * Where the next triggered send goes in the session tree.
+   *
+   * A conversation is a tree, and both "edit this question" and "retry this
+   * answer" mean the same thing mechanically: send the next turn as a sibling
+   * of an earlier one instead of after the current leaf. `replay` says the
+   * prompt is that earlier turn's own stored text rather than the content
+   * being sent, so the UI never has to round-trip the raw prompt.
+   */
+  pendingBranch: { entryId: string; replay: boolean } | null;
+  /** Attachments carried by the next triggered send (a replayed turn's images). */
+  triggerAttachments: Attachment[];
 
   /** Whether to trigger a smooth scroll to bottom in Virtuoso (incremented per request) */
   scrollToBottomTrigger: number;
@@ -169,12 +179,18 @@ interface ComposerState {
   setMessageTiming: (timing: MessageTiming | null) => void;
   setToolTiming: (timing: ToolTiming) => void;
   setStreamError: (error: string | null) => void;
-  setTriggerSend: (content: string, pluginMessage?: PluginMessageData) => void;
+  setTriggerSend: (
+    content: string,
+    pluginMessage?: PluginMessageData,
+    options?: { silent?: boolean; attachments?: Attachment[] },
+  ) => void;
   /** Set (or clear, with null) the plugin message for the next triggered send. */
   setTriggerPluginMessage: (message: PluginMessageData | null) => void;
+  /** Choose where the next triggered send branches from (null to send at the leaf). */
+  setPendingBranch: (branch: { entryId: string; replay: boolean } | null) => void;
   /** Signal the chat timeline to scroll to bottom (e.g. after inserting a slash command message) */
   triggerScrollToBottom: () => void;
-  /** Enter edit mode: track entry and message IDs for navigateTree on send */
+  /** Enter edit mode: remembers the entry the next send branches from */
   setEditingMessage: (entryId: string, messageId: string, initialContent: string) => void;
   /** Set editing content (e.g. as user types in the textarea) */
   setEditingContent: (content: string) => void;
@@ -206,8 +222,9 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
   triggerSend: 0,
   triggerContent: '',
   triggerPluginMessage: null,
+  triggerAttachments: [],
   scrollToBottomTrigger: 0,
-  editingEntryId: null,
+  pendingBranch: null,
   editingMessageId: null,
   editingContent: '',
   steeringQueue: [],
@@ -373,16 +390,17 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
     if (id) get().updateSessionStream(id, { streamError });
     else set({ streamError });
   },
-  setTriggerSend: (content, pluginMessage) =>
+  setTriggerSend: (content, pluginMessage, options) =>
     set((s) => {
       const triggered = {
         triggerContent: content,
         triggerPluginMessage: pluginMessage ?? null,
+        triggerAttachments: options?.attachments ?? [],
         triggerSend: s.triggerSend + 1,
       };
-      // A plugin request is not a draft: the instruction never flashes in the
-      // user's input box, and it never becomes their saved draft.
-      if (pluginMessage) return triggered;
+      // A plugin request or a replayed turn is not a draft: the text never
+      // flashes in the user's input box, and it never becomes their draft.
+      if (pluginMessage || options?.silent) return triggered;
       return {
         ...triggered,
         value: content,
@@ -392,12 +410,17 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
       };
     }),
   setTriggerPluginMessage: (triggerPluginMessage) => set({ triggerPluginMessage }),
+  setPendingBranch: (pendingBranch) => set({ pendingBranch }),
   triggerScrollToBottom: () => set((s) => ({ scrollToBottomTrigger: s.scrollToBottomTrigger + 1 })),
   setEditingMessage: (entryId, messageId, initialContent) =>
-    set({ editingEntryId: entryId, editingMessageId: messageId, editingContent: initialContent }),
+    set({
+      editingMessageId: messageId,
+      editingContent: initialContent,
+      pendingBranch: { entryId, replay: false },
+    }),
   setEditingContent: (content) => set({ editingContent: content }),
   clearEditingMessage: () =>
-    set({ editingEntryId: null, editingMessageId: null, editingContent: '' }),
+    set({ pendingBranch: null, editingMessageId: null, editingContent: '' }),
   setQueues: (steering, followUp) => {
     const id = get().activeStreamSessionId;
     if (id) get().updateSessionStream(id, { steering, followUp });
@@ -432,7 +455,8 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
       triggerSend: 0,
       triggerContent: '',
       triggerPluginMessage: null,
-      editingEntryId: null,
+      triggerAttachments: [],
+      pendingBranch: null,
       editingMessageId: null,
       editingContent: '',
       steeringQueue: [],

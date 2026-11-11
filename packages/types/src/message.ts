@@ -83,6 +83,26 @@ export interface FileBlock {
   workspacePath?: string;
 }
 
+/**
+ * Where a message sits among the versions of the same turn.
+ *
+ * A conversation is a tree: editing a question — or retrying its answer —
+ * appends a new turn next to the old one instead of rewriting it. The
+ * timeline shows one path through that tree, and every user message on that
+ * path that has siblings carries the information needed to switch versions.
+ */
+export interface MessageBranch {
+  /** 0-based position of this version among its siblings. */
+  index: number;
+  /** Number of sibling versions. */
+  count: number;
+  /**
+   * Entry id of every sibling, in order. `targets[index]` is this message's
+   * own entry; the others are the versions the user can switch to.
+   */
+  targets: string[];
+}
+
 export interface Message {
   id: string;
   sessionId: string;
@@ -95,6 +115,18 @@ export interface Message {
   metadata?: Record<string, unknown>;
   /** Raw entry ID from SessionManager, used for tree navigation (branch/edit) */
   entryId?: string;
+  /**
+   * Raw entry ID of the LAST SDK entry folded into this message.
+   *
+   * One model turn is persisted as several entries — an assistant entry per
+   * model call plus a tool result per call — and the timeline shows them as
+   * one message. `entryId` points at the first of them, so anything that has
+   * to cut the conversation "through this message" (creating a branch from a
+   * reply) must use this one instead, or it would sever the tool loop.
+   */
+  lastEntryId?: string;
+  /** Present when this turn has sibling versions (see MessageBranch). */
+  branch?: MessageBranch;
 }
 
 export interface UserMessage extends Message {

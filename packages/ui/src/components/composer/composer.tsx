@@ -43,6 +43,13 @@ interface SendVariables {
    * message. The agent still sees `content`.
    */
   pluginMessage?: PluginMessageData;
+  /**
+   * Send this turn as a sibling of an earlier one instead of after the current
+   * leaf (editing a question, or replaying the turn at `entryId`). The branch
+   * point and the replayed prompt are resolved in main.
+   */
+  branchFrom?: string;
+  replayTurn?: { entryId: string };
 }
 
 export function Composer() {
@@ -380,19 +387,28 @@ export function Composer() {
       const state = useComposerStore.getState();
       const content = state.triggerContent;
       const pluginMessage = state.triggerPluginMessage;
-      if (content.trim()) {
+      // A branch point is consumed by this send even if the send fails: the
+      // tree move happens inside the send, so a retry afterward continues on
+      // whichever branch the last attempt actually opened.
+      const pending = state.pendingBranch;
+      // An edit may legitimately be attachment-only (the user rewrote the text
+      // away but kept the file), and a replayed turn may carry no text at all.
+      if (content.trim() || pending?.replay || state.triggerAttachments.length > 0) {
         sendMutation.mutate({
           content,
           sessionId: activeSessionId,
-          attachments: [],
+          attachments: state.triggerAttachments,
           skills: [],
           ...(pluginMessage ? { pluginMessage } : {}),
+          ...(pending?.replay ? { replayTurn: { entryId: pending.entryId } } : {}),
+          ...(pending && !pending.replay ? { branchFrom: pending.entryId } : {}),
         });
+        state.setPendingBranch(null);
         if (pluginMessage) {
           // The plugin never touched the input: leave whatever the user was
           // drafting exactly where it is; just consume the card.
           state.setTriggerPluginMessage(null);
-        } else {
+        } else if (!pending?.replay) {
           setValue('');
         }
       }
@@ -526,23 +542,9 @@ export function Composer() {
       });
 
     },
-    mutationFn: async ({ content, sessionId, attachments, skills, pluginMessage }: SendVariables) => {
+    mutationFn: async ({ content, sessionId, attachments, skills, pluginMessage, branchFrom, replayTurn }: SendVariables) => {
       if (!pluginMessage) lastUserMessageRef.current = content;
       useComposerStore.getState().beginSessionStream(sessionId);
-
-      // If editing a message, navigate the tree first to branch from the edited entry
-      const editEntryId = useComposerStore.getState().editingEntryId;
-      if (editEntryId) {
-        try {
-          await sdk.chat.navigateTree(sessionId, editEntryId);
-        } catch (err) {
-          useComposerStore.getState().endSessionStream(sessionId, {
-            clear: true,
-            error: err instanceof Error ? err.message : t('无法在文件树中定位'),
-          });
-          throw err;
-        }
-      }
 
       // Build prompt text: decode and include text-based file contents,
       // append references for binary files
@@ -660,6 +662,8 @@ export function Composer() {
           // which one applies. Per-message references ride in the content.
           skills: enabledSkillIds,
           ...(pluginMessage ? { pluginMessage } : {}),
+          ...(branchFrom ? { branchFrom } : {}),
+          ...(replayTurn ? { replayTurn } : {}),
         },
         (chunk) => {
           if (chunk.type === 'message_start') {
@@ -686,6 +690,23 @@ export function Composer() {
               steering: chunk.queueState.steering,
               followUp: chunk.queueState.followUp,
             });
+          } else if (chunk.type === 'turn_start' && chunk.entryId) {
+            // The optimistic bubble becomes the real turn: with an entry id,
+            // editing and retrying it work immediately instead of only after
+            // the conversation is re-read from disk.
+            const entryId = chunk.entryId;
+            queryClient.setQueryData(['session', sessionId], (old: any) => {
+              if (!old) return old;
+              const messages = [...(old.messages || [])];
+              for (let i = messages.length - 1; i >= 0; i--) {
+                const id = messages[i]?.id;
+                if (typeof id === 'string' && id.startsWith('optimistic-')) {
+                  messages[i] = { ...messages[i], entryId };
+                  return { ...old, messages };
+                }
+              }
+              return old;
+            });
           } else if (chunk.type === 'error') {
             useComposerStore.getState().updateSessionStream(sessionId, {
               streamError: chunk.error || t('发生了未知错误'),
@@ -702,7 +723,7 @@ export function Composer() {
 
       // Editing state belongs to the visible composer; a background send must
       // not clear a draft the user is editing in another conversation.
-      if (state.editingEntryId && sessionId === useUIStore.getState().activeSessionId) {
+      if (state.editingMessageId && sessionId === useUIStore.getState().activeSessionId) {
         clearEditingMessage();
       }
 
@@ -749,6 +770,15 @@ export function Composer() {
           messages: [...(old.messages || []), assistantMsg],
         };
       });
+
+      // A branched send changed the shape of the conversation: the turns after
+      // the branch point left the active path, and the new turn carries entry
+      // ids and versions the optimistic bubble cannot know. Re-read once, now
+      // that the run is over, so the version control is real rather than
+      // appearing only after the next reload.
+      if (variables.branchFrom || variables.replayTurn) {
+        void queryClient.invalidateQueries({ queryKey: ['session', sessionId] });
+      }
 
       // A run that finished while you were looking elsewhere should announce
       // itself; the session list's spinner disappears at the same moment.
