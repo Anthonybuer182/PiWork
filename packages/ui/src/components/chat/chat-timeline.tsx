@@ -140,15 +140,18 @@ function addDateSeparators(
 
 /**
  * Create a synthetic streaming message from live blocks and usage info.
- * Uses a stable timestamp captured at stream start.
+ * Uses a stable timestamp captured at stream start, and the run's id — the
+ * transcript message it turns into on completion carries the same id, so the
+ * reader swaps content in place instead of unmounting the reply.
  */
 function makeStreamingMessage(
   blocks: ContentBlock[],
   usage: TokenUsage | undefined,
   createdAt: string,
+  id: string,
 ): Message {
   return {
-    id: '__streaming__',
+    id,
     sessionId: '',
     role: 'assistant',
     status: 'streaming',
@@ -267,6 +270,7 @@ export function ChatTimeline() {
   const activeSessionId = useUIStore((s) => s.activeSessionId);
   const mutedPlugins = usePluginStore((s) => s.mutedPlugins);
   const isStreaming = useComposerStore((s) => s.isStreaming);
+  const streamingRunId = useComposerStore((s) => s.streamingRunId);
   const streamingBlocks = useComposerStore((s) => s.streamingBlocks);
   const streamingUsage = useComposerStore((s) => s.streamingUsage);
   const contextUsage = useComposerStore((s) => s.contextUsage);
@@ -358,22 +362,35 @@ export function ChatTimeline() {
     return () => api.removeListener('pi:plugin:message', onPluginMessage);
   }, [queryClient]);
 
-  // Stable timestamp: capture once at the start of streaming
+  // Stable timestamp: captured once at the start of streaming and kept until
+  // the live reply is gone, so the message does not change identity mid-swap.
   if (isStreaming && !streamingStartRef.current) {
     streamingStartRef.current = new Date().toISOString();
   }
-  if (!isStreaming) {
+  if (!isStreaming && streamingBlocks.length === 0) {
     streamingStartRef.current = '';
   }
 
+  // The live reply becomes a transcript message under the same id when the run
+  // ends (composer `onSuccess`). Until that write is visible the live copy
+  // stays on screen: React Query notifies observers a tick after the store
+  // update, so dropping the live copy first left one paint with the answer
+  // gone — the whole transcript flinched at the end of every run.
+  const liveId = streamingRunId || '__streaming__';
+  const liveFinalized =
+    streamingRunId !== '' && storedMessages.some((message) => message.id === streamingRunId);
+
   // During streaming with live blocks, append them as a synthetic message.
   const messages = useMemo(() => {
-    if (isStreaming && streamingBlocks.length > 0) {
+    if (streamingBlocks.length > 0 && !liveFinalized) {
       const createdAt = streamingStartRef.current || new Date().toISOString();
-      return [...storedMessages, makeStreamingMessage(streamingBlocks, streamingUsage ?? undefined, createdAt)];
+      return [
+        ...storedMessages,
+        makeStreamingMessage(streamingBlocks, streamingUsage ?? undefined, createdAt, liveId),
+      ];
     }
     return storedMessages;
-  }, [storedMessages, isStreaming, streamingBlocks]);
+  }, [storedMessages, streamingBlocks, streamingUsage, liveId, liveFinalized]);
 
   // Tool-call blocks that currently host an inline approval card. ONLY the
   // live streaming blocks qualify: the inline card renders inside a running

@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import type { ThinkingBlock as ThinkingBlockType } from '@pi/types';
 import { useI18n } from '@/i18n';
-import './chat-animations.css';
 
 interface ThinkingBlockProps {
   block: ThinkingBlockType;
@@ -64,11 +63,7 @@ export function ThinkingBlock({ block, isStreaming }: ThinkingBlockProps) {
       : null;
 
   return (
-    <div className={cn(
-      'my-1 rounded-md border overflow-hidden text-xs',
-      !isStreaming && 'animate-streaming-in',
-      isStreaming ? 'border-border' : 'border-border',
-    )}>
+    <div className="my-1 rounded-md border overflow-hidden text-xs border-border">
       <button
         className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-muted-foreground hover:bg-muted/50 text-left"
         onClick={handleToggle}

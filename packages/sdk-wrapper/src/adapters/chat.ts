@@ -1616,7 +1616,7 @@ export function createRealChatService(
             if (msg && msg.content) {
               const content = msg.content;
               if (Array.isArray(content)) {
-                for (const block of content) {
+                for (const [blockIndex, block] of content.entries()) {
                   if (block.type === 'text' && block.text) {
                     // block.text carries the full accumulated text, not a delta.
                     outputText = block.text;
@@ -1653,11 +1653,14 @@ export function createRealChatService(
                       },
                     });
                   } else if (block.type === 'image') {
-                    // Image blocks in streaming — send as block for display
+                    // Image blocks in streaming — send as block for display.
+                    // Scoped to the turn and the block's position: the update
+                    // re-sends the whole message, and a timestamp id appended
+                    // a duplicate copy of the image on every update.
                     safeChunk({
                       type: 'block',
                       block: {
-                        id: `b-img-${Date.now()}`,
+                        id: `b-img-${messageStartTime}-${blockIndex}`,
                         type: 'image',
                         content: block.data || '',
                         mimeType: block.mimeType || 'image/png',
@@ -1696,7 +1699,10 @@ export function createRealChatService(
                     safeChunk({
                       type: 'block',
                       block: {
-                        id: `b-tc-${Date.now()}`,
+                        // Stable per call: the same card is re-sent as its
+                        // arguments stream in, and a fresh id each time made
+                        // the reader remount it (visible flicker).
+                        id: `b-tc-${block.toolCallId}`,
                         type: 'tool_call',
                         content: block.name || 'tool',
                         toolCallId: block.toolCallId,
@@ -1720,7 +1726,9 @@ export function createRealChatService(
             safeChunk({
               type: 'block',
               block: {
-                id: `b-te-${Date.now()}`,
+                // Same id as the message_update emission: this replaces that
+                // block in place rather than mounting a second card.
+                id: `b-tc-${event.toolCallId}`,
                 type: 'tool_call',
                 content: event.toolName || 'tool execution',
                 toolCallId: event.toolCallId,
@@ -1759,7 +1767,7 @@ export function createRealChatService(
             safeChunk({
               type: 'block',
               block: {
-                id: `b-ter-${Date.now()}`,
+                id: `b-ter-${event.toolCallId}`,
                 type: 'tool_result',
                 content: event.isError ? `Error: ${resultText}` : resultText || 'Done',
                 toolCallId: event.toolCallId,
@@ -1772,12 +1780,14 @@ export function createRealChatService(
 
             // Emit image blocks from tool result content
             if (rawResult && Array.isArray(rawResult.content)) {
-              for (const c of rawResult.content as any[]) {
+              for (const [imageIndex, c] of (rawResult.content as any[]).entries()) {
                 if (c.type === 'image') {
                   safeChunk({
                     type: 'block',
                     block: {
-                      id: `b-ter-img-${Date.now()}`,
+                      // Two images returned together are two blocks; a shared
+                      // timestamp collapsed them into one.
+                      id: `b-ter-img-${event.toolCallId}-${imageIndex}`,
                       type: 'image',
                       content: c.data || '',
                       mimeType: c.mimeType || 'image/png',

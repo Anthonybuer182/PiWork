@@ -12,6 +12,16 @@ import type { Attachment, ContentBlock, TokenUsage, ContextUsageInfo, SessionSta
  */
 export interface SessionStream {
   isStreaming: boolean;
+  /**
+   * Identity of this run's reply.
+   *
+   * The live reply and the transcript message it becomes share it, so the
+   * reader replaces one with the other instead of removing a message and
+   * appending a different one. Those are two different cache updates that
+   * land a tick apart (`setQueryData` notifies observers on a timeout), and
+   * the gap in between used to repaint the whole transcript.
+   */
+  runId: string;
   blocks: ContentBlock[];
   usage: TokenUsage | null;
   contextUsage: ContextUsageInfo | null;
@@ -26,6 +36,7 @@ export interface SessionStream {
 function emptyStream(): SessionStream {
   return {
     isStreaming: false,
+    runId: '',
     blocks: [],
     usage: null,
     contextUsage: null,
@@ -41,6 +52,7 @@ function emptyStream(): SessionStream {
 type VisibleStream = Pick<
   ComposerState,
   | 'isStreaming'
+  | 'streamingRunId'
   | 'streamingBlocks'
   | 'streamingUsage'
   | 'contextUsage'
@@ -55,6 +67,7 @@ type VisibleStream = Pick<
 function visibleOf(stream: SessionStream): VisibleStream {
   return {
     isStreaming: stream.isStreaming,
+    streamingRunId: stream.runId,
     streamingBlocks: stream.blocks,
     streamingUsage: stream.usage,
     contextUsage: stream.contextUsage,
@@ -70,6 +83,7 @@ function visibleOf(stream: SessionStream): VisibleStream {
 function snapshotVisible(state: ComposerState): SessionStream {
   return {
     isStreaming: state.isStreaming,
+    runId: state.streamingRunId,
     blocks: state.streamingBlocks,
     usage: state.streamingUsage,
     contextUsage: state.contextUsage,
@@ -86,6 +100,8 @@ interface ComposerState {
   value: string;
   cursorPosition: number;
   isStreaming: boolean;
+  /** Identity of the visible conversation's live reply (see `SessionStream.runId`). */
+  streamingRunId: string;
   isDragging: boolean;
   showSlashMenu: boolean;
   showMentionMenu: boolean;
@@ -205,6 +221,7 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
   value: '',
   cursorPosition: 0,
   isStreaming: false,
+  streamingRunId: '',
   isDragging: false,
   showSlashMenu: false,
   showMentionMenu: false,
@@ -276,7 +293,11 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
     }),
 
   beginSessionStream: (sessionId) => {
-    get().updateSessionStream(sessionId, { ...emptyStream(), isStreaming: true });
+    get().updateSessionStream(sessionId, {
+      ...emptyStream(),
+      isStreaming: true,
+      runId: `run-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    });
   },
 
   endSessionStream: (sessionId, options = {}) => {
@@ -438,6 +459,7 @@ export const useComposerStore = create<ComposerState>((set, get) => ({
       value: '',
       cursorPosition: 0,
       isStreaming: false,
+      streamingRunId: '',
       isDragging: false,
       showSlashMenu: false,
       showMentionMenu: false,

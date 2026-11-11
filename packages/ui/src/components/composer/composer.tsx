@@ -742,16 +742,22 @@ export function Composer() {
         .join('');
 
       const streamingUsage = stream?.usage ?? null;
+      // The run's identity, shared with the live reply on screen: promoting
+      // under the same id turns "remove the streaming bubble, add the stored
+      // one" — two paints — into a single in-place replacement.
+      const runId = stream?.runId || `msg-${sessionId}-${Date.now()}`;
 
-      // Clear this conversation's run BEFORE writing to cache: the slot it
-      // owned is gone, and any other conversation keeps its own state.
-      state.endSessionStream(sessionId, { clear: true });
+      // End the run without dropping its blocks yet: the reader keeps the live
+      // reply until the promoted message below is actually in the cache (React
+      // Query notifies observers one tick later). Clearing first made the answer
+      // vanish for a paint — the whole transcript flinched at every run end.
+      state.endSessionStream(sessionId, { clear: false });
 
       // Now promote the captured streaming data into the query cache as a
       // single assistant message so ChatTimeline transitions without a ghost.
       const now = new Date().toISOString();
       const assistantMsg = {
-        id: `msg-${sessionId}-${Date.now()}`,
+        id: runId,
         sessionId,
         role: 'assistant' as const,
         status: 'complete' as const,
@@ -770,6 +776,17 @@ export function Composer() {
           messages: [...(old.messages || []), assistantMsg],
         };
       });
+
+      // Release the live blocks now that the promoted message is in the cache.
+      // This timer is queued after React Query scheduled its observer notify,
+      // so it can never clear the live reply before the cache can replace it.
+      setTimeout(() => {
+        const store = useComposerStore.getState();
+        const slot = store.streams[sessionId];
+        // A new run may have started in the meantime — never clear its blocks.
+        if (!slot || slot.isStreaming || slot.runId !== runId) return;
+        store.endSessionStream(sessionId, { clear: true });
+      }, 0);
 
       // A branched send changed the shape of the conversation: the turns after
       // the branch point left the active path, and the new turn carries entry
@@ -1399,7 +1416,7 @@ export function Composer() {
   return (
     <div
       className={cn(
-        'rounded-3xl border border-border bg-card shadow-xs mx-4 mb-4 overflow-visible transition-colors',
+        'rounded-3xl border border-border bg-card shadow-xs mx-4 mb-4 overflow-visible transition-colors @container',
         // 完全访问 states itself on its own control (red icon + label in
         // PermissionModeButton). Ringing the whole composer reads as "this
         // input is wrong" and paints every surrounding element red, so the
@@ -1513,8 +1530,17 @@ export function Composer() {
       {/* Bottom tools row. Left zone: input action · model/effort ·
           permission mode. Right zone: voice input and the primary action,
           separated by a wider gap so the mic does not crowd Send. Every
-          control is 28px tall; the model name is the only thing that shrinks. */}
-      <div className="flex min-w-0 items-center gap-1 px-2.5 py-2">
+          control is 28px tall; the model name is the only thing that shrinks.
+
+          The composer card is the size container. A wide preview panel
+          squeezes the centre column by hundreds of pixels while the WINDOW
+          keeps its width, so viewport breakpoints claim room this composer
+          does not have: the row used to spill past the card and shove the mic
+          and Send out of the column. The controls below therefore adapt to
+          the CARD's width — labels and chevrons go first, icons and the
+          primary action stay. Below ~320px the row stops pretending it can
+          hold one line and wraps instead of overflowing. */}
+      <div className="flex min-w-0 items-center gap-1 px-2.5 py-2 @max-[320px]:flex-wrap">
         <FileUploadButton
           disabled={isStreaming}
           onFilesSelected={handleFilesSelected}
@@ -1529,7 +1555,7 @@ export function Composer() {
           onChange={(level) => updateConfigMut.mutate({ defaultThinkLevel: level })}
         />
         <PermissionModeButton />
-        <div className="ml-auto flex shrink-0 items-center gap-3">
+        <div className="ml-auto flex shrink-0 items-center gap-3 @max-[400px]:gap-1.5">
           <VoiceInputButton
             disabled={!activeSessionId}
             configured={sttConfigured}
@@ -1549,8 +1575,10 @@ export function Composer() {
               aria-label={t('引导（Ctrl+Enter）')}
             >
               <CornerDownRight className="h-3.5 w-3.5" />
-              {t('引导')}
-              <kbd className="ml-0.5 text-[10px] opacity-60 hidden sm:inline">⌃↵</kbd>
+              {/* Label and shortcut are the first things to go when the row
+                  is squeezed; the aria-label above stays either way. */}
+              <span className="@max-[440px]:hidden">{t('引导')}</span>
+              <kbd className="ml-0.5 hidden text-[10px] opacity-60 @[440px]:inline">⌃↵</kbd>
             </Button>
             <Button
               size="icon"

@@ -49,15 +49,20 @@ export function PermissionModeButton() {
               ? 'h-7 gap-1.5 px-2 text-xs text-red-600 dark:text-red-400 hover:text-red-600 dark:hover:text-red-400'
               : 'h-7 gap-1.5 px-2 text-xs text-muted-foreground'
           }
-          title={t('权限模式（全局，重启后恢复默认）')}
+          title={`${t(MODE_LABELS[mode].title)} · ${t('权限模式（全局，重启后恢复默认）')}`}
         >
           {isFull ? (
             <ShieldAlert className="h-3.5 w-3.5" />
           ) : (
             <Shield className="h-3.5 w-3.5" />
           )}
-          {isFull && t(MODE_LABELS[mode].title)}
-          <ChevronDown className="h-3 w-3 opacity-60" />
+          {/* The label is a luxury of a wide composer: when the row is
+              squeezed (a preview panel is open) the red shield alone still
+              carries the warning, and keeps the model picker readable. */}
+          {isFull && (
+            <span className="@max-[420px]:hidden">{t(MODE_LABELS[mode].title)}</span>
+          )}
+          <ChevronDown className="h-3 w-3 opacity-60 @max-[360px]:hidden" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-56">
