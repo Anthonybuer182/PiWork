@@ -15,7 +15,7 @@
 | Windows（x64） | `.exe` |
 | Linux（x64） | `.AppImage` 或 `.deb` |
 
-> 产物目前未做代码签名：macOS 首次打开需右键 →「打开」，Windows 会出现 SmartScreen 提示，选「更多信息」→「仍要运行」。
+> 产物暂未做 Developer ID 签名与公证（macOS 安装包内已做 ad-hoc 签名）。macOS 首次打开若提示「无法验证开发者」，打开「系统设置 → 隐私与安全性」，点「仍要打开」；若提示「已损坏，无法打开」（浏览器下载的旧版本可能这样报），先在终端执行 `xattr -dr com.apple.quarantine /Applications/PiWork.app` 再打开。Windows 会出现 SmartScreen 提示，选「更多信息」→「仍要运行」。
 
 > macOS 端要求 macOS 13（Ventura）及以上。
 
@@ -195,4 +195,4 @@ push tag 后 `.github/workflows/release.yml` 依次执行：
 2. **build** —— macOS（arm64 + x64）、Windows x64、Linux x64 各出一份安装包；
 3. **publish** —— 创建 GitHub Release，把四个平台的产物挂到 Assets，正文自动生成。
 
-tag 里带 `-`（如 `v0.2.0-beta.1`）会自动标成 prerelease；产物暂未做代码签名。
+tag 里带 `-`（如 `v0.2.0-beta.1`）会自动标成 prerelease；产物暂未做 Developer ID 签名与公证，macOS 包只在打包后做了 ad-hoc 签名（`apps/desktop/scripts/adhoc-sign-mac.cjs`），所以下载后首次打开仍需在「隐私与安全性」里放行一次。拿到 Apple 开发者证书后，删除 `electron-builder.yml` 里的 `mac.identity: null` 并启用 notarization 即可去掉这一步。

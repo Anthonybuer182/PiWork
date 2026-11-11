@@ -86,12 +86,15 @@ mac:
   # Electron 44 dropped macOS 12. Pin the floor in the bundle so a download
   # does not land on a machine that cannot launch it (Electron 45 needs 13+).
   minimumSystemVersion: "13.0"
-  # Ship unsigned. There is no Developer ID in the pipeline, and without this
-  # electron-builder auto-discovers whatever identity happens to sit in the
-  # build machine's keychain (an Apple *Development* one here) and then fails
-  # on `codesign --timestamp` whenever Apple's timestamp service is
-  # unreachable. Delete this line — and fill in the hardenedRuntime /
-  # entitlements block below — once a Developer ID identity exists.
+  # No Developer ID in the pipeline, and without this electron-builder
+  # auto-discovers whatever identity happens to sit in the build machine's
+  # keychain (an Apple *Development* one here) and then fails on
+  # `codesign --timestamp` whenever Apple's timestamp service is unreachable.
+  # The bundle is still ad-hoc signed in afterPack (adhoc-sign-mac.cjs) so a
+  # quarantined download does not show up as "已损坏" — it gets the normal
+  # "无法验证开发者" prompt instead. Delete this line — and fill in the
+  # hardenedRuntime / entitlements block below — once a Developer ID identity
+  # exists.
   identity: null
   extendInfo:
     # Required by macOS before the app may open the microphone (语音转写).

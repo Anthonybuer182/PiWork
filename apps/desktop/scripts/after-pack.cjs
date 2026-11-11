@@ -1,11 +1,16 @@
 #!/usr/bin/env node
 /**
  * afterPack: the last chance to shape the app directory before the installer
- * is built. Two jobs, both of them "fix what the packager got wrong":
+ * is built. Three jobs, all of them "fix what the packager got wrong":
  *
  * 1. Keep only the target platform's sherpa-onnx addon — see prune-sherpa.cjs.
  *
- * 2. **Windows only:** copy the bundled plugin market into
+ * 2. **macOS only:** ad-hoc sign the bundle — see adhoc-sign-mac.cjs. Without
+ *    a Developer ID the app ships unsigned, and a downloaded (quarantined)
+ *    copy is reported as "已损坏" by Gatekeeper instead of the standard
+ *    "无法验证开发者" prompt the user can bypass.
+ *
+ * 3. **Windows only:** copy the bundled plugin market into
  *    `<app>/resources/market/` ourselves.
  *
  * Why (2) exists instead of `extraResources`: electron-builder's copy of the
@@ -23,6 +28,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const pruneSherpa = require('./prune-sherpa.cjs');
+const adhocSignMac = require('./adhoc-sign-mac.cjs');
 
 const ATTEMPTS = 5;
 /** ms between attempts; grows linearly so a slow scanner has time to let go. */
@@ -64,6 +70,7 @@ async function copyDir(from, to) {
 
 module.exports = async function afterPack(context) {
   await pruneSherpa(context);
+  adhocSignMac(context);
 
   if (process.platform !== 'win32') return;
 
