@@ -1403,6 +1403,44 @@ async function onUiRequest(
       })) as { path?: string | null } | undefined;
       return { path: saved?.path ?? null };
     }
+    case 'file.pickDirectory': {
+      // Folder picker for exports: the host dialog answers it, same
+      // "the user picked it, so it is authorized" contract as the file pickers.
+      const picked = (await ctx.call('dialog.openFile', {
+        ...(params.title ? { title: String(params.title) } : {}),
+        directory: true,
+      })) as { path?: string | null } | undefined;
+      return { path: picked?.path ?? null };
+    }
+    case 'pdf.writeFromImages': {
+      // Export → PDF: one rasterized page per PDF page. Upstream prints a hidden
+      // window to PDF, which keeps text vector; a panel has no printToPDF, so the
+      // renderer rasterizes at 2× and this assembles the pages.
+      const path = String(params.path ?? '');
+      const pages = Array.isArray(params.pages) ? (params.pages as string[]) : [];
+      const widthPx = Number(params.widthPx) || 0;
+      const heightPx = Number(params.heightPx) || 0;
+      if (!path) throw new Error('pdf.writeFromImages: path is required');
+      if (pages.length === 0 || !(widthPx > 0) || !(heightPx > 0)) {
+        throw new Error('pdf.writeFromImages: pages and the page size are required');
+      }
+      const { PDFDocument } = await import('pdf-lib');
+      const doc = await PDFDocument.create();
+      // CSS px → pt at 96 dpi, so the PDF page box keeps the slide's ratio.
+      const w = (widthPx * 72) / 96;
+      const h = (heightPx * 72) / 96;
+      for (const png of pages) {
+        const img = await doc.embedPng(Buffer.from(png, 'base64'));
+        const page = doc.addPage([w, h]);
+        page.drawImage(img, { x: 0, y: 0, width: w, height: h });
+      }
+      const bytes = await doc.save();
+      await ctx.call('filesystem.write', {
+        path,
+        contentB64: Buffer.from(bytes).toString('base64'),
+      });
+      return { ok: true, path, pages: pages.length };
+    }
     case 'file.write': {
       const path = String(params.path ?? '');
       if (!path) throw new Error('file.write: path is required');

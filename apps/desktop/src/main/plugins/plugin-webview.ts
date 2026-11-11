@@ -625,6 +625,26 @@ export class PluginWebViews {
     // External http(s) links open in the user's browser instead; navigations
     // within the plugin's own origin are its own business (multi-page UIs).
     view.webContents.setWindowOpenHandler(({ url }) => {
+      // A child window on the plugin's OWN origin is allowed: that is how a
+      // plugin opens a second surface it owns (the slides presenter view's
+      // audience window). It is still fenced in — same origin, same injection,
+      // same session — and anything else is denied as before.
+      try {
+        const target = new URL(url);
+        if (target.protocol === 'pi-plugin:' && target.host === pluginId) {
+          return {
+            action: 'allow',
+            overrideBrowserWindowOptions: {
+              width: 1280,
+              height: 720,
+              backgroundColor: '#000000',
+              autoHideMenuBar: true,
+            },
+          };
+        }
+      } catch {
+        /* unparseable → fall through to deny */
+      }
       if (/^https?:/i.test(url)) {
         void shell.openExternal(url).catch(() => {});
       }

@@ -708,8 +708,16 @@ export class CapabilityHub {
     // `unknown ui request` — so "open" and "save as" silently did nothing.
     this.capabilities.set('dialog.openFile', {
       handler: async ({ params }) => {
+        // `directory: true` is the folder picker. It is the same authorization
+        // shape as the file picker — the user answers a native dialog — and
+        // plugins need it for exports ("choose where to put these pages").
         const options: OpenDialogOptions = {
-          properties: params.multi === true ? ['openFile', 'multiSelections'] : ['openFile'],
+          properties:
+            params.directory === true
+              ? ['openDirectory', 'createDirectory']
+              : params.multi === true
+                ? ['openFile', 'multiSelections']
+                : ['openFile'],
           ...(typeof params.title === 'string' ? { title: params.title.slice(0, 120) } : {}),
           ...(sanitizeFilters(params.filters) ? { filters: sanitizeFilters(params.filters) } : {}),
         };

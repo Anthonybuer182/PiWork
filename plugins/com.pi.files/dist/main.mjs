@@ -135488,6 +135488,38 @@ async function onUiRequest(method, params = {}, panelId, meta) {
       });
       return { path: saved?.path ?? null };
     }
+    case "file.pickDirectory": {
+      const picked = await ctx.call("dialog.openFile", {
+        ...params.title ? { title: String(params.title) } : {},
+        directory: true
+      });
+      return { path: picked?.path ?? null };
+    }
+    case "pdf.writeFromImages": {
+      const path = String(params.path ?? "");
+      const pages = Array.isArray(params.pages) ? params.pages : [];
+      const widthPx = Number(params.widthPx) || 0;
+      const heightPx = Number(params.heightPx) || 0;
+      if (!path) throw new Error("pdf.writeFromImages: path is required");
+      if (pages.length === 0 || !(widthPx > 0) || !(heightPx > 0)) {
+        throw new Error("pdf.writeFromImages: pages and the page size are required");
+      }
+      const { PDFDocument: PDFDocument8 } = await Promise.resolve().then(() => __toESM(require_cjs(), 1));
+      const doc = await PDFDocument8.create();
+      const w = widthPx * 72 / 96;
+      const h = heightPx * 72 / 96;
+      for (const png of pages) {
+        const img = await doc.embedPng(Buffer.from(png, "base64"));
+        const page = doc.addPage([w, h]);
+        page.drawImage(img, { x: 0, y: 0, width: w, height: h });
+      }
+      const bytes = await doc.save();
+      await ctx.call("filesystem.write", {
+        path,
+        contentB64: Buffer.from(bytes).toString("base64")
+      });
+      return { ok: true, path, pages: pages.length };
+    }
     case "file.write": {
       const path = String(params.path ?? "");
       if (!path) throw new Error("file.write: path is required");
