@@ -88,10 +88,13 @@ export function UsageBar() {
   }
 
   return (
-    <div className="flex items-center gap-3 px-4 py-1 border-t text-[11px] text-muted-foreground/80 shrink-0">
+    // A size container like the composer's tools row: the stats must not
+    // wrap into two lines when a preview panel narrows the chat column. The
+    // least important numbers step aside instead.
+    <div className="@container flex min-w-0 items-center gap-3 overflow-hidden px-4 py-1 border-t text-[11px] text-muted-foreground/80 shrink-0 @max-[420px]:gap-2">
       {/* Input tokens */}
       <span
-        className="flex items-center gap-0.5"
+        className="flex shrink-0 items-center gap-0.5 whitespace-nowrap"
         title={`Input tokens: ${tokens.input.toLocaleString()}`}
       >
         <ArrowUp className="h-3 w-3" />
@@ -99,7 +102,7 @@ export function UsageBar() {
       </span>
       {/* Output tokens */}
       <span
-        className="flex items-center gap-0.5"
+        className="flex shrink-0 items-center gap-0.5 whitespace-nowrap"
         title={`Output tokens: ${tokens.output.toLocaleString()}`}
       >
         <ArrowDown className="h-3 w-3" />
@@ -108,7 +111,7 @@ export function UsageBar() {
       {/* Cache read */}
       {tokens.cacheRead > 0 && (
         <span
-          className="flex items-center gap-0.5"
+          className="flex shrink-0 items-center gap-0.5 whitespace-nowrap @max-[420px]:hidden"
           title={`Cache read: ${tokens.cacheRead.toLocaleString()}\nCache write: ${tokens.cacheWrite.toLocaleString()}`}
         >
           <RotateCw className="h-3 w-3" />
@@ -118,7 +121,7 @@ export function UsageBar() {
       {/* Cost */}
       {typeof cost === 'number' && (
         <span
-          className="font-mono tabular-nums"
+          className="shrink-0 whitespace-nowrap font-mono tabular-nums"
           title={`Session cost: $${cost.toFixed(6)}`}
         >
           {formatCostUSD(cost)}
@@ -126,18 +129,18 @@ export function UsageBar() {
       )}
       {/* TPS */}
       {messageTiming && (
-        <span className="text-muted-foreground/60">
+        <span className="shrink-0 whitespace-nowrap text-muted-foreground/60 @max-[360px]:hidden">
           {messageTiming.tps} t/s
         </span>
       )}
-      <div className="flex-1" />
+      <div className="min-w-0 flex-1" />
       {/* Context window usage. The SDK reports `percent` on a 0–100 scale
           (getContextUsage), not 0–1 — thresholds, width and label all use it
           directly. */}
       {ctx && ctx.percent != null && (
         <span
           title={`Context: ${ctx.tokens?.toLocaleString() ?? '?'} / ${ctx.contextWindow.toLocaleString()} (${ctx.percent.toFixed(1)}%)`}
-          className="flex items-center gap-1.5"
+          className="flex shrink-0 items-center gap-1.5 whitespace-nowrap"
         >
           <div className="h-1.5 w-20 bg-muted rounded-full overflow-hidden">
             <div

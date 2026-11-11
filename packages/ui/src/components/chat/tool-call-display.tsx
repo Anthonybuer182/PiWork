@@ -22,7 +22,6 @@ import { useI18n } from '@/i18n';
 import { PermissionRequestCard } from './permission-request-card';
 import { AskCard } from './ask-card';
 import { TodoCard } from './todo-card';
-import './chat-animations.css';
 
 interface ToolCallDisplayProps {
   block: ToolCallBlock;
@@ -239,7 +238,6 @@ export function ToolCallDisplay({
   return (
     <div className={cn(
       'my-1 rounded-md border bg-transparent overflow-hidden text-xs',
-      !isStreaming && 'animate-streaming-in',
       awaitingApproval
         ? 'border-amber-400/60 bg-amber-50/40 dark:bg-amber-950/10'
         : awaitingAnswer

@@ -35,6 +35,8 @@ export interface RegisterIpcHandlersOptions {
   pluginDocsProvider?: () => PluginDoc[];
   /** Per-session host hook (e.g. the permission gate) — see RealChatServiceOptions. */
   onSessionCreated?: RealChatServiceOptions['onSessionCreated'];
+  /** Once per settled agent run — see RealChatServiceOptions.onRunSettled. */
+  onRunSettled?: RealChatServiceOptions['onRunSettled'];
   /** Settings → 工具 switches, merged into every session's tool denylist. */
   getGlobalDisabledTools?: RealChatServiceOptions['getGlobalDisabledTools'];
   /** Called after the run is aborted and before the session file is removed. */
@@ -66,6 +68,7 @@ export function registerIpcHandlers(
     customToolsProvider: options?.customToolsProvider,
     pluginDocsProvider: options?.pluginDocsProvider,
     onSessionCreated: options?.onSessionCreated,
+    onRunSettled: options?.onRunSettled,
     getGlobalDisabledTools: options?.getGlobalDisabledTools,
     mcp: options?.mcp,
   });
@@ -160,6 +163,7 @@ const WRITE_CHAT_ACTIONS = new Set([
   'steer',
   'followUp',
   'navigateTree',
+  'switchBranch',
   'compact',
   'stopGeneration',
 ]);
@@ -234,6 +238,19 @@ async function handleSession(action: string, params: unknown): Promise<unknown> 
     }
     case 'updateTitle': return sessionService.updateTitle(p.id as string, p.title as string);
     case 'getTree': return sessionService.getTree(p.id as string);
+    case 'fork': {
+      const sourceId = p.sourceId as string;
+      // The copy reads the source transcript; a run in flight would make the
+      // copy a half-written turn. The chat service owns that state.
+      if (chatService.isSessionBusy?.(sourceId)) {
+        throw new Error('当前对话正在运行，结束后再创建分支');
+      }
+      return sessionService.fork(
+        sourceId,
+        p.throughEntryId as string,
+        p.title as string | undefined,
+      );
+    }
     default: throw new Error(`Unknown session action: ${action}`);
   }
 }
@@ -253,6 +270,8 @@ async function handleChat(action: string, params: unknown): Promise<unknown> {
       return chatService.followUp(p.sessionId as string, p.content as string, p.images as any);
     case 'navigateTree':
       return chatService.navigateTree(p.sessionId as string, p.entryId as string, p.options as any);
+    case 'switchBranch':
+      return chatService.switchBranch(p.sessionId as string, p.entryId as string);
     case 'compact':
       return chatService.compact(p.sessionId as string, p.customInstructions as string | undefined);
     // ── agent context (Settings → 上下文 and host tools) ──

@@ -272,6 +272,12 @@ export type PluginPermission = string;
  *
  * History:
  *
+ * 10 — added the `agent.turnEnd` host event: every backend is told when an
+ *     agent run has settled (completed, aborted or error), with
+ *     `{ sessionId, runId, aborted, outcome }`. Plugins use it to fold the
+ *     many tool calls of one run into one result (e.g. a single completion
+ *     card via `messages.post`). Purely additive; floor stays 3.
+ *
  * 9 — added the `message-action` host→plugin message and the
  *     `messages.update` / `messages.remove` capabilities: cards inside a
  *     plugin-originated message are interactive, and the plugin can revise or
@@ -319,7 +325,7 @@ export type PluginPermission = string;
  *     A manifest still declaring `selectionActions` is now rejected rather than
  *     silently ignored — see the `apiVersion` note on PluginManifest.
  */
-export const PLUGIN_PROTOCOL_VERSION = 9;
+export const PLUGIN_PROTOCOL_VERSION = 10;
 
 /**
  * The OLDEST protocol version this build still loads — the lower bound of the

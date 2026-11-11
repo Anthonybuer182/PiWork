@@ -197,6 +197,27 @@ export interface PluginContext {
   };
 }
 
+/**
+ * Payload of the host's `agent.turnEnd` event.
+ *
+ * Pushed once per agent run, AFTER the SDK has settled it: a normal finish, a
+ * user abort (stop button / Esc) and a failed run all settle. Use it to fold
+ * the many tool calls of one run into one result (a completion card via
+ * `ctx.messages.post`, a summary notification, …) instead of reacting to every
+ * call. The event is ungated — every running backend receives it, and a backend
+ * ignores runs in which it took no part.
+ */
+export interface AgentTurnEndEvent {
+  /** The conversation the run belongs to. */
+  sessionId: string;
+  /** Identity of this run, minted by the host (unique per run). */
+  runId: string;
+  /** True when the run ended because the user stopped it. */
+  aborted: boolean;
+  /** Why the run ended; `error` means it threw before settling normally. */
+  outcome: 'completed' | 'aborted' | 'error';
+}
+
 export interface PluginHandlers {
   /** Runs once, when the host sends `init`. */
   onInit?(ctx: PluginContext): void | Promise<void>;
@@ -289,7 +310,16 @@ export interface PluginHandlers {
   /** The host wants context to inject before a message send. Return the text. */
   onContextRequest?(providerId: string, message: string, ctx: PluginContext): string | Promise<string>;
 
-  /** The host pushed an event (e.g. browser.urlChanged). */
+  /**
+   * The host pushed an event.
+   *
+   * - `session.changed` — `{ sessionId }`, every backend, on the conversation
+   *   the user now has on screen.
+   * - `agent.turnEnd` — `AgentTurnEndEvent`, every backend, once per settled
+   *   agent run (success, abort or error).
+   * - `browser.urlChanged` / `browser.tabOpened` — browser permission only.
+   * - `voice.playback` — `{ key, playing }`, voice permission only.
+   */
   onHostEvent?(event: string, data: unknown, ctx: PluginContext): void;
   /**
    * The user interacted with a declarative card this plugin's tool returned

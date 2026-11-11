@@ -5,6 +5,7 @@ import { registerNativeIpcHandlers } from '@main/ipc/native';
 import { registerWindowIpcHandlers } from '@main/ipc/windows';
 import { SettingsManager, ModelRegistry, ModelRuntime, getAgentDir } from '@earendil-works/pi-coding-agent';
 import { setSharedModelRuntime } from '@pi/sdk-wrapper/adapters';
+import type { RunSettledInfo } from '@pi/sdk-wrapper/adapters';
 import { copyFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { ENGINE_UA, VlmAnalyzer } from '@main/browser';
@@ -390,6 +391,18 @@ if (!gotLock) {
         // separate afterToolCall wrapper; it must run under the same session
         // key as the permission gate.
         installToolContractGate(session, info.sessionKey);
+      },
+      // The agent service knows when a run has settled; the plugin system is
+      // how plugins learn about it. Wiring the two belongs here, in the
+      // composition root — the chat service must stay plugin-agnostic, and the
+      // IPC transport must not invent lifecycle semantics.
+      onRunSettled: (info: RunSettledInfo) => {
+        pluginSystem.pushHostEvent('agent.turnEnd', undefined, {
+          sessionId: info.sessionId,
+          runId: info.runId,
+          aborted: info.aborted,
+          outcome: info.outcome,
+        });
       },
       // Deleting a conversation must also settle anything it is blocked on;
       // otherwise the run, the pending promise and the card outlive the file.

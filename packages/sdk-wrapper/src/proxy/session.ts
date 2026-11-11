@@ -21,5 +21,12 @@ export function createProxySessionService(transport: Transport): SessionService 
     async getTree(id: string) {
       return transport.request('session.getTree', { id }) as ReturnType<SessionService['getTree']>;
     },
+    async fork(sourceId: string, throughEntryId: string, title?: string) {
+      return transport.request('session.fork', {
+        sourceId,
+        throughEntryId,
+        title,
+      }) as ReturnType<SessionService['fork']>;
+    },
   };
 }

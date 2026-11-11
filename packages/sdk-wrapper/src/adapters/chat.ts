@@ -1,8 +1,9 @@
 import * as path from 'path';
+import { randomUUID } from 'node:crypto';
 import { statSync, readFileSync, existsSync } from 'node:fs';
 import type { ChatService, SendMessageParams, StreamChunk } from '../services/chat.js';
 import type { Message, AssistantMessage, ContentBlock, ToolResultBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, AgentContextConfig, AgentContextReloadResult, AgentToolInfo, AppendSegmentInfo, ContextFileInfo, ContextFileScope, PromptFileInfo, GlobalContextFile, GlobalContextInfo, ModelCapabilities, PluginMessageData, PluginMessagePatch } from '@pi/types';
-import { PLUGIN_MESSAGE_CUSTOM_TYPE } from '@pi/types';
+import { PLUGIN_MESSAGE_CUSTOM_TYPE, SESSION_LEAF_CUSTOM_TYPE } from '@pi/types';
 import { ASK_TOOL_NAME, TODO_TOOL_NAME } from '@pi/types';
 import { createAgentSession, SessionManager, DefaultResourceLoader, getAgentDir, SettingsManager, formatSkillsForPrompt, createMcpExtension, createToolSearchExtension } from '@earendil-works/pi-coding-agent';
 import type { AgentSession, InlineExtension, McpExtensionOptions, ModelRegistry, ModelRuntime } from '@earendil-works/pi-coding-agent';
@@ -276,6 +277,31 @@ export interface McpChatOptions {
   discoveryTool?: string;
 }
 
+/**
+ * One agent run's ending, reported after the SDK has settled it.
+ *
+ * `agent_end` is not this signal: it can be followed by a retry, and it fires
+ * before the run has actually released the session. The SDK's `agent_settled`
+ * event is emitted from the run driver's `finally`, so it covers success,
+ * error and abort alike — that is the fact this shape carries.
+ */
+export interface RunSettledInfo {
+  /** The conversation the run belongs to; '' when the caller had no id yet. */
+  sessionId: string;
+  /** The key the adapter cached the session under ('default' without an id). */
+  sessionKey: string;
+  /** Identity of this run, minted by the adapter (not an SDK concept). */
+  runId: string;
+  /** The SDK's own abort flag for the run that just settled. */
+  aborted: boolean;
+  /**
+   * Derived from what this adapter observed: an abort wins (the user's stop
+   * is the reason the run ended), then a run that threw is `error`, then
+   * `completed`.
+   */
+  outcome: 'completed' | 'aborted' | 'error';
+}
+
 export interface RealChatServiceOptions {
   customToolsProvider?: () => unknown[];
   /** Enabled plugins' PLUGIN.md index. Read per session, so installs take effect without a restart. */
@@ -288,6 +314,12 @@ export interface RealChatServiceOptions {
    * ('default' when the caller had no session id yet).
    */
   onSessionCreated?: (session: AgentSession, info: { sessionKey: string; cwd: string }) => void;
+  /**
+   * Called once per run, after the SDK has settled it (success, error or
+   * abort). This is the only layer that knows the fact; the host decides who
+   * hears about it. A throwing hook is contained — it cannot fail the run.
+   */
+  onRunSettled?: (info: RunSettledInfo) => void;
   /**
    * Settings → 工具 switches. Applied on every session creation, on top of the
    * per-conversation list, so a globally disabled tool can never be re-enabled
@@ -379,6 +411,166 @@ async function promptPluginTurn(
   );
 }
 
+// ---------------------------------------------------------------------------
+// Session tree: versions of a turn
+// ---------------------------------------------------------------------------
+
+/** Entry types that carry conversation forward. A label or a model switch is
+ *  a bookmark on the path, never the destination of a branch switch. */
+const CONVERSATION_ENTRY_TYPES = new Set(['message', 'custom', 'custom_message', 'compaction']);
+
+/**
+ * The deepest point of the subtree rooted at `entryId`.
+ *
+ * Switching versions shows a version the way the user last left it, so the
+ * leaf goes to the end of that version's conversation — an alternative turn
+ * usually has its own answer, and possibly turns after that. Entries are
+ * stored in append order, so the last child is what happened last.
+ */
+export function branchTipOf(manager: SessionManager, entryId: string): string | undefined {
+  if (!manager.getEntry(entryId)) return undefined;
+  let tip = entryId;
+  for (;;) {
+    const children = manager
+      .getChildren(tip)
+      .filter((child) => CONVERSATION_ENTRY_TYPES.has(child.type));
+    if (children.length === 0) return tip;
+    tip = children[children.length - 1].id;
+  }
+}
+
+/**
+ * The entry that started the turn appended below `anchorId`.
+ *
+ * A run may record a model or system entry before the prompt itself, so this
+ * scans forward along the active path for the first user (or plugin) message
+ * instead of assuming the next entry is it.
+ */
+function turnStartEntryId(manager: SessionManager, anchorId: string | null): string | undefined {
+  const branch = manager.getBranch();
+  const anchorIndex = anchorId ? branch.findIndex((entry) => entry.id === anchorId) : -1;
+  // The anchor left the active path (a concurrent branch switch): nothing to
+  // report rather than reporting the wrong turn.
+  if (anchorId && anchorIndex < 0) return undefined;
+  for (let i = anchorIndex + 1; i < branch.length; i++) {
+    const entry = branch[i];
+    if (entry.type === 'message' && entry.message.role === 'user') return entry.id;
+    if (entry.type === 'custom_message' && entry.customType === PLUGIN_MESSAGE_CUSTOM_TYPE) return entry.id;
+  }
+  return undefined;
+}
+
+/**
+ * A stored turn, resolved back to what the model was asked.
+ *
+ * `entryId` is the entry that started the turn — the user message for a typed
+ * turn, the plugin message for one a plugin began. Replaying the turn branches
+ * from its parent and sends this again.
+ */
+type StoredTurn =
+  | { kind: 'user'; entryId: string; content: string; images: { type: 'image'; data: string; mimeType: string }[] }
+  | { kind: 'plugin'; entryId: string; content: string; pluginMessage: PluginMessageData };
+
+function textOfContent(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content
+      .filter((c: any) => c?.type === 'text' && typeof c.text === 'string')
+      .map((c: any) => c.text)
+      .join('');
+  }
+  return '';
+}
+
+function resolveStoredTurn(manager: SessionManager, entryId: string): StoredTurn | undefined {
+  let entry = manager.getEntry(entryId);
+  while (entry) {
+    if (entry.type === 'message' && entry.message.role === 'user') {
+      const content = entry.message.content;
+      const images = Array.isArray(content)
+        ? content
+            .filter((c: any) => c?.type === 'image' && typeof c.data === 'string')
+            .map((c: any) => ({ type: 'image' as const, data: c.data, mimeType: c.mimeType || 'image/png' }))
+        : [];
+      return { kind: 'user', entryId: entry.id, content: textOfContent(content), images };
+    }
+    if (entry.type === 'custom_message' && entry.customType === PLUGIN_MESSAGE_CUSTOM_TYPE) {
+      const data = (entry as { details?: PluginMessageData }).details;
+      if (data && typeof data.id === 'string') {
+        return { kind: 'plugin', entryId: entry.id, content: textOfContent(entry.content), pluginMessage: data };
+      }
+    }
+    entry = entry.parentId ? manager.getEntry(entry.parentId) : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * pi's tree navigation returns the edited message's text when the target is a
+ * user message, but it is a no-op when the target is already the leaf — and an
+ * aborted turn leaves the leaf on its user message. Move one step up first so
+ * the replacement really becomes a sibling instead of a reply to the very
+ * message it replaces.
+ */
+function stepOffLeaf(session: AgentSession, entryId: string): void {
+  const manager = session.sessionManager;
+  if (manager.getLeafId() !== entryId) return;
+  const parentId = manager.getEntry(entryId)?.parentId ?? null;
+  if (parentId) manager.branch(parentId);
+  else manager.resetLeaf();
+}
+
+/**
+ * Branch the tree and resolve what this send actually prompts with.
+ *
+ * Branching happens here, inside the send, rather than as a separate call the
+ * UI makes first: the two are one step, so a send can never land on the old
+ * branch because the navigation failed, and a navigation can never leave the
+ * conversation pointing somewhere the user did not mean to send from.
+ */
+async function prepareTurn(
+  session: AgentSession,
+  params: SendMessageParams,
+): Promise<{
+  content: string;
+  images?: { type: 'image'; data: string; mimeType: string }[];
+  pluginMessage?: PluginMessageData;
+}> {
+  const images = params.attachments?.length
+    ? params.attachments
+        .filter((a) => a.mimeType.startsWith('image/') && a.data)
+        .map((a) => ({ type: 'image' as const, data: a.data, mimeType: a.mimeType }))
+    : undefined;
+  const direct = {
+    content: params.content,
+    images: images?.length ? images : undefined,
+    pluginMessage: params.pluginMessage,
+  };
+  if (!params.replayTurn && !params.branchFrom) return direct;
+
+  const manager = session.sessionManager;
+  let target: string;
+  let turn: StoredTurn | undefined;
+
+  if (params.replayTurn) {
+    turn = resolveStoredTurn(manager, params.replayTurn.entryId);
+    if (!turn) throw new Error('找不到这一轮对话的起点，无法重新生成');
+    target = turn.entryId;
+  } else {
+    target = params.branchFrom!;
+  }
+
+  stepOffLeaf(session, target);
+  const navigation = await session.navigateTree(target);
+  if (navigation.cancelled) throw new Error('无法在原对话位置创建新分支');
+
+  // A retried turn sends what it originally sent, not the UI's cleaned copy.
+  if (!turn) return direct;
+  return turn.kind === 'user'
+    ? { content: turn.content, images: turn.images.length > 0 ? turn.images : undefined }
+    : { content: turn.content, pluginMessage: turn.pluginMessage };
+}
+
 export function createRealChatService(
   cwd: string,
   modelRuntime?: ModelRuntime,
@@ -405,6 +597,22 @@ export function createRealChatService(
   const staleSessions = new Set<string>();
   // Track last message end time per session for thinking time calculation
   const sessionTimings = new Map<string, number>();
+
+  /**
+   * Report a settled run to the host, exactly once.
+   *
+   * This lives in the adapter, not at an IPC/transport boundary: a run can be
+   * started by more than one entry point (renderer stream, plugin turn, test
+   * harness), and only this layer sees the SDK's `agent_settled`. A hook that
+   * throws must not turn a completed run into a failed one.
+   */
+  function emitRunSettled(info: RunSettledInfo): void {
+    try {
+      options?.onRunSettled?.(info);
+    } catch {
+      /* the run is already over; the hook's failure is not the caller's */
+    }
+  }
 
   // Shared ModelRuntime — picks up built-in models + models from ~/.pi/agent/models.json.
   // pi 1.x resolves models/auth through ModelRuntime (async); the registry is a
@@ -1197,6 +1405,11 @@ export function createRealChatService(
       }
     },
 
+    isSessionBusy(sessionId: string): boolean {
+      const cached = activeSessions.get(sessionId || 'default');
+      return !!cached && (cached.session.isStreaming || cached.session.isCompacting);
+    },
+
     /** Retire every cached session. Called on app quit so extensions (notably
      *  MCP stdio servers) get `session_shutdown` instead of dying with us. */
     async dispose(): Promise<void> {
@@ -1267,23 +1480,24 @@ export function createRealChatService(
         params.skills,
         requestedModel ? modelCapabilitiesOf(requestedModel) : null,
       );
+      const sessionKey = params.sessionId || 'default';
+      const runId = randomUUID();
+      let settledAborted = false;
+      let runError = false;
+      // One settle per run. The SDK emits it from the run driver's `finally`,
+      // so an abort or an error still settles; a retry does not settle twice.
+      const settleSub = session.subscribe((event: any) => {
+        if (event.type === 'agent_settled') settledAborted = event.aborted === true;
+      });
 
       try {
         if (requestedModel) await session.setModel(requestedModel);
 
-        const images = params.attachments?.length
-          ? params.attachments
-              .filter((a) => a.mimeType.startsWith('image/') && a.data)
-              .map((a) => ({
-                type: 'image' as const,
-                data: a.data,
-                mimeType: a.mimeType,
-              }))
-          : undefined;
-        if (params.pluginMessage) {
-          await promptPluginTurn(session, params);
+        const turn = await prepareTurn(session, params);
+        if (turn.pluginMessage) {
+          await promptPluginTurn(session, { ...params, content: turn.content, pluginMessage: turn.pluginMessage });
         } else {
-          await session.prompt(params.content, images?.length ? { images } : undefined);
+          await session.prompt(turn.content, turn.images?.length ? { images: turn.images } : undefined);
         }
 
       // Get session stats for cost/usage on the returned message
@@ -1315,7 +1529,19 @@ export function createRealChatService(
 
       return asstMsg;
       } catch (err) {
+        runError = true;
         throw new Error(err instanceof Error ? err.message : 'Failed to send message');
+      } finally {
+        settleSub();
+        emitRunSettled({
+          sessionId: params.sessionId,
+          sessionKey,
+          runId,
+          aborted: settledAborted,
+          // An abort takes precedence: the user's stop is the reason the run
+          // ended, even if unwinding it also threw.
+          outcome: settledAborted ? 'aborted' : runError ? 'error' : 'completed',
+        });
       }
     },
 
@@ -1343,6 +1569,9 @@ export function createRealChatService(
       );
       const sessionKey = params.sessionId || 'default';
       const workspaceCwd = params.workspaceCwd;
+      const runId = randomUUID();
+      let settledAborted = false;
+      let runError = false;
 
       // Guard to prevent writing to a closed SSE stream
       let streamActive = true;
@@ -1363,6 +1592,13 @@ export function createRealChatService(
   const toolArgs = new Map<string, Record<string, unknown>>();
 
       const unsubscribe = session.subscribe((event: any) => {
+        // Settle is not a stream chunk: it must still be observed after the
+        // stream closed — an abort flips `streamActive` before the run's
+        // finally emits `agent_settled`.
+        if (event.type === 'agent_settled') {
+          settledAborted = event.aborted === true;
+          return;
+        }
         // Skip sending chunks if stream is already closed
         if (!streamActive) return;
         switch (event.type) {
@@ -1380,7 +1616,7 @@ export function createRealChatService(
             if (msg && msg.content) {
               const content = msg.content;
               if (Array.isArray(content)) {
-                for (const block of content) {
+                for (const [blockIndex, block] of content.entries()) {
                   if (block.type === 'text' && block.text) {
                     // block.text carries the full accumulated text, not a delta.
                     outputText = block.text;
@@ -1417,11 +1653,14 @@ export function createRealChatService(
                       },
                     });
                   } else if (block.type === 'image') {
-                    // Image blocks in streaming — send as block for display
+                    // Image blocks in streaming — send as block for display.
+                    // Scoped to the turn and the block's position: the update
+                    // re-sends the whole message, and a timestamp id appended
+                    // a duplicate copy of the image on every update.
                     safeChunk({
                       type: 'block',
                       block: {
-                        id: `b-img-${Date.now()}`,
+                        id: `b-img-${messageStartTime}-${blockIndex}`,
                         type: 'image',
                         content: block.data || '',
                         mimeType: block.mimeType || 'image/png',
@@ -1460,7 +1699,10 @@ export function createRealChatService(
                     safeChunk({
                       type: 'block',
                       block: {
-                        id: `b-tc-${Date.now()}`,
+                        // Stable per call: the same card is re-sent as its
+                        // arguments stream in, and a fresh id each time made
+                        // the reader remount it (visible flicker).
+                        id: `b-tc-${block.toolCallId}`,
                         type: 'tool_call',
                         content: block.name || 'tool',
                         toolCallId: block.toolCallId,
@@ -1484,7 +1726,9 @@ export function createRealChatService(
             safeChunk({
               type: 'block',
               block: {
-                id: `b-te-${Date.now()}`,
+                // Same id as the message_update emission: this replaces that
+                // block in place rather than mounting a second card.
+                id: `b-tc-${event.toolCallId}`,
                 type: 'tool_call',
                 content: event.toolName || 'tool execution',
                 toolCallId: event.toolCallId,
@@ -1523,7 +1767,7 @@ export function createRealChatService(
             safeChunk({
               type: 'block',
               block: {
-                id: `b-ter-${Date.now()}`,
+                id: `b-ter-${event.toolCallId}`,
                 type: 'tool_result',
                 content: event.isError ? `Error: ${resultText}` : resultText || 'Done',
                 toolCallId: event.toolCallId,
@@ -1536,12 +1780,14 @@ export function createRealChatService(
 
             // Emit image blocks from tool result content
             if (rawResult && Array.isArray(rawResult.content)) {
-              for (const c of rawResult.content as any[]) {
+              for (const [imageIndex, c] of (rawResult.content as any[]).entries()) {
                 if (c.type === 'image') {
                   safeChunk({
                     type: 'block',
                     block: {
-                      id: `b-ter-img-${Date.now()}`,
+                      // Two images returned together are two blocks; a shared
+                      // timestamp collapsed them into one.
+                      id: `b-ter-img-${event.toolCallId}-${imageIndex}`,
                       type: 'image',
                       content: c.data || '',
                       mimeType: c.mimeType || 'image/png',
@@ -1699,21 +1945,21 @@ export function createRealChatService(
         if (requestedModel) await session.setModel(requestedModel);
 
         // Build image content array for vision models
-        const images = params.attachments?.length
-          ? params.attachments
-              .filter((a) => a.mimeType.startsWith('image/') && a.data)
-              .map((a) => ({
-                type: 'image' as const,
-                data: a.data,
-                mimeType: a.mimeType,
-              }))
-          : undefined;
-
-        if (params.pluginMessage) {
-          await promptPluginTurn(session, params);
+        const turn = await prepareTurn(session, params);
+        // The entry this turn hangs off, read after branching so it is the
+        // branch point, not wherever the conversation happened to be.
+        const branchAnchor = session.sessionManager.getLeafId();
+        if (turn.pluginMessage) {
+          await promptPluginTurn(session, { ...params, content: turn.content, pluginMessage: turn.pluginMessage });
         } else {
-          await session.prompt(params.content, images?.length ? { images } : undefined);
+          await session.prompt(turn.content, turn.images?.length ? { images: turn.images } : undefined);
         }
+
+        // The turn's starting message only exists once the SDK has persisted
+        // it. Reporting it here gives the renderer's optimistic bubble a real
+        // identity, so edit and retry work without a re-read from disk.
+        const startEntryId = turnStartEntryId(session.sessionManager, branchAnchor);
+        if (startEntryId) safeChunk({ type: 'turn_start', entryId: startEntryId });
 
         // Build final usage for returned message
         let totalUsage: TokenUsage | undefined;
@@ -1745,11 +1991,21 @@ export function createRealChatService(
         streamActive = false;
         return asstMsg;
       } catch (err) {
+        runError = true;
         safeChunk({ type: 'error', error: err instanceof Error ? err.message : 'Unknown error' });
         throw err;
       } finally {
         streamActive = false;
         unsubscribe();
+        emitRunSettled({
+          sessionId: params.sessionId,
+          sessionKey,
+          runId,
+          aborted: settledAborted,
+          // An abort takes precedence: the user's stop is the reason the run
+          // ended, even if unwinding it also threw.
+          outcome: settledAborted ? 'aborted' : runError ? 'error' : 'completed',
+        });
       }
     },
 
@@ -1758,7 +2014,9 @@ export function createRealChatService(
 
       try {
         const sm = SessionManager.open(sessionId);
-        const entries = sm.getEntries();
+        // The active path, not every entry in the file: a conversation that
+        // branched must not report the abandoned versions after the live one.
+        const entries = sm.getBranch();
         return entries
           .filter((e) => e.type === 'message')
           .map((e) => {
@@ -1933,10 +2191,45 @@ export function createRealChatService(
       })) : undefined);
     },
 
-    async navigateTree(sessionId: string, entryId: string, options?: { summarize?: boolean; customInstructions?: string; label?: string }): Promise<{ editorText?: string; cancelled: boolean }> {
+    async navigateTree(sessionId: string, entryId: string, options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }): Promise<{ editorText?: string; cancelled: boolean }> {
       const session = await getOrCreateAgentSession(sessionId);
       const result = await session.navigateTree(entryId, options);
       return { editorText: result.editorText, cancelled: result.cancelled };
+    },
+
+    /**
+     * Choose a version of a turn to show — a view change, not an edit.
+     *
+     * `navigateTree` is the wrong tool here: for a user message it moves the
+     * leaf to the parent and hands the text back for editing. Switching wants
+     * the opposite — the version as it stands, at its deepest point — and it
+     * must survive a reload, which pi's in-memory leaf does not.
+     */
+    async switchBranch(sessionId: string, entryId: string): Promise<{ leafId: string }> {
+      const session = await getOrCreateAgentSession(sessionId);
+      if (session.isStreaming) {
+        throw new Error('当前对话正在运行，结束后再切换分支');
+      }
+      if (session.isCompacting) {
+        throw new Error('正在压缩对话上下文，稍后再切换分支');
+      }
+
+      const manager = session.sessionManager;
+      const tip = branchTipOf(manager, entryId);
+      if (!tip) throw new Error('找不到这个分支版本');
+
+      // Already there: no marker to write, nothing to refresh.
+      const current = manager.getLeafId();
+      if (current === tip) return { leafId: current };
+
+      // Branch first so the marker is appended as a child of the chosen tip;
+      // a custom entry is not model-visible, so the next turn's context is
+      // exactly the chosen version. The marker is also what makes the choice
+      // outlive this process: pi restores the leaf from the file's last entry.
+      manager.branch(tip);
+      const markerId = manager.appendCustomEntry(SESSION_LEAF_CUSTOM_TYPE, { targetId: tip });
+      session.refreshContext();
+      return { leafId: markerId };
     },
 
     async compact(sessionId: string, customInstructions?: string) {

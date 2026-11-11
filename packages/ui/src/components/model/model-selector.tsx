@@ -25,13 +25,21 @@ export function ModelSelector({ value, onChange }: ModelSelectorProps) {
     queryFn: () => sdk.config.listModels(),
   });
 
-  if (isLoading) return <Skeleton className="h-8 w-[180px]" />;
+  if (isLoading) return <Skeleton className="h-7 w-[120px] shrink-0" />;
+
+  // A squeezed composer truncates the name to a stub; the title keeps the
+  // full one a hover away.
+  const currentName = models?.find((model) => model.id === value)?.name ?? value;
 
   return (
     <Select value={value} onValueChange={onChange}>
       <SelectTrigger
-        className="h-7 w-auto min-w-0 max-w-[150px] shrink gap-1 border-0 bg-transparent px-2 text-xs hover:bg-accent xl:max-w-[220px] [&>span]:truncate"
+        // The name is the only thing that gives way, and only down to a
+        // readable stub: it must never collapse to the bare icon and leave
+        // the neighbouring controls to overflow the row.
+        className="h-7 w-auto min-w-[72px] max-w-[150px] shrink gap-1 border-0 bg-transparent px-2 text-xs hover:bg-accent @[560px]:max-w-[220px] [&>span]:truncate"
         aria-label={t('选择模型')}
+        title={currentName || undefined}
       >
         <Cpu className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         <SelectValue placeholder={t('选择模型')} />

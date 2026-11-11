@@ -245,6 +245,11 @@ async function handleRequest(server: ViteDevServer, method: string, params: any)
         case 'delete': return sessionService.delete(params.id);
         case 'updateTitle': return sessionService.updateTitle(params.id, params.title);
         case 'getTree': return sessionService.getTree(params.id);
+        case 'fork':
+          if (chatService.isSessionBusy?.(params.sourceId)) {
+            throw new Error('当前对话正在运行，结束后再创建分支');
+          }
+          return sessionService.fork(params.sourceId, params.throughEntryId, params.title);
       }
       break;
 
@@ -256,6 +261,7 @@ async function handleRequest(server: ViteDevServer, method: string, params: any)
         case 'steer': return chatService.steer(params.sessionId, params.content, params.images);
         case 'followUp': return chatService.followUp(params.sessionId, params.content, params.images);
         case 'navigateTree': return chatService.navigateTree(params.sessionId, params.entryId, params.options);
+        case 'switchBranch': return chatService.switchBranch(params.sessionId, params.entryId);
         case 'compact': return chatService.compact(params.sessionId, params.customInstructions);
         // Agent context. Settings → 上下文 renders here too — these routes
         // must stay in step with ipc/index.ts's handleChat, and nothing

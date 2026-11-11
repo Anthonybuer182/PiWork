@@ -593,6 +593,32 @@ function isSessionMessageEntry(e: SessionEntry): e is SessionMessageEntry {
 }
 
 /**
+ * The user-message siblings of each turn-start entry, keyed by entry id.
+ *
+ * A conversation is a tree. Every version of the same turn is a child of the
+ * same parent entry, so the siblings of a user message are the parent's other
+ * user-message children. Only user messages count: a turn a plugin started is
+ * a `custom_message` shown as a plugin card, not a text the user can rewrite.
+ */
+function userSiblingsByEntry(entries: readonly SessionEntry[]): Map<string, SessionEntry[]> {
+  const byParent = new Map<string | null, SessionEntry[]>();
+  for (const entry of entries) {
+    if (!isSessionMessageEntry(entry) || entry.message.role !== 'user') continue;
+    const key = entry.parentId ?? null;
+    const list = byParent.get(key);
+    if (list) list.push(entry);
+    else byParent.set(key, [entry]);
+  }
+
+  const byEntry = new Map<string, SessionEntry[]>();
+  for (const list of byParent.values()) {
+    if (list.length < 2) continue;
+    for (const entry of list) byEntry.set(entry.id, list);
+  }
+  return byEntry;
+}
+
+/**
  * The plugin payload of a custom entry.
  *
  * `custom` entries keep it in `data`; `custom_message` entries (the explicit
@@ -843,8 +869,17 @@ export function createRealSessionService(): SessionService {
       }
 
       const header = sm.getHeader();
+      // Two views of the same file, and each has exactly one job:
+      //  - `branchEntries` is what the conversation IS right now — the path
+      //    from the root to the current leaf. The transcript, the plugin
+      //    messages and the title all read this, so abandoned branches stay
+      //    out of what the user sees.
+      //  - `entries` is the whole tree. Only sibling discovery needs it:
+      //    versions of a turn live in the tree, not on the active path.
       const entries = sm.getEntries();
-      const messageEntries = entries.filter(isSessionMessageEntry);
+      const branchEntries = sm.getBranch();
+      const messageEntries = branchEntries.filter(isSessionMessageEntry);
+      const siblings = userSiblingsByEntry(entries);
 
       // Resolve cwd early so it's available during message block construction
       const cwd = header?.cwd || sm.getCwd();
@@ -873,6 +908,7 @@ export function createRealSessionService(): SessionService {
               if (rawMsg.timestamp) {
                 lastMsg.updatedAt = new Date(rawMsg.timestamp).toISOString();
               }
+              lastMsg.lastEntryId = entry.id;
             }
           }
           continue;
@@ -897,12 +933,27 @@ export function createRealSessionService(): SessionService {
             if (rawMsg.timestamp) {
               lastMsg.updatedAt = new Date(rawMsg.timestamp).toISOString();
             }
+            lastMsg.lastEntryId = entry.id;
             continue;
           }
         }
 
         const message = toMessage(rawMsg, id, msgIndex++, entry.id, cwd);
-        if (message) messages.push(message);
+        if (message) {
+          message.lastEntryId = entry.id;
+          // A turn with versions carries the switch target for each of them;
+          // the UI renders the version control from this alone, without a
+          // second tree read.
+          const group = siblings.get(entry.id);
+          if (group && message.role === 'user') {
+            message.branch = {
+              index: group.findIndex((sibling) => sibling.id === entry.id),
+              count: group.length,
+              targets: group.map((sibling) => sibling.id),
+            };
+          }
+          messages.push(message);
+        }
       }
 
       // Post-process: collect file blocks from ALL tool results across all messages,
@@ -958,16 +1009,21 @@ export function createRealSessionService(): SessionService {
       // Plugin-originated messages share this transcript (pi `custom` entries).
       // Fold append-only updates to the latest revision and interleave them by
       // their own createdAt — an update must stay where the message was, not
-      // jump to the end.
-      const pluginMessages = foldPluginMessages(entries, id);
+      // jump to the end. Read from the active path: a card posted on a branch
+      // the user has left is not part of this conversation any more.
+      const pluginMessages = foldPluginMessages(branchEntries, id);
       if (pluginMessages.length > 0) {
         messages.push(...pluginMessages);
         messages.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt));
       }
 
       const sessionName = sm.getSessionName();
+      // The first entry on a branch is usually a system/model entry, not the
+      // conversation opener; the list's title comes from the first user
+      // message, and a conversation read here must agree with it.
+      const firstUserEntry = messageEntries.find((entry) => (entry.message as { role?: string }).role === 'user');
       const title = (typeof sessionName === 'string' && sessionName ? sessionName : undefined)
-        || (messageEntries.length > 0 ? extractTitleFromMessage(messageEntries[0].message) : undefined)
+        || (firstUserEntry ? extractTitleFromMessage(firstUserEntry.message) : undefined)
         || 'Untitled';
 
       // Use header timestamp if available
@@ -1004,6 +1060,33 @@ export function createRealSessionService(): SessionService {
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
+    },
+
+    /**
+     * Copy the path through `throughEntryId` into a new session file.
+     *
+     * The copy runs on a throwaway manager opened from the source file:
+     * `createBranchedSession` repoints the manager it is called on at the new
+     * file, so using the live session's manager would hijack the conversation
+     * that is still open. The source file is never written to.
+     */
+    async fork(sourceId: string, throughEntryId: string, title?: string): Promise<SessionWithMessages> {
+      if (!existsSync(sourceId)) throw new Error('会话不存在');
+
+      const source = SessionManager.open(sourceId);
+      if (!source.getEntry(throughEntryId)) throw new Error('找不到这条回复');
+
+      // The SDK copies the root → entry path, rebuilds label entries, fixes
+      // compaction anchors and records `parentSession` in the new header.
+      const forkedFile = source.createBranchedSession(throughEntryId);
+      if (!forkedFile) throw new Error('创建分支会话失败');
+
+      if (title) {
+        const forked = SessionManager.open(forkedFile);
+        forked.appendSessionInfo(title);
+      }
+
+      return this.get(forkedFile);
     },
 
     async delete(id: string): Promise<void> {

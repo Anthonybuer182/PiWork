@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, memo } from 'react';
 import type { Message, ContentBlock, ThinkingBlock as ThinkingBlockType, ToolCallBlock, ToolResultBlock, ImageBlock, FileBlock, AssistantMessage, TokenUsage, ContextUsageInfo, MessageTiming } from '@pi/types';
 import { cn } from '@/lib/utils';
-import { Clock, Zap, FileText, Copy, Pencil, Check, X } from 'lucide-react';
+import { Clock, Zap, FileText, Copy, Pencil, Check, ChevronLeft, ChevronRight, RotateCcw, GitBranch } from 'lucide-react';
 import { ThinkingBlock } from './thinking-block';
 import { useI18n } from '@/i18n';
 import { ToolCallDisplay } from './tool-call-display';
@@ -33,6 +33,19 @@ interface MessageBubbleProps {
   onConfirmEdit?: (message: Message, newContent: string) => void;
   /** Callback when user cancels inline edit */
   onCancelEdit?: () => void;
+  /** Show "regenerate" on this assistant message (it ends the current turn). */
+  showRegenerate?: boolean;
+  /** Re-run the turn this assistant message answers. */
+  onRegenerate?: (message: Message) => void;
+  /** Show a different version of a turn. */
+  onSwitchBranch?: (entryId: string) => void;
+  /** Branch switching is unavailable (a run is active, or one is in flight). */
+  branchSwitchingDisabled?: boolean;
+  /** Copy the conversation up to this reply into a new, independent one. */
+  showFork?: boolean;
+  onForkMessage?: (message: Message) => void;
+  /** A branch copy is being created. */
+  forking?: boolean;
 }
 
 /**
@@ -188,6 +201,13 @@ function MessageBubbleImpl({
   onEditMessage,
   onConfirmEdit,
   onCancelEdit,
+  showRegenerate,
+  onRegenerate,
+  onSwitchBranch,
+  branchSwitchingDisabled,
+  showFork,
+  onForkMessage,
+  forking,
 }: MessageBubbleProps) {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
@@ -246,12 +266,32 @@ function MessageBubbleImpl({
     onEditMessage?.(message);
   };
 
+  // A user message can carry attachments; they survive an edit, so an empty
+  // editor is still a valid "retry this turn" when the original had files.
+  const hasReattachableAttachments = isUser && message.blocks.some(
+    (block) => (block.type === 'image' && block.data) || (block.type === 'file' && block.workspacePath),
+  );
+  const canSubmitEdit = editingContent.trim().length > 0 || hasReattachableAttachments;
+
   const handleConfirmEdit = () => {
+    if (!canSubmitEdit) return;
     onConfirmEdit?.(message, editingContent);
   };
 
   const handleCancelEdit = () => {
     onCancelEdit?.();
+  };
+
+  const handleEditKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      handleCancelEdit();
+      return;
+    }
+    if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+      event.preventDefault();
+      handleConfirmEdit();
+    }
   };
 
   return (
@@ -271,25 +311,26 @@ function MessageBubbleImpl({
                   )}
                   value={editingContent}
                   onChange={(e) => setEditingContent(e.target.value)}
+                  onKeyDown={handleEditKeyDown}
                   rows={1}
                   autoFocus
                 />
                 <div className={cn('flex items-center gap-1', isUser && 'justify-end')}>
                   <Button
                     variant="ghost"
-                    size="icon-sm"
-                    className="h-6 w-6 text-muted-foreground hover:text-foreground"
-                    onClick={handleConfirmEdit}
-                  >
-                    <Check className="h-3 w-3" />
-                  </Button>
-                  <Button
-                    variant="ghost"
-                    size="icon-sm"
-                    className="h-6 w-6 text-muted-foreground hover:text-foreground"
+                    size="sm"
+                    className="h-7 text-xs text-muted-foreground hover:text-foreground"
                     onClick={handleCancelEdit}
                   >
-                    <X className="h-3 w-3 text-destructive" />
+                    {t('取消')}
+                  </Button>
+                  <Button
+                    size="sm"
+                    className="h-7 text-xs"
+                    onClick={handleConfirmEdit}
+                    disabled={!canSubmitEdit}
+                  >
+                    {t('重试')}
                   </Button>
                 </div>
               </div>
@@ -320,6 +361,46 @@ function MessageBubbleImpl({
           'flex items-center gap-3',
           isUser && 'flex-row-reverse justify-start',
         )}>
+          {/* Versions of this turn. Always visible — it is a fact about the
+              conversation, not a hover affordance: the current bubble is one
+              of N, and the arrows show the others. */}
+          {message.branch && message.branch.count > 1 && (
+            <div className="flex items-center gap-0.5 text-[10px] text-muted-foreground/60 tabular-nums">
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="h-5 w-5 text-muted-foreground/50 hover:text-foreground"
+                disabled={branchSwitchingDisabled || message.branch.index === 0}
+                onClick={() => onSwitchBranch?.(message.branch!.targets[message.branch!.index - 1])}
+                aria-label={t('上一个版本')}
+              >
+                <ChevronLeft className="h-3 w-3" />
+              </Button>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <span className="cursor-default">
+                    {message.branch.index + 1}/{message.branch.count}
+                  </span>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">
+                  {t('第 {index} 版，共 {count} 版', {
+                    index: message.branch.index + 1,
+                    count: message.branch.count,
+                  })}
+                </TooltipContent>
+              </Tooltip>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="h-5 w-5 text-muted-foreground/50 hover:text-foreground"
+                disabled={branchSwitchingDisabled || message.branch.index === message.branch.count - 1}
+                onClick={() => onSwitchBranch?.(message.branch!.targets[message.branch!.index + 1])}
+                aria-label={t('下一个版本')}
+              >
+                <ChevronRight className="h-3 w-3" />
+              </Button>
+            </div>
+          )}
           <span className="text-[10px] text-muted-foreground/50 tabular-nums">
             {new Date(message.createdAt).toLocaleTimeString()}
           </span>
@@ -352,6 +433,45 @@ function MessageBubbleImpl({
               {isAssistant && (
                 <SpeakButton messageId={message.id} text={message.content} />
               )}
+              {isAssistant && showRegenerate && onRegenerate && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="h-5 w-5 text-muted-foreground/50 hover:text-foreground"
+                      onClick={() => onRegenerate(message)}
+                      disabled={branchSwitchingDisabled}
+                      aria-label={t('重新生成本轮回答')}
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">{t('重新生成本轮回答')}</TooltipContent>
+                </Tooltip>
+              )}
+              {isAssistant && showFork && onForkMessage && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="h-5 w-5 text-muted-foreground/50 hover:text-foreground"
+                      onClick={() => onForkMessage(message)}
+                      disabled={branchSwitchingDisabled || forking}
+                      aria-label={t('从此回复创建分支')}
+                    >
+                      <GitBranch className="h-3 w-3" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">
+                    {t('从此回复创建分支')}
+                    <span className="mt-1 block text-[10px] opacity-70">
+                      {t('分支会复制到这条回复为止的对话，原对话保持不变。')}
+                    </span>
+                  </TooltipContent>
+                </Tooltip>
+              )}
               {isUser && message.entryId && (
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -360,6 +480,7 @@ function MessageBubbleImpl({
                       size="icon-sm"
                       className="h-5 w-5 text-muted-foreground/50 hover:text-foreground"
                       onClick={handleStartEdit}
+                      disabled={branchSwitchingDisabled}
                     >
                       <Pencil className="h-3 w-3" />
                     </Button>

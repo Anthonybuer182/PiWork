@@ -163,8 +163,14 @@ export async function readDocument(path: string): Promise<{
   // The fallback is annotated, not left as `{}`: an unannotated `() => ({})`
   // widens the awaited type to `{ mtime?: number } | {}`, and reading `.mtime`
   // off that union is an error on the `{}` branch.
-  const meta = await backend<{ mtime?: number }>('file.stat', { path })
-    .catch((): { mtime?: number } => ({}));
+  // Time-bounded: a page without a host tab identity (the slides audience
+  // window opened by window.open) gets no reply to backend requests, and an
+  // unbounded await here would hang the whole load. mtime is only the save
+  // conflict baseline; null is a valid answer.
+  const meta = await Promise.race([
+    backend<{ mtime?: number }>('file.stat', { path }).catch((): { mtime?: number } => ({})),
+    new Promise<{ mtime?: number }>((resolve) => setTimeout(() => resolve({}), 1500)),
+  ]);
   return {
     path,
     name: baseName(path),

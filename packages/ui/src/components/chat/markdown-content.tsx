@@ -5,11 +5,9 @@ import rehypeHighlight from 'rehype-highlight';
 import 'highlight.js/styles/github.css';
 import './hljs-theme.css';
 import { Check, Copy } from 'lucide-react';
-import { cn } from '@/lib/utils';
 import { useI18n } from '@/i18n';
 import { MermaidDiagram } from './mermaid-diagram';
 import { renderTokenizedText } from '@/lib/token-parser';
-import './chat-animations.css';
 
 interface MarkdownContentProps {
   content: string;
@@ -88,12 +86,7 @@ function extractText(children: React.ReactNode): string {
 
 function MarkdownContentImpl({ content, isStreaming }: MarkdownContentProps) {
   return (
-    <div
-      className={cn(
-        'md-body max-w-none',
-        !isStreaming && 'animate-streaming-in',
-      )}
-    >
+    <div className="md-body max-w-none">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         rehypePlugins={[rehypeHighlight]}

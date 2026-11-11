@@ -23,7 +23,12 @@
  * It is still plugin-internal — it never reaches the host — it just goes through
  * `ctx.send` like everything else now.
  */
-import { plugin, type PluginContext, type ToolResult } from '@pi/plugin-sdk';
+import {
+  plugin,
+  type AgentTurnEndEvent,
+  type PluginContext,
+  type ToolResult,
+} from '@pi/plugin-sdk';
 import { mkdir, readFile, readdir, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { basename, dirname, extname, isAbsolute, join, resolve as resolvePath } from 'node:path';
@@ -430,6 +435,161 @@ const docCard = (
   ],
 });
 
+// ── One completion card per agent run ────────────────────────────────
+//
+// The agent edits in batches, so a per-call card stacks N near-identical
+// boxes in one run. The interesting unit is the RUN, and the host already
+// tells every backend when one settles (`agent.turnEnd` — success, abort or
+// error). Tool calls tally here; the settle flushes one card through
+// `messages.post`, which is transcript-only and never starts another turn.
+//
+// A tool call with no conversation (direct callers, tests) keeps the
+// per-result card: there is no session to post into.
+
+interface RunDocTally {
+  path: string;
+  ext: string;
+  created: boolean;
+  ops: number;
+  /** Insertion order, so the card lists documents in the order touched. */
+  order: number;
+}
+
+/** conversation → (resolved path → tally). Bounded by MAX_LEDGER_SESSIONS. */
+const runLedgers = new Map<string, Map<string, RunDocTally>>();
+const MAX_LEDGER_SESSIONS = 20;
+let ledgerOrder = 0;
+
+function recordDocWork(
+  sessionId: string,
+  filePath: string,
+  ext: string,
+  mode: 'created' | 'updated',
+  ops: number,
+): void {
+  let ledger = runLedgers.get(sessionId);
+  if (!ledger) {
+    if (runLedgers.size >= MAX_LEDGER_SESSIONS) {
+      const oldest = runLedgers.keys().next().value;
+      if (oldest !== undefined) runLedgers.delete(oldest);
+    }
+    ledger = new Map();
+    runLedgers.set(sessionId, ledger);
+  }
+  const key = (() => {
+    try {
+      return resolvePath(filePath);
+    } catch {
+      return filePath;
+    }
+  })();
+  const tally = ledger.get(key);
+  if (tally) {
+    tally.ops += ops;
+    tally.created = tally.created || mode === 'created';
+    tally.order = ++ledgerOrder;
+    return;
+  }
+  ledger.set(key, { path: filePath, ext, created: mode === 'created', ops, order: ++ledgerOrder });
+}
+
+/**
+ * Tally this write for the run, or — without a conversation — keep the old
+ * per-result card so non-agent callers see the same thing as before.
+ */
+function reportDocWork(
+  sessionId: string | null,
+  filePath: string,
+  ext: string,
+  mode: 'created' | 'updated',
+  ops: number,
+): { card?: unknown } {
+  if (!sessionId) return { card: docCard(filePath, ext, mode) };
+  recordDocWork(sessionId, filePath, ext, mode, ops);
+  return {};
+}
+
+/** The one card a run ends with: every document it wrote, with an open action. */
+function runSummaryCard(docs: RunDocTally[], outcome: AgentTurnEndEvent['outcome']): unknown {
+  const allCreated = docs.every((d) => d.created);
+  const title =
+    docs.length > 1
+      ? `本轮已更新 ${docs.length} 个文档`
+      : allCreated
+        ? '文档已创建'
+        : '文档已更新';
+  const note =
+    outcome === 'aborted'
+      ? '本轮已停止，以上改动已保存'
+      : outcome === 'error'
+        ? '本轮出错，以上改动已保存'
+        : null;
+  return {
+    component: 'Card',
+    props: {
+      title,
+      icon: 'file',
+      status: outcome === 'completed' ? 'success' : 'warning',
+    },
+    children: [
+      ...docs.map((d) => ({
+        component: 'Row',
+        props: { justify: 'between', gap: 'md' },
+        children: [
+          {
+            component: 'Row',
+            props: { gap: 'md', grow: true },
+            children: [
+              { component: 'Text', props: { text: basename(d.path), weight: 'bold', truncate: true } },
+              { component: 'Badge', props: { text: d.ext.toUpperCase() } },
+              ...(d.ops > 0
+                ? [{ component: 'Text', props: { text: `${d.ops} 个操作`, variant: 'small' } }]
+                : []),
+            ],
+          },
+          {
+            component: 'Button',
+            props: { label: '打开', variant: 'outline', path: d.path },
+            events: { onClick: 'open_viewer' },
+          },
+        ],
+      })),
+      ...(note ? [{ component: 'Text', props: { text: note, variant: 'muted' } }] : []),
+    ],
+  };
+}
+
+/**
+ * The run is over: post its one completion card and drop the ledger.
+ *
+ * Fire-and-forget from the host event, which is synchronous and must not
+ * block on a capability round-trip. Nothing is posted when the run wrote no
+ * documents — a read-only turn needs no result card.
+ */
+async function settleRun(ev: AgentTurnEndEvent | null | undefined): Promise<void> {
+  const sessionId = String(ev?.sessionId ?? '');
+  // Tool calls without a conversation are recorded under the adapter's
+  // 'default' key; drop that ledger without posting (there is nowhere to post).
+  const ledger = runLedgers.get(sessionId || 'default');
+  if (!ledger) return;
+  runLedgers.delete(sessionId || 'default');
+  if (!sessionId) return;
+  const docs = [...ledger.values()].sort((a, b) => a.order - b.order);
+  if (docs.length === 0) return;
+  const outcome = ev?.outcome ?? 'completed';
+  try {
+    await ctx.messages.post({
+      sessionId,
+      card: runSummaryCard(docs, outcome),
+      status: outcome === 'completed' ? 'success' : 'warning',
+    });
+  } catch (err) {
+    ctx.log.warn(
+      `completion card not posted: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
 /**
  * The op vocabulary is served as DATA, not as one tool per op.
  *
@@ -665,7 +825,7 @@ async function toolEdit(p: Record<string, unknown>, sessionId?: string | null): 
         applied: true,
         mtime: (written as { mtime?: number })?.mtime,
       }),
-      card: docCard(path, ext),
+      ...reportDocWork(sessionId ?? null, path, ext, 'updated', cellOps.length),
     };
   }
   if (ext === 'docx') {
@@ -713,7 +873,7 @@ async function toolEdit(p: Record<string, unknown>, sessionId?: string | null): 
         mtime: info?.mtimeMs,
         steps,
       }),
-      card: docCard(path, ext),
+      ...reportDocWork(sessionId ?? null, path, ext, 'updated', ops.length),
     };
   }
   if (ext !== 'pptx') {
@@ -763,7 +923,7 @@ async function toolEdit(p: Record<string, unknown>, sessionId?: string | null): 
       `applied ${result.records?.length ?? ops.length} op(s) to ${path} and saved (${bytes.length} bytes)`,
       { applied: true, records: result.records ?? [], mtime: (written as { mtime?: number })?.mtime },
     ),
-    card: docCard(path, ext),
+    ...reportDocWork(sessionId ?? null, path, ext, 'updated', result.records?.length ?? ops.length),
   };
 }
 
@@ -863,7 +1023,7 @@ async function toolCreate(p: Record<string, unknown>, sessionId?: string | null)
         path,
         mtime: (written as { mtime?: number })?.mtime,
       }),
-      card: docCard(path, ext, 'created'),
+      ...reportDocWork(sessionId ?? null, path, ext, 'created', ops.length),
     };
   }
 
@@ -916,7 +1076,7 @@ async function toolCreate(p: Record<string, unknown>, sessionId?: string | null)
           mtime: (written as { mtime?: number })?.mtime,
         },
       ),
-      card: docCard(path, ext, 'created'),
+      ...reportDocWork(sessionId ?? null, path, ext, 'created', ops.length),
     };
   }
 
@@ -943,7 +1103,7 @@ async function toolCreate(p: Record<string, unknown>, sessionId?: string | null)
           mtime: (written as { mtime?: number })?.mtime,
         },
       ),
-      card: docCard(path, ext, 'created'),
+      ...reportDocWork(sessionId ?? null, path, ext, 'created', ops.length),
     };
   }
 
@@ -960,7 +1120,7 @@ async function toolCreate(p: Record<string, unknown>, sessionId?: string | null)
           path,
           mtime: (written as { mtime?: number })?.mtime,
         }),
-        card: docCard(path, ext, 'created'),
+        ...reportDocWork(sessionId ?? null, path, ext, 'created', ops.length),
       };
     }
     const commands = planDocxCommands(ops as unknown as DocxOp[], false);
@@ -988,7 +1148,7 @@ async function toolCreate(p: Record<string, unknown>, sessionId?: string | null)
         mtime: info?.mtimeMs,
         steps,
       }),
-      card: docCard(path, ext, 'created'),
+      ...reportDocWork(sessionId ?? null, path, ext, 'created', ops.length),
     };
   }
 
@@ -1021,7 +1181,7 @@ async function toolCreate(p: Record<string, unknown>, sessionId?: string | null)
         mtime: (written as { mtime?: number })?.mtime,
       },
     ),
-    card: docCard(path, ext, 'created'),
+    ...reportDocWork(sessionId ?? null, path, ext, 'created', ops.length),
   };
 }
 
@@ -1033,7 +1193,7 @@ async function toolCreate(p: Record<string, unknown>, sessionId?: string | null)
  * (`outputPath === path`) therefore needs both `overwrite: true` and passes
  * the source's mtime through the host's compare-and-swap write.
  */
-async function toolPdfEdit(p: Record<string, unknown>): Promise<ToolResult> {
+async function toolPdfEdit(p: Record<string, unknown>, sessionId?: string | null): Promise<ToolResult> {
   const path = String(p.path ?? '');
   if (!path) throw new Error('pdf_edit: path is required');
   if (!isAbsolute(path)) throw new Error('pdf_edit: path must be absolute');
@@ -1069,6 +1229,8 @@ async function toolPdfEdit(p: Record<string, unknown>): Promise<ToolResult> {
       await writeOfficeBytes(out, result.splitParts[i]);
       files.push(out);
     }
+    // Each split part is its own document in this run's completion card.
+    if (sessionId) for (const out of files) recordDocWork(sessionId, out, 'pdf', 'created', 0);
     return text(
       `split ${path} (${sourcePages} page(s)) into ${files.length} file(s):\n  ${files.join('\n  ')}`,
       { applied: true, source: path, files, records: result.records },
@@ -1100,7 +1262,7 @@ async function toolPdfEdit(p: Record<string, unknown>): Promise<ToolResult> {
         mtime: (written as { mtime?: number })?.mtime,
       },
     ),
-    card: docCard(outputPath, 'pdf'),
+    ...reportDocWork(sessionId ?? null, outputPath, 'pdf', 'updated', ops.length),
   };
 }
 
@@ -1110,7 +1272,7 @@ async function toolPdfEdit(p: Record<string, unknown>): Promise<ToolResult> {
  * Pages with no text layer (scans) come through as full-page images; the
  * result says so rather than pretending the text was recovered.
  */
-async function toolPdfConvert(p: Record<string, unknown>): Promise<ToolResult> {
+async function toolPdfConvert(p: Record<string, unknown>, sessionId?: string | null): Promise<ToolResult> {
   const path = String(p.path ?? '');
   if (!path) throw new Error('pdf_convert: path is required');
   if (!isAbsolute(path)) throw new Error('pdf_convert: path must be absolute');
@@ -1157,7 +1319,7 @@ async function toolPdfConvert(p: Record<string, unknown>): Promise<ToolResult> {
         mtime: (written as { mtime?: number })?.mtime,
       },
     ),
-    card: docCard(outputPath, to, 'created'),
+    ...reportDocWork(sessionId ?? null, outputPath, to, 'created', 0),
   };
 }
 
@@ -1246,9 +1408,9 @@ async function runTool(name: string, p: Record<string, unknown>, call: { session
     case 'office_create':
       return await toolCreate(p, sessionId);
     case 'pdf_edit':
-      return await toolPdfEdit(p);
+      return await toolPdfEdit(p, sessionId);
     case 'pdf_convert':
-      return await toolPdfConvert(p);
+      return await toolPdfConvert(p, sessionId);
     case 'pdf_render':
       return await toolPdfRender(p);
 
@@ -1403,6 +1565,44 @@ async function onUiRequest(
       })) as { path?: string | null } | undefined;
       return { path: saved?.path ?? null };
     }
+    case 'file.pickDirectory': {
+      // Folder picker for exports: the host dialog answers it, same
+      // "the user picked it, so it is authorized" contract as the file pickers.
+      const picked = (await ctx.call('dialog.openFile', {
+        ...(params.title ? { title: String(params.title) } : {}),
+        directory: true,
+      })) as { path?: string | null } | undefined;
+      return { path: picked?.path ?? null };
+    }
+    case 'pdf.writeFromImages': {
+      // Export → PDF: one rasterized page per PDF page. Upstream prints a hidden
+      // window to PDF, which keeps text vector; a panel has no printToPDF, so the
+      // renderer rasterizes at 2× and this assembles the pages.
+      const path = String(params.path ?? '');
+      const pages = Array.isArray(params.pages) ? (params.pages as string[]) : [];
+      const widthPx = Number(params.widthPx) || 0;
+      const heightPx = Number(params.heightPx) || 0;
+      if (!path) throw new Error('pdf.writeFromImages: path is required');
+      if (pages.length === 0 || !(widthPx > 0) || !(heightPx > 0)) {
+        throw new Error('pdf.writeFromImages: pages and the page size are required');
+      }
+      const { PDFDocument } = await import('pdf-lib');
+      const doc = await PDFDocument.create();
+      // CSS px → pt at 96 dpi, so the PDF page box keeps the slide's ratio.
+      const w = (widthPx * 72) / 96;
+      const h = (heightPx * 72) / 96;
+      for (const png of pages) {
+        const img = await doc.embedPng(Buffer.from(png, 'base64'));
+        const page = doc.addPage([w, h]);
+        page.drawImage(img, { x: 0, y: 0, width: w, height: h });
+      }
+      const bytes = await doc.save();
+      await ctx.call('filesystem.write', {
+        path,
+        contentB64: Buffer.from(bytes).toString('base64'),
+      });
+      return { ok: true, path, pages: pages.length };
+    }
     case 'file.write': {
       const path = String(params.path ?? '');
       if (!path) throw new Error('file.write: path is required');
@@ -1548,6 +1748,21 @@ async function onEvent(
 
 // ── the plugin ──
 
+/**
+ * A card's "打开" button, from either a tool-result card or a plugin message.
+ * The path rides in the clicked node's props, so an old card still opens its
+ * own document. Fire-and-forget on purpose: the SDK does not await these, so
+ * a rejection here would escape its try/catch — handle errors inline.
+ */
+function openViewerFromCard(eventId: string, kind: string, payload: unknown): void {
+  if (kind !== 'click' || eventId !== 'open_viewer') return;
+  const target = String((payload as { path?: string } | undefined)?.path ?? '') || activeFileOf();
+  if (!target) return;
+  void openInViewer(target).catch((err: unknown) => {
+    ctx.log.error(`open_viewer failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
+}
+
 plugin({
   onInit(context) {
     ctx = context;
@@ -1594,11 +1809,20 @@ plugin({
 
   onTool: (name, params, _ctx, call) => runTool(name, params, call),
 
-  /** The conversation on screen changed. The host swaps the session-scoped
-   *  tabs itself; this only keeps the unscoped-tool fallback pointed right. */
+  /**
+   * The host tells every backend when a conversation switches and when an
+   * agent run settles. The settle is the moment a run's document work is
+   * complete: one completion card for the whole run, not one per batch.
+   */
   onHostEvent(event, data) {
-    if (event !== 'session.changed') return;
-    panelSession = (data as { sessionId?: string | null } | null)?.sessionId ?? null;
+    if (event === 'session.changed') {
+      panelSession = (data as { sessionId?: string | null } | null)?.sessionId ?? null;
+      return;
+    }
+    if (event === 'agent.turnEnd') {
+      // Not awaited by the SDK's event pump; settleRun handles its own errors.
+      void settleRun(data as AgentTurnEndEvent | null);
+    }
   },
 
   onRequest(panelId, method, params, _ctx, meta) {
@@ -1606,20 +1830,17 @@ plugin({
   },
 
   /**
-   * Card buttons from the office_edit result card (messageRenderer). The path
-   * comes back in the clicked node's props, so an old card still opens its
-   * own document. The card was clicked from the conversation ON SCREEN, so it
-   * opens into the panel's bucket. Not async: the SDK calls this fire-and-
-   * forget without awaiting, so a rejection here would escape the SDK's
-   * try/catch — handle errors inline instead.
+   * Card buttons from a persisted office_edit result card (messageRenderer).
+   * New runs report through the one completion card instead; this keeps
+   * conversations written before that change working.
    */
   onCardEvent(_toolName, eventId, kind, payload) {
-    if (kind !== 'click' || eventId !== 'open_viewer') return;
-    const target = String((payload as { path?: string } | undefined)?.path ?? '') || activeFileOf();
-    if (!target) return;
-    void openInViewer(target).catch((err: unknown) => {
-      ctx.log.error(`open_viewer failed: ${err instanceof Error ? err.message : String(err)}`);
-    });
+    openViewerFromCard(eventId, kind, payload);
+  },
+
+  /** Card buttons on a message this plugin posted (`messages.post`). */
+  onMessageAction(_messageId, eventId, kind, payload) {
+    openViewerFromCard(eventId, kind, payload);
   },
 
   onEvent,

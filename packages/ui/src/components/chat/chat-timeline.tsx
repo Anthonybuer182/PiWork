@@ -10,6 +10,7 @@ import { useComposerStore } from '@/stores/composer-store';
 import { usePluginStore } from '@/stores/plugin-store';
 import { Button } from '@/components/ui/button';
 import { stripAppendedContext } from '@/lib/quote-helpers';
+import { activateSession } from '@/lib/window-actions';
 import { suppressedToolCards } from '@/lib/tool-card-collapse';
 import { MessageBubble } from './message-bubble';
 import { PluginMessageBubble } from './plugin-message-bubble';
@@ -17,8 +18,9 @@ import { EmptyChat } from './empty-chat';
 import { StreamingIndicator } from './streaming-indicator';
 import { LoadingSpinner } from '@/components/common/loading-spinner';
 import { ErrorState } from '@/components/common/error-state';
-import type { Message, ContentBlock, TokenUsage, ToolCallBlock, PluginMessage } from '@pi/types';
+import type { Message, UserMessage, ContentBlock, TokenUsage, ToolCallBlock, PluginMessage, Attachment } from '@pi/types';
 import type { AssistantMessage } from '@pi/types';
+import { toast } from '@/stores/toast-store';
 import { usePermissionStore } from '@/stores/permission-store';
 import { useAskStore } from '@/stores/ask-store';
 import { useI18n, type MessageKey } from '@/i18n';
@@ -27,6 +29,46 @@ import { AskCard } from './ask-card';
 
 /** Shared empty map so non-active messages keep a stable prop identity. */
 const EMPTY_TOOL_TIMINGS = new Map<string, number>();
+
+/**
+ * The attachments a user message can be sent with again.
+ *
+ * Images travel as bytes (they were stored with the message); files travel as
+ * their workspace path, which the composer's save step references in place
+ * instead of copying. A replayed turn does not need the files — main sends the
+ * stored prompt verbatim, references included — so it asks for images only.
+ */
+function messageAttachments(message: UserMessage, includeFiles: boolean): Attachment[] {
+  const attachments: Attachment[] = [];
+  const now = new Date().toISOString();
+  message.blocks.forEach((block, index) => {
+    if (block.type === 'image' && block.data) {
+      attachments.push({
+        id: `edit-${message.id}-${index}`,
+        name: block.content || `image-${index + 1}.png`,
+        type: 'image',
+        size: 0,
+        mimeType: block.mimeType || 'image/png',
+        status: 'ready',
+        data: block.data,
+        createdAt: now,
+      });
+    } else if (includeFiles && block.type === 'file' && block.workspacePath) {
+      const mime = block.mimeType || 'application/octet-stream';
+      attachments.push({
+        id: `edit-${message.id}-${index}`,
+        name: block.fileName || block.content,
+        type: mime === 'application/pdf' ? 'pdf' : 'other',
+        size: block.fileSize ?? 0,
+        mimeType: mime,
+        status: 'ready',
+        sourcePath: block.workspacePath,
+        createdAt: now,
+      });
+    }
+  });
+  return attachments;
+}
 
 // ----------------------------------------------------------------
 // Types
@@ -98,15 +140,18 @@ function addDateSeparators(
 
 /**
  * Create a synthetic streaming message from live blocks and usage info.
- * Uses a stable timestamp captured at stream start.
+ * Uses a stable timestamp captured at stream start, and the run's id — the
+ * transcript message it turns into on completion carries the same id, so the
+ * reader swaps content in place instead of unmounting the reply.
  */
 function makeStreamingMessage(
   blocks: ContentBlock[],
   usage: TokenUsage | undefined,
   createdAt: string,
+  id: string,
 ): Message {
   return {
-    id: '__streaming__',
+    id,
     sessionId: '',
     role: 'assistant',
     status: 'streaming',
@@ -225,6 +270,7 @@ export function ChatTimeline() {
   const activeSessionId = useUIStore((s) => s.activeSessionId);
   const mutedPlugins = usePluginStore((s) => s.mutedPlugins);
   const isStreaming = useComposerStore((s) => s.isStreaming);
+  const streamingRunId = useComposerStore((s) => s.streamingRunId);
   const streamingBlocks = useComposerStore((s) => s.streamingBlocks);
   const streamingUsage = useComposerStore((s) => s.streamingUsage);
   const contextUsage = useComposerStore((s) => s.contextUsage);
@@ -233,6 +279,7 @@ export function ChatTimeline() {
   const streamError = useComposerStore((s) => s.streamError);
   const scrollToBottomTrigger = useComposerStore((s) => s.scrollToBottomTrigger);
   const setTriggerSend = useComposerStore((s) => s.setTriggerSend);
+  const setPendingBranch = useComposerStore((s) => s.setPendingBranch);
   const setEditingMessage = useComposerStore((s) => s.setEditingMessage);
   const clearEditingMessage = useComposerStore((s) => s.clearEditingMessage);
   const { data: voiceSettings } = useVoiceSettingsQuery();
@@ -240,6 +287,11 @@ export function ChatTimeline() {
 
   const virtuosoRef = useRef<VirtuosoHandle>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
+  // A version switch replaces the whole transcript; scroll once the new path
+  // is on screen instead of at the moment the IPC call returns.
+  const scrollAfterBranchRef = useRef(false);
+  const [switchingBranch, setSwitchingBranch] = useState(false);
+  const [forking, setForking] = useState(false);
   // Stable timestamp captured once when streaming begins
   const streamingStartRef = useRef<string>('');
   // Track last scrollToBottomTrigger to avoid duplicate scrolls when
@@ -310,22 +362,35 @@ export function ChatTimeline() {
     return () => api.removeListener('pi:plugin:message', onPluginMessage);
   }, [queryClient]);
 
-  // Stable timestamp: capture once at the start of streaming
+  // Stable timestamp: captured once at the start of streaming and kept until
+  // the live reply is gone, so the message does not change identity mid-swap.
   if (isStreaming && !streamingStartRef.current) {
     streamingStartRef.current = new Date().toISOString();
   }
-  if (!isStreaming) {
+  if (!isStreaming && streamingBlocks.length === 0) {
     streamingStartRef.current = '';
   }
 
+  // The live reply becomes a transcript message under the same id when the run
+  // ends (composer `onSuccess`). Until that write is visible the live copy
+  // stays on screen: React Query notifies observers a tick after the store
+  // update, so dropping the live copy first left one paint with the answer
+  // gone — the whole transcript flinched at the end of every run.
+  const liveId = streamingRunId || '__streaming__';
+  const liveFinalized =
+    streamingRunId !== '' && storedMessages.some((message) => message.id === streamingRunId);
+
   // During streaming with live blocks, append them as a synthetic message.
   const messages = useMemo(() => {
-    if (isStreaming && streamingBlocks.length > 0) {
+    if (streamingBlocks.length > 0 && !liveFinalized) {
       const createdAt = streamingStartRef.current || new Date().toISOString();
-      return [...storedMessages, makeStreamingMessage(streamingBlocks, streamingUsage ?? undefined, createdAt)];
+      return [
+        ...storedMessages,
+        makeStreamingMessage(streamingBlocks, streamingUsage ?? undefined, createdAt, liveId),
+      ];
     }
     return storedMessages;
-  }, [storedMessages, isStreaming, streamingBlocks]);
+  }, [storedMessages, streamingBlocks, streamingUsage, liveId, liveFinalized]);
 
   // Tool-call blocks that currently host an inline approval card. ONLY the
   // live streaming blocks qualify: the inline card renders inside a running
@@ -376,6 +441,10 @@ export function ChatTimeline() {
     lastAutoReadRef.current = null;
     autoReadPendingRef.current = false;
     preStreamIdsRef.current = new Set();
+    // A branch point belongs to the conversation it was picked in. Leaving
+    // without confirming the edit must not point the next send — in another
+    // conversation — at an entry that is not in it.
+    useComposerStore.getState().setPendingBranch(null);
     // Leaving a conversation must stop audio it owns; otherwise speech keeps
     // playing with no visible stop control.
     return () => stopSpeaking();
@@ -460,17 +529,20 @@ export function ChatTimeline() {
     }
   }, [isLoading, session?.id]);
 
+  // A version switch keeps the same session id but replaces the transcript;
+  // land at the end of the version the user asked for.
+  useLayoutEffect(() => {
+    if (!scrollAfterBranchRef.current || chatItems.length === 0) return;
+    scrollAfterBranchRef.current = false;
+    virtuosoRef.current?.scrollToIndex({
+      index: chatItems.length - 1,
+      align: 'end',
+    });
+  }, [chatItems]);
+
   const lastMessage = messages[messages.length - 1];
   const showStreamingIndicator =
     isStreaming && !streamingBlocks.length && lastMessage?.role === 'user';
-
-  // Retry: re-send the last user message
-  const handleRetry = () => {
-    const lastUserMsg = [...storedMessages].reverse().find((m) => m.role === 'user');
-    if (lastUserMsg && activeSessionId) {
-      setTriggerSend(lastUserMsg.content);
-    }
-  };
 
   // Edit: enter inline editing mode for a user message
   const handleEditMessage = useCallback((message: Message) => {
@@ -485,7 +557,10 @@ export function ChatTimeline() {
 
     // ① Optimistically truncate messages at the edited message (exclusive).
     //    The old message is replaced by the new one sent via setTriggerSend.
-    const msgIndex = storedMessages.findIndex((m) => m.id === message.id);
+    //    Positions come from the unfiltered timeline: `storedMessages` may
+    //    hide muted plugin messages, so its indices do not index the cache.
+    const all = session?.messages ?? [];
+    const msgIndex = all.findIndex((m) => m.id === message.id);
     if (msgIndex >= 0) {
       queryClient.setQueryData(['session', activeSessionId], (old: any) => {
         if (!old) return old;
@@ -496,18 +571,161 @@ export function ChatTimeline() {
       });
     }
 
-    // ② Set edit state and trigger send (composer's mutationFn handles navigateTree + sendMessageStream)
+    // ② Set edit state and trigger send. The send branches the session tree
+    //    from this entry (`branchFrom`), so the edited message becomes one
+    //    version of the turn rather than a rewrite of it.
     setEditingMessage(message.entryId, message.id, '');
-    setTriggerSend(newContent);
+    // Attachments survive the edit: the text changed, not what was attached.
+    setTriggerSend(newContent, undefined, {
+      attachments: messageAttachments(message as UserMessage, true),
+    });
     // ③ Immediately clear visual edit state so the original bubble reappears
-    //    (editingEntryId is preserved for navigateTree inside the composer mutation)
+    //    (the branch point is already recorded in the composer store)
     useComposerStore.setState({ editingMessageId: null });
-  }, [activeSessionId, storedMessages, queryClient, setEditingMessage, setTriggerSend]);
+  }, [activeSessionId, session?.messages, queryClient, setEditingMessage, setTriggerSend]);
 
   // Cancel inline edit
   const handleCancelEdit = useCallback(() => {
     clearEditingMessage();
   }, [clearEditingMessage]);
+
+  /**
+   * Send an earlier turn again as a new version of itself.
+   *
+   * The prompt itself is not rebuilt here: main reads the turn's stored
+   * message — raw text, attachment paths, image bytes — and sends exactly
+   * that again. This handler only takes the abandoned version off screen.
+   */
+  const replayTurn = useCallback((userMessage: UserMessage, userIndex: number) => {
+    if (!activeSessionId || !userMessage.entryId) return;
+
+    queryClient.setQueryData(['session', activeSessionId], (old: any) => {
+      if (!old) return old;
+      return { ...old, messages: old.messages.slice(0, userIndex) };
+    });
+
+    // Images the turn carried live on as blocks; the replay sends the same
+    // bytes back, so the retried turn sees what the original one saw.
+    const attachments = messageAttachments(userMessage, false);
+
+    setPendingBranch({ entryId: userMessage.entryId, replay: true });
+    setTriggerSend(stripAppendedContext(userMessage.content), undefined, {
+      silent: true,
+      attachments,
+    });
+  }, [activeSessionId, queryClient, setPendingBranch, setTriggerSend]);
+
+  /**
+   * Re-run the turn an assistant message answers.
+   */
+  const handleRegenerate = useCallback((message: Message) => {
+    const all = session?.messages ?? [];
+    const index = all.findIndex((m) => m.id === message.id);
+    if (index < 0) return;
+
+    // The turn starts at its user message — but a run a plugin started has no
+    // user message of its own, and replaying the one before it would retry a
+    // different turn entirely.
+    let userIndex = index - 1;
+    while (userIndex >= 0) {
+      const candidate = all[userIndex];
+      if (candidate.role === 'user') break;
+      if (candidate.role === 'plugin' && (candidate as PluginMessage).triggered) return;
+      userIndex--;
+    }
+    if (userIndex < 0) return;
+    replayTurn(all[userIndex] as UserMessage, userIndex);
+  }, [session?.messages, replayTurn]);
+
+  /**
+   * Retry after a failed send.
+   *
+   * A send that reached the session file is replayed — same prompt, same
+   * attachments — with the failed attempt left on its own branch. One that
+   * never left the composer has nothing stored to replay, so the text is
+   * simply sent again.
+   */
+  const handleRetry = () => {
+    const all = session?.messages ?? [];
+    let index = all.length - 1;
+    while (index >= 0 && all[index].role !== 'user') index--;
+    const userMessage = index >= 0 ? all[index] : undefined;
+    if (!userMessage || !activeSessionId) return;
+    if (userMessage.entryId) {
+      replayTurn(userMessage as UserMessage, index);
+      return;
+    }
+    setTriggerSend(userMessage.content);
+  };
+
+  /** Show another version of a turn. */
+  const handleSwitchBranch = useCallback(async (entryId: string) => {
+    if (!activeSessionId || isStreaming) return;
+    setSwitchingBranch(true);
+    try {
+      await sdk.chat.switchBranch(activeSessionId, entryId);
+      // The transcript is the active path, so a switch is a re-read — the
+      // reader projects to the new leaf. The scroll flag is armed first: the
+      // cache update can re-render before this promise resolves.
+      scrollAfterBranchRef.current = true;
+      await queryClient.invalidateQueries({ queryKey: ['session', activeSessionId] });
+    } catch (err) {
+      toast(err instanceof Error ? err.message : t('无法切换对话版本'));
+    } finally {
+      setSwitchingBranch(false);
+    }
+  }, [activeSessionId, isStreaming, sdk, queryClient, t]);
+
+  /**
+   * Copy the conversation up to this reply into an independent conversation.
+   *
+   * The copy is one write of a new session file in main; the source is never
+   * touched. The branch enters the list even if the user has navigated away by
+   * the time it lands — only the view switch waits for "still where we were".
+   */
+  const handleForkMessage = useCallback(async (message: Message) => {
+    if (!activeSessionId || isStreaming) return;
+    const through = message.lastEntryId ?? message.entryId;
+    if (!through) return;
+
+    const sourceId = activeSessionId;
+    setForking(true);
+    try {
+      const forked = await sdk.session.fork(
+        sourceId,
+        through,
+        t('{title}（分支）', { title: session?.title ?? '' }),
+      );
+      // Seed the transcript before the list refresh lands, so opening the
+      // branch never flashes its loading state.
+      queryClient.setQueryData(['session', forked.id], forked);
+      void queryClient.invalidateQueries({ queryKey: ['sessions'] });
+      void queryClient.invalidateQueries({ queryKey: ['workspaces'] });
+
+      if (useUIStore.getState().activeSessionId === sourceId) {
+        await activateSession(forked.id);
+        requestAnimationFrame(() => {
+          document.querySelector<HTMLElement>('[contenteditable="true"]')?.focus();
+        });
+      }
+    } catch (err) {
+      toast(err instanceof Error ? err.message : t('创建分支失败'));
+    } finally {
+      setForking(false);
+    }
+  }, [activeSessionId, isStreaming, sdk, session?.title, t, queryClient]);
+
+  // The assistant message that ends the current turn — the only one a retry
+  // can replace without abandoning later work.
+  const regenerableAssistantId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const item = messages[i];
+      if (item.role === 'assistant') return item.id;
+      if (item.role === 'user') return null;
+      if (item.role === 'plugin' && (item as PluginMessage).triggered) return null;
+    }
+    return null;
+  }, [messages]);
 
   // Scroll to bottom
   const scrollToBottom = () => {
@@ -591,6 +809,18 @@ export function ChatTimeline() {
                 onEditMessage={handleEditMessage}
                 onConfirmEdit={handleConfirmEdit}
                 onCancelEdit={handleCancelEdit}
+                showRegenerate={message.id === regenerableAssistantId && !isStreaming}
+                onRegenerate={handleRegenerate}
+                onSwitchBranch={handleSwitchBranch}
+                branchSwitchingDisabled={isStreaming || switchingBranch}
+                showFork={
+                  isAssistant &&
+                  message.status === 'complete' &&
+                  message.content.trim().length > 0 &&
+                  !isStreaming
+                }
+                onForkMessage={handleForkMessage}
+                forking={forking}
               />
             );
           }}

@@ -59,6 +59,45 @@ test('live run state, drafts, and pending flags are per conversation', () => {
   assert.equal(store.getState().streamingBlocks.length, 0);
 });
 
+test('a run keeps one identity from the live reply to the stored message', () => {
+  const store = useComposerStore;
+  store.getState().reset();
+  store.getState().enterSession('A');
+
+  store.getState().beginSessionStream('A');
+  const firstRun = store.getState().streamingRunId;
+  assert.match(firstRun, /^run-/);
+
+  store.getState().updateSessionStream('A', {
+    blocks: [{ id: 't1', type: 'text', content: 'answer' }],
+  });
+
+  // Ending a run must not drop the blocks or change the id: the reader shows
+  // this copy until the promoted transcript message (written under the same
+  // id) is visible. Dropping either first made the answer disappear for a
+  // paint at the end of every run.
+  store.getState().endSessionStream('A', { clear: false });
+  assert.equal(store.getState().isStreaming, false);
+  assert.equal(store.getState().streamingBlocks.length, 1);
+  assert.equal(store.getState().streamingRunId, firstRun);
+
+  // A background conversation keeps its own identity and blocks.
+  store.getState().enterSession('B');
+  store.getState().beginSessionStream('B');
+  const otherRun = store.getState().streamingRunId;
+  assert.notEqual(otherRun, firstRun);
+  assert.equal(store.getState().streamingBlocks.length, 0);
+  store.getState().enterSession('A');
+  assert.equal(store.getState().streamingRunId, firstRun);
+  assert.equal(store.getState().streamingBlocks.length, 1);
+
+  // The next run is a different reply: new id, empty blocks.
+  store.getState().beginSessionStream('A');
+  assert.notEqual(store.getState().streamingRunId, firstRun);
+
+  store.getState().reset();
+});
+
 test('permission mode is one global setting', async () => {
   const { usePermissionStore } = await import(
     '../../../packages/ui/src/stores/permission-store.ts'

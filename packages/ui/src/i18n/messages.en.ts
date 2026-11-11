@@ -297,6 +297,18 @@ export const EN_MESSAGES = {
   '复制 Markdown 报告': 'Copy Markdown report',
   可编辑: 'Editable',
   编辑: 'Edit',
+  // ── Conversation branches (versions of one turn) ──
+  重新生成本轮回答: 'Regenerate this answer',
+  '第 {index} 版，共 {count} 版': 'Version {index} of {count}',
+  上一个版本: 'Previous version',
+  下一个版本: 'Next version',
+  无法切换对话版本: 'Could not switch to that version',
+  // ── Branching a reply into its own conversation ──
+  从此回复创建分支: 'Create a branch from this reply',
+  '分支会复制到这条回复为止的对话，原对话保持不变。':
+    'The branch copies the conversation up to this reply; the original stays as it is.',
+  '创建分支失败': 'Could not create the branch',
+  '{title}（分支）': '{title} (branch)',
   创建: 'Create',
   上级目录: 'Parent directories',
   生效中: 'Active',

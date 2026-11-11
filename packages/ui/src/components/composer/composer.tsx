@@ -43,6 +43,13 @@ interface SendVariables {
    * message. The agent still sees `content`.
    */
   pluginMessage?: PluginMessageData;
+  /**
+   * Send this turn as a sibling of an earlier one instead of after the current
+   * leaf (editing a question, or replaying the turn at `entryId`). The branch
+   * point and the replayed prompt are resolved in main.
+   */
+  branchFrom?: string;
+  replayTurn?: { entryId: string };
 }
 
 export function Composer() {
@@ -380,19 +387,28 @@ export function Composer() {
       const state = useComposerStore.getState();
       const content = state.triggerContent;
       const pluginMessage = state.triggerPluginMessage;
-      if (content.trim()) {
+      // A branch point is consumed by this send even if the send fails: the
+      // tree move happens inside the send, so a retry afterward continues on
+      // whichever branch the last attempt actually opened.
+      const pending = state.pendingBranch;
+      // An edit may legitimately be attachment-only (the user rewrote the text
+      // away but kept the file), and a replayed turn may carry no text at all.
+      if (content.trim() || pending?.replay || state.triggerAttachments.length > 0) {
         sendMutation.mutate({
           content,
           sessionId: activeSessionId,
-          attachments: [],
+          attachments: state.triggerAttachments,
           skills: [],
           ...(pluginMessage ? { pluginMessage } : {}),
+          ...(pending?.replay ? { replayTurn: { entryId: pending.entryId } } : {}),
+          ...(pending && !pending.replay ? { branchFrom: pending.entryId } : {}),
         });
+        state.setPendingBranch(null);
         if (pluginMessage) {
           // The plugin never touched the input: leave whatever the user was
           // drafting exactly where it is; just consume the card.
           state.setTriggerPluginMessage(null);
-        } else {
+        } else if (!pending?.replay) {
           setValue('');
         }
       }
@@ -526,23 +542,9 @@ export function Composer() {
       });
 
     },
-    mutationFn: async ({ content, sessionId, attachments, skills, pluginMessage }: SendVariables) => {
+    mutationFn: async ({ content, sessionId, attachments, skills, pluginMessage, branchFrom, replayTurn }: SendVariables) => {
       if (!pluginMessage) lastUserMessageRef.current = content;
       useComposerStore.getState().beginSessionStream(sessionId);
-
-      // If editing a message, navigate the tree first to branch from the edited entry
-      const editEntryId = useComposerStore.getState().editingEntryId;
-      if (editEntryId) {
-        try {
-          await sdk.chat.navigateTree(sessionId, editEntryId);
-        } catch (err) {
-          useComposerStore.getState().endSessionStream(sessionId, {
-            clear: true,
-            error: err instanceof Error ? err.message : t('无法在文件树中定位'),
-          });
-          throw err;
-        }
-      }
 
       // Build prompt text: decode and include text-based file contents,
       // append references for binary files
@@ -660,6 +662,8 @@ export function Composer() {
           // which one applies. Per-message references ride in the content.
           skills: enabledSkillIds,
           ...(pluginMessage ? { pluginMessage } : {}),
+          ...(branchFrom ? { branchFrom } : {}),
+          ...(replayTurn ? { replayTurn } : {}),
         },
         (chunk) => {
           if (chunk.type === 'message_start') {
@@ -686,6 +690,23 @@ export function Composer() {
               steering: chunk.queueState.steering,
               followUp: chunk.queueState.followUp,
             });
+          } else if (chunk.type === 'turn_start' && chunk.entryId) {
+            // The optimistic bubble becomes the real turn: with an entry id,
+            // editing and retrying it work immediately instead of only after
+            // the conversation is re-read from disk.
+            const entryId = chunk.entryId;
+            queryClient.setQueryData(['session', sessionId], (old: any) => {
+              if (!old) return old;
+              const messages = [...(old.messages || [])];
+              for (let i = messages.length - 1; i >= 0; i--) {
+                const id = messages[i]?.id;
+                if (typeof id === 'string' && id.startsWith('optimistic-')) {
+                  messages[i] = { ...messages[i], entryId };
+                  return { ...old, messages };
+                }
+              }
+              return old;
+            });
           } else if (chunk.type === 'error') {
             useComposerStore.getState().updateSessionStream(sessionId, {
               streamError: chunk.error || t('发生了未知错误'),
@@ -702,7 +723,7 @@ export function Composer() {
 
       // Editing state belongs to the visible composer; a background send must
       // not clear a draft the user is editing in another conversation.
-      if (state.editingEntryId && sessionId === useUIStore.getState().activeSessionId) {
+      if (state.editingMessageId && sessionId === useUIStore.getState().activeSessionId) {
         clearEditingMessage();
       }
 
@@ -721,16 +742,22 @@ export function Composer() {
         .join('');
 
       const streamingUsage = stream?.usage ?? null;
+      // The run's identity, shared with the live reply on screen: promoting
+      // under the same id turns "remove the streaming bubble, add the stored
+      // one" — two paints — into a single in-place replacement.
+      const runId = stream?.runId || `msg-${sessionId}-${Date.now()}`;
 
-      // Clear this conversation's run BEFORE writing to cache: the slot it
-      // owned is gone, and any other conversation keeps its own state.
-      state.endSessionStream(sessionId, { clear: true });
+      // End the run without dropping its blocks yet: the reader keeps the live
+      // reply until the promoted message below is actually in the cache (React
+      // Query notifies observers one tick later). Clearing first made the answer
+      // vanish for a paint — the whole transcript flinched at every run end.
+      state.endSessionStream(sessionId, { clear: false });
 
       // Now promote the captured streaming data into the query cache as a
       // single assistant message so ChatTimeline transitions without a ghost.
       const now = new Date().toISOString();
       const assistantMsg = {
-        id: `msg-${sessionId}-${Date.now()}`,
+        id: runId,
         sessionId,
         role: 'assistant' as const,
         status: 'complete' as const,
@@ -749,6 +776,26 @@ export function Composer() {
           messages: [...(old.messages || []), assistantMsg],
         };
       });
+
+      // Release the live blocks now that the promoted message is in the cache.
+      // This timer is queued after React Query scheduled its observer notify,
+      // so it can never clear the live reply before the cache can replace it.
+      setTimeout(() => {
+        const store = useComposerStore.getState();
+        const slot = store.streams[sessionId];
+        // A new run may have started in the meantime — never clear its blocks.
+        if (!slot || slot.isStreaming || slot.runId !== runId) return;
+        store.endSessionStream(sessionId, { clear: true });
+      }, 0);
+
+      // A branched send changed the shape of the conversation: the turns after
+      // the branch point left the active path, and the new turn carries entry
+      // ids and versions the optimistic bubble cannot know. Re-read once, now
+      // that the run is over, so the version control is real rather than
+      // appearing only after the next reload.
+      if (variables.branchFrom || variables.replayTurn) {
+        void queryClient.invalidateQueries({ queryKey: ['session', sessionId] });
+      }
 
       // A run that finished while you were looking elsewhere should announce
       // itself; the session list's spinner disappears at the same moment.
@@ -1369,7 +1416,7 @@ export function Composer() {
   return (
     <div
       className={cn(
-        'rounded-3xl border border-border bg-card shadow-xs mx-4 mb-4 overflow-visible transition-colors',
+        'rounded-3xl border border-border bg-card shadow-xs mx-4 mb-4 overflow-visible transition-colors @container',
         // 完全访问 states itself on its own control (red icon + label in
         // PermissionModeButton). Ringing the whole composer reads as "this
         // input is wrong" and paints every surrounding element red, so the
@@ -1483,8 +1530,17 @@ export function Composer() {
       {/* Bottom tools row. Left zone: input action · model/effort ·
           permission mode. Right zone: voice input and the primary action,
           separated by a wider gap so the mic does not crowd Send. Every
-          control is 28px tall; the model name is the only thing that shrinks. */}
-      <div className="flex min-w-0 items-center gap-1 px-2.5 py-2">
+          control is 28px tall; the model name is the only thing that shrinks.
+
+          The composer card is the size container. A wide preview panel
+          squeezes the centre column by hundreds of pixels while the WINDOW
+          keeps its width, so viewport breakpoints claim room this composer
+          does not have: the row used to spill past the card and shove the mic
+          and Send out of the column. The controls below therefore adapt to
+          the CARD's width — labels and chevrons go first, icons and the
+          primary action stay. Below ~320px the row stops pretending it can
+          hold one line and wraps instead of overflowing. */}
+      <div className="flex min-w-0 items-center gap-1 px-2.5 py-2 @max-[320px]:flex-wrap">
         <FileUploadButton
           disabled={isStreaming}
           onFilesSelected={handleFilesSelected}
@@ -1499,7 +1555,7 @@ export function Composer() {
           onChange={(level) => updateConfigMut.mutate({ defaultThinkLevel: level })}
         />
         <PermissionModeButton />
-        <div className="ml-auto flex shrink-0 items-center gap-3">
+        <div className="ml-auto flex shrink-0 items-center gap-3 @max-[400px]:gap-1.5">
           <VoiceInputButton
             disabled={!activeSessionId}
             configured={sttConfigured}
@@ -1519,8 +1575,10 @@ export function Composer() {
               aria-label={t('引导（Ctrl+Enter）')}
             >
               <CornerDownRight className="h-3.5 w-3.5" />
-              {t('引导')}
-              <kbd className="ml-0.5 text-[10px] opacity-60 hidden sm:inline">⌃↵</kbd>
+              {/* Label and shortcut are the first things to go when the row
+                  is squeezed; the aria-label above stays either way. */}
+              <span className="@max-[440px]:hidden">{t('引导')}</span>
+              <kbd className="ml-0.5 hidden text-[10px] opacity-60 @[440px]:inline">⌃↵</kbd>
             </Button>
             <Button
               size="icon"
