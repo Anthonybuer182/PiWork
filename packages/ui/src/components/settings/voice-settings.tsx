@@ -1125,6 +1125,32 @@ function CustomHttpFields({
           onBlur={(event) => setOption('headers', event.target.value)}
         />
       </div>
+      {/* The template's {{model}} / {{voice}} placeholders need per-provider
+          values. Without these inputs a custom endpoint had to hard-code them
+          in the template, because the only other place — the capability-level
+          overrides above the list — is shared by every provider. */}
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <Label htmlFor="voiceModel">{t('模型')}</Label>
+          <Input
+            id="voiceModel"
+            placeholder={t('可选')}
+            value={value.model ?? ''}
+            onChange={(event) => setData({ model: event.target.value })}
+          />
+        </div>
+        {!isStt && (
+          <div>
+            <Label htmlFor="voiceVoice">{t('音色')}</Label>
+            <Input
+              id="voiceVoice"
+              placeholder={t('可选')}
+              value={value.voice ?? ''}
+              onChange={(event) => setData({ voice: event.target.value })}
+            />
+          </div>
+        )}
+      </div>
       <div>
         <Label htmlFor="voiceBodyTemplate">{t('请求体模板')}</Label>
         <textarea
