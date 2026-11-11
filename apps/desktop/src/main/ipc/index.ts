@@ -35,6 +35,8 @@ export interface RegisterIpcHandlersOptions {
   pluginDocsProvider?: () => PluginDoc[];
   /** Per-session host hook (e.g. the permission gate) — see RealChatServiceOptions. */
   onSessionCreated?: RealChatServiceOptions['onSessionCreated'];
+  /** Once per settled agent run — see RealChatServiceOptions.onRunSettled. */
+  onRunSettled?: RealChatServiceOptions['onRunSettled'];
   /** Settings → 工具 switches, merged into every session's tool denylist. */
   getGlobalDisabledTools?: RealChatServiceOptions['getGlobalDisabledTools'];
   /** Called after the run is aborted and before the session file is removed. */
@@ -66,6 +68,7 @@ export function registerIpcHandlers(
     customToolsProvider: options?.customToolsProvider,
     pluginDocsProvider: options?.pluginDocsProvider,
     onSessionCreated: options?.onSessionCreated,
+    onRunSettled: options?.onRunSettled,
     getGlobalDisabledTools: options?.getGlobalDisabledTools,
     mcp: options?.mcp,
   });

@@ -676,7 +676,7 @@ const slotB = piSDK.liveSlot('page-b', document.getElementById('second-pane'), (
 | `onTool(name, params, ctx, call)` | agent 调了你的工具（`return` 字符串或 `{ content, details, card }`）。`call.sessionId` 是调用方会话 |
 | `onCommand(name, args, ctx)` | 斜杠命令跑了 |
 | `onContextRequest(providerId, message, ctx)` | 宿主发消息前要上下文，返回要注入的文字 |
-| `onHostEvent(event, data, ctx)` | 宿主推了个事件：`session.changed`（`{ sessionId }`，所有后端）、`browser.urlChanged` / `browser.tabOpened`（`{ tabId, url }`，仅 `browser` 权限） |
+| `onHostEvent(event, data, ctx)` | 宿主推了个事件：`session.changed`（`{ sessionId }`，所有后端）、`agent.turnEnd`（`{ sessionId, runId, aborted, outcome }`，所有后端；一轮 agent 运行**结束**时推一次，成功/中止/出错都算）、`browser.urlChanged` / `browser.tabOpened`（`{ tabId, url }`，仅 `browser` 权限）、`voice.playback`（仅 `voice` 权限） |
 | `onCardEvent(toolName, eventId, kind, payload, ctx)` | 用户点了你返回到对话里的卡片按钮（`kind:'click'`）或在其中输入框回车（`kind:'submit'`）。事件是单向的；想让卡片反映后续状态，靠下一次工具结果返回新卡片 |
 | `onMessageAction(messageId, eventId, kind, payload, ctx, meta?)` | 用户点了你用 `ctx.messages.post` 发到对话里的插件消息卡片。`meta.sessionId` 是该消息所在的会话；用 `ctx.messages.update/remove` 改同一条消息 |
 
@@ -730,6 +730,54 @@ await ctx.call('panel.open', { panelId: 'main', focus: true });
 await ctx.call('chat.send', { text: '该喝水了' });
 await ctx.call('dialog.openFile', { filters: [{ name: 'Word', extensions: ['docx'] }] });
 ```
+
+### `agent.turnEnd` —— 一轮结束时结算，而不是每次工具调用都发一张卡
+
+`onTool` 一轮里会被调很多次（agent 分批改同一个文件），但用户关心的是"这一轮到底改了什么"。宿主在整轮运行**结束**时推 `agent.turnEnd`——正常完成、用户停止（停止按钮 / Esc）、出错，都会走一次。用它把一轮的多次调用折叠成一个结果：
+
+```js
+const pending = new Map(); // sessionId → 这一轮动过的文件
+
+onTool(name, params, ctx, call) {
+  if (name === 'doc_write' && call.sessionId) {
+    const set = pending.get(call.sessionId) ?? new Set();
+    set.add(params.path);
+    pending.set(call.sessionId, set);
+  }
+  return text('ok');
+}
+
+onHostEvent(event, data) {
+  if (event !== 'agent.turnEnd') return;
+  const docs = [...(pending.get(data.sessionId) ?? [])];
+  pending.delete(data.sessionId);
+  if (docs.length === 0) return; // 只读的一轮不发卡
+  void ctx.messages.post({
+    sessionId: data.sessionId,
+    status: data.outcome === 'completed' ? 'success' : 'warning',
+    card: {
+      component: 'Card',
+      props: { title: docs.length > 1 ? `本轮已更新 ${docs.length} 个文档` : '文档已更新', icon: 'file' },
+      children: docs.map((p) => ({
+        component: 'Row',
+        props: { justify: 'between', gap: 'md' },
+        children: [
+          { component: 'Text', props: { text: p.split('/').pop(), weight: 'bold' } },
+          { component: 'Button', props: { label: '打开', variant: 'outline', path: p }, events: { onClick: 'open_doc' } },
+        ],
+      })),
+    },
+  });
+}
+```
+
+要点：
+
+- 事件广播给每个运行中的后端；按 `sessionId` 只结算自己参与过的会话，没参与的直接忽略。
+- `messages.post` 只进时间线，默认不进模型上下文、**不会启动新的 agent 回合**——这是它和 `chat.send` 的根本区别（后者一定会触发一轮运行）。
+- `aborted` 是"用户停的"，`outcome === 'error'` 是"运行出错"；已经落盘的改动仍然值得发卡，别因为中止就把结果吞掉。
+- `runId` 是这一轮的身份，适合写日志或去重；一次运行只会推一次 `agent.turnEnd`，所以按会话记账就够了。
+- 卡片上的按钮走 `onMessageAction`（不是 `onCardEvent`——后者只服务于工具结果里的卡片）。
 
 ### 写错了会怎样
 

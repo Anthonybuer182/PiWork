@@ -134741,6 +134741,101 @@ var docCard = /* @__PURE__ */ __name((filePath, ext, mode = "updated") => ({
     }
   ]
 }), "docCard");
+var runLedgers = /* @__PURE__ */ new Map();
+var MAX_LEDGER_SESSIONS = 20;
+var ledgerOrder = 0;
+function recordDocWork(sessionId, filePath, ext, mode, ops) {
+  let ledger = runLedgers.get(sessionId);
+  if (!ledger) {
+    if (runLedgers.size >= MAX_LEDGER_SESSIONS) {
+      const oldest = runLedgers.keys().next().value;
+      if (oldest !== void 0) runLedgers.delete(oldest);
+    }
+    ledger = /* @__PURE__ */ new Map();
+    runLedgers.set(sessionId, ledger);
+  }
+  const key = (() => {
+    try {
+      return resolvePath2(filePath);
+    } catch {
+      return filePath;
+    }
+  })();
+  const tally = ledger.get(key);
+  if (tally) {
+    tally.ops += ops;
+    tally.created = tally.created || mode === "created";
+    tally.order = ++ledgerOrder;
+    return;
+  }
+  ledger.set(key, { path: filePath, ext, created: mode === "created", ops, order: ++ledgerOrder });
+}
+__name(recordDocWork, "recordDocWork");
+function reportDocWork(sessionId, filePath, ext, mode, ops) {
+  if (!sessionId) return { card: docCard(filePath, ext, mode) };
+  recordDocWork(sessionId, filePath, ext, mode, ops);
+  return {};
+}
+__name(reportDocWork, "reportDocWork");
+function runSummaryCard(docs, outcome) {
+  const allCreated = docs.every((d) => d.created);
+  const title = docs.length > 1 ? `\u672C\u8F6E\u5DF2\u66F4\u65B0 ${docs.length} \u4E2A\u6587\u6863` : allCreated ? "\u6587\u6863\u5DF2\u521B\u5EFA" : "\u6587\u6863\u5DF2\u66F4\u65B0";
+  const note = outcome === "aborted" ? "\u672C\u8F6E\u5DF2\u505C\u6B62\uFF0C\u4EE5\u4E0A\u6539\u52A8\u5DF2\u4FDD\u5B58" : outcome === "error" ? "\u672C\u8F6E\u51FA\u9519\uFF0C\u4EE5\u4E0A\u6539\u52A8\u5DF2\u4FDD\u5B58" : null;
+  return {
+    component: "Card",
+    props: {
+      title,
+      icon: "file",
+      status: outcome === "completed" ? "success" : "warning"
+    },
+    children: [
+      ...docs.map((d) => ({
+        component: "Row",
+        props: { justify: "between", gap: "md" },
+        children: [
+          {
+            component: "Row",
+            props: { gap: "md", grow: true },
+            children: [
+              { component: "Text", props: { text: basename3(d.path), weight: "bold", truncate: true } },
+              { component: "Badge", props: { text: d.ext.toUpperCase() } },
+              ...d.ops > 0 ? [{ component: "Text", props: { text: `${d.ops} \u4E2A\u64CD\u4F5C`, variant: "small" } }] : []
+            ]
+          },
+          {
+            component: "Button",
+            props: { label: "\u6253\u5F00", variant: "outline", path: d.path },
+            events: { onClick: "open_viewer" }
+          }
+        ]
+      })),
+      ...note ? [{ component: "Text", props: { text: note, variant: "muted" } }] : []
+    ]
+  };
+}
+__name(runSummaryCard, "runSummaryCard");
+async function settleRun(ev) {
+  const sessionId = String(ev?.sessionId ?? "");
+  const ledger = runLedgers.get(sessionId || "default");
+  if (!ledger) return;
+  runLedgers.delete(sessionId || "default");
+  if (!sessionId) return;
+  const docs = [...ledger.values()].sort((a, b) => a.order - b.order);
+  if (docs.length === 0) return;
+  const outcome = ev?.outcome ?? "completed";
+  try {
+    await ctx.messages.post({
+      sessionId,
+      card: runSummaryCard(docs, outcome),
+      status: outcome === "completed" ? "success" : "warning"
+    });
+  } catch (err) {
+    ctx.log.warn(
+      `completion card not posted: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
+__name(settleRun, "settleRun");
 async function toolGuide(p) {
   const domain = String(p.domain ?? "pptx");
   if (domain === "xlsx") {
@@ -134918,7 +135013,7 @@ async function toolEdit(p, sessionId) {
         applied: true,
         mtime: written2?.mtime
       }),
-      card: docCard(path, ext)
+      ...reportDocWork(sessionId ?? null, path, ext, "updated", cellOps.length)
     };
   }
   if (ext === "docx") {
@@ -134951,7 +135046,7 @@ ${plan}`, {
         mtime: info2?.mtimeMs,
         steps
       }),
-      card: docCard(path, ext)
+      ...reportDocWork(sessionId ?? null, path, ext, "updated", ops.length)
     };
   }
   if (ext !== "pptx") {
@@ -134990,7 +135085,7 @@ Fix the listed op(s) and resend the whole batch.`,
       `applied ${result.records?.length ?? ops.length} op(s) to ${path} and saved (${bytes.length} bytes)`,
       { applied: true, records: result.records ?? [], mtime: written?.mtime }
     ),
-    card: docCard(path, ext)
+    ...reportDocWork(sessionId ?? null, path, ext, "updated", result.records?.length ?? ops.length)
   };
 }
 __name(toolEdit, "toolEdit");
@@ -135053,7 +135148,7 @@ async function toolCreate(p, sessionId) {
         path,
         mtime: written2?.mtime
       }),
-      card: docCard(path, ext, "created")
+      ...reportDocWork(sessionId ?? null, path, ext, "created", ops.length)
     };
   }
   if (ext === "pdf") {
@@ -135101,7 +135196,7 @@ async function toolCreate(p, sessionId) {
           mtime: written2?.mtime
         }
       ),
-      card: docCard(path, ext, "created")
+      ...reportDocWork(sessionId ?? null, path, ext, "created", ops.length)
     };
   }
   if (ext === "xlsx") {
@@ -135122,7 +135217,7 @@ async function toolCreate(p, sessionId) {
           mtime: written2?.mtime
         }
       ),
-      card: docCard(path, ext, "created")
+      ...reportDocWork(sessionId ?? null, path, ext, "created", ops.length)
     };
   }
   if (ext === "docx") {
@@ -135135,7 +135230,7 @@ async function toolCreate(p, sessionId) {
           path,
           mtime: written2?.mtime
         }),
-        card: docCard(path, ext, "created")
+        ...reportDocWork(sessionId ?? null, path, ext, "created", ops.length)
       };
     }
     const commands = planDocxCommands(ops, false);
@@ -135160,7 +135255,7 @@ async function toolCreate(p, sessionId) {
         mtime: info?.mtimeMs,
         steps
       }),
-      card: docCard(path, ext, "created")
+      ...reportDocWork(sessionId ?? null, path, ext, "created", ops.length)
     };
   }
   const opened = await openPptx(await createBlankPptx());
@@ -135193,11 +135288,11 @@ Fix the listed op(s) and resend the whole batch. No file was written.`,
         mtime: written?.mtime
       }
     ),
-    card: docCard(path, ext, "created")
+    ...reportDocWork(sessionId ?? null, path, ext, "created", ops.length)
   };
 }
 __name(toolCreate, "toolCreate");
-async function toolPdfEdit(p) {
+async function toolPdfEdit(p, sessionId) {
   const path = String(p.path ?? "");
   if (!path) throw new Error("pdf_edit: path is required");
   if (!isAbsolute3(path)) throw new Error("pdf_edit: path must be absolute");
@@ -135230,6 +135325,7 @@ async function toolPdfEdit(p) {
       await writeOfficeBytes(out, result.splitParts[i]);
       files.push(out);
     }
+    if (sessionId) for (const out of files) recordDocWork(sessionId, out, "pdf", "created", 0);
     return text(
       `split ${path} (${sourcePages} page(s)) into ${files.length} file(s):
   ${files.join("\n  ")}`,
@@ -135261,11 +135357,11 @@ async function toolPdfEdit(p) {
         mtime: written?.mtime
       }
     ),
-    card: docCard(outputPath, "pdf")
+    ...reportDocWork(sessionId ?? null, outputPath, "pdf", "updated", ops.length)
   };
 }
 __name(toolPdfEdit, "toolPdfEdit");
-async function toolPdfConvert(p) {
+async function toolPdfConvert(p, sessionId) {
   const path = String(p.path ?? "");
   if (!path) throw new Error("pdf_convert: path is required");
   if (!isAbsolute3(path)) throw new Error("pdf_convert: path must be absolute");
@@ -135308,7 +135404,7 @@ Notes:
         mtime: written?.mtime
       }
     ),
-    card: docCard(outputPath, to, "created")
+    ...reportDocWork(sessionId ?? null, outputPath, to, "created", 0)
   };
 }
 __name(toolPdfConvert, "toolPdfConvert");
@@ -135376,9 +135472,9 @@ async function runTool(name, p, call = {}) {
     case "office_create":
       return await toolCreate(p, sessionId);
     case "pdf_edit":
-      return await toolPdfEdit(p);
+      return await toolPdfEdit(p, sessionId);
     case "pdf_convert":
-      return await toolPdfConvert(p);
+      return await toolPdfConvert(p, sessionId);
     case "pdf_render":
       return await toolPdfRender(p);
     // ── opening files in the viewer ──
@@ -135616,6 +135712,15 @@ async function onEvent(_panelId, event, data, _ctx, meta) {
   }
 }
 __name(onEvent, "onEvent");
+function openViewerFromCard(eventId, kind, payload) {
+  if (kind !== "click" || eventId !== "open_viewer") return;
+  const target = String(payload?.path ?? "") || activeFileOf();
+  if (!target) return;
+  void openInViewer(target).catch((err) => {
+    ctx.log.error(`open_viewer failed: ${err instanceof Error ? err.message : String(err)}`);
+  });
+}
+__name(openViewerFromCard, "openViewerFromCard");
 plugin({
   onInit(context) {
     ctx = context;
@@ -135658,30 +135763,34 @@ plugin({
     if (file) setTabFile(tabId, file);
   },
   onTool: /* @__PURE__ */ __name((name, params, _ctx, call) => runTool(name, params, call), "onTool"),
-  /** The conversation on screen changed. The host swaps the session-scoped
-   *  tabs itself; this only keeps the unscoped-tool fallback pointed right. */
+  /**
+   * The host tells every backend when a conversation switches and when an
+   * agent run settles. The settle is the moment a run's document work is
+   * complete: one completion card for the whole run, not one per batch.
+   */
   onHostEvent(event, data) {
-    if (event !== "session.changed") return;
-    panelSession = data?.sessionId ?? null;
+    if (event === "session.changed") {
+      panelSession = data?.sessionId ?? null;
+      return;
+    }
+    if (event === "agent.turnEnd") {
+      void settleRun(data);
+    }
   },
   onRequest(panelId, method, params, _ctx, meta) {
     return onUiRequest(method, params, panelId, meta);
   },
   /**
-   * Card buttons from the office_edit result card (messageRenderer). The path
-   * comes back in the clicked node's props, so an old card still opens its
-   * own document. The card was clicked from the conversation ON SCREEN, so it
-   * opens into the panel's bucket. Not async: the SDK calls this fire-and-
-   * forget without awaiting, so a rejection here would escape the SDK's
-   * try/catch — handle errors inline instead.
+   * Card buttons from a persisted office_edit result card (messageRenderer).
+   * New runs report through the one completion card instead; this keeps
+   * conversations written before that change working.
    */
   onCardEvent(_toolName, eventId, kind, payload) {
-    if (kind !== "click" || eventId !== "open_viewer") return;
-    const target = String(payload?.path ?? "") || activeFileOf();
-    if (!target) return;
-    void openInViewer(target).catch((err) => {
-      ctx.log.error(`open_viewer failed: ${err instanceof Error ? err.message : String(err)}`);
-    });
+    openViewerFromCard(eventId, kind, payload);
+  },
+  /** Card buttons on a message this plugin posted (`messages.post`). */
+  onMessageAction(_messageId, eventId, kind, payload) {
+    openViewerFromCard(eventId, kind, payload);
   },
   onEvent
 });

@@ -12,7 +12,7 @@ export {
   createRealConfigService,
 };
 
-export type { PluginDoc, RealChatServiceOptions, McpChatOptions } from './chat.js';
+export type { PluginDoc, RealChatServiceOptions, McpChatOptions, RunSettledInfo } from './chat.js';
 export { formatPluginDocsForPrompt } from './chat.js';
 
 // Model runtime plumbing (pi 1.x): the host creates one runtime at startup and

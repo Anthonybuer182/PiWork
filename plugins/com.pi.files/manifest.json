@@ -2,15 +2,16 @@
   "id": "com.pi.files",
   "name": "文件查看器",
   "description": "文件查看器 — 在右栏查看 docx/pptx/xlsx/pdf、markdown、html、纯文本（txt/json/log），以及图片、视频、音频；agent 可以直接新建和编辑 docx/pptx/xlsx、新建 PDF/CSV、做 PDF 合并/拆分/裁剪、把 PDF 转成 Office 或 PNG，无需 Python 或外部 Office 软件。文档由内置的 GenOffice 引擎渲染（Apache-2.0）",
-  "version": "0.5.0",
-  "apiVersion": 5,
+  "version": "0.6.0",
+  "apiVersion": 10,
   "engines": {
     "pi-desktop": ">=0.1.0"
   },
   "backend": "./dist/main.mjs",
   "icon": "./assets/icon.svg",
   "permissions": [
-    "filesystem"
+    "filesystem",
+    "messages"
   ],
   "contributes": {
     "panels": [

@@ -45,6 +45,8 @@ const outbox = [];
 const listeners = [];
 /** What the backend asked the host for, so a test can assert the write path. */
 const capabilityCalls = [];
+/** Plugin messages the backend posted (messages.post), by payload. */
+const posted = [];
 const written = new Map();
 
 function replyToCall(msg) {
@@ -54,6 +56,9 @@ function replyToCall(msg) {
   if (msg.method === 'filesystem.write') {
     written.set(params.path, Buffer.from(String(params.contentB64 ?? ''), 'base64'));
     result = { path: params.path, mtime: Date.now() };
+  } else if (msg.method === 'messages.post') {
+    posted.push(params);
+    result = { ok: true, messageId: `m${posted.length}`, entryId: `e${posted.length}` };
   }
   setTimeout(() => hostSend({ type: 'call-result', id: msg.id, result }), 0);
 }
@@ -89,6 +94,26 @@ function waitFor(pred, what, timeoutMs = 20_000) {
   });
 }
 
+/**
+ * Wait for the backend to ASK the host for a capability (the reverse
+ * direction of waitFor). `from` bounds the search so an earlier call with the
+ * same method is not mistaken for the one this test is waiting on.
+ */
+function waitForCapability(method, from = 0, timeoutMs = 20_000) {
+  const started = Date.now();
+  return new Promise((resolve_, reject) => {
+    const tick = () => {
+      const call = capabilityCalls.slice(from).find((m) => m.method === method);
+      if (call) return resolve_(call);
+      if (Date.now() - started > timeoutMs) {
+        return reject(new Error(`timed out waiting for capability ${method}`));
+      }
+      setTimeout(tick, 10);
+    };
+    tick();
+  });
+}
+
 console.log('backend smoke\n');
 
 // The SDK takes the host port at import time and throws without one, so the
@@ -104,9 +129,15 @@ await waitFor((m) => m.type === 'ready', 'the ready handshake');
 // and data dir to onInit, and refuses handler calls until it has.
 hostSend({ type: 'init', pluginId: 'com.pi.files', apiVersion: 2, dataDir: join(tmpdir(), 'pi-files-smoke-data') });
 
-async function callTool(name, params) {
+async function callTool(name, params, sessionId) {
   const id = `t${Math.random().toString(36).slice(2, 8)}`;
-  hostSend({ type: 'tool-call', id, name, params });
+  hostSend({
+    type: 'tool-call',
+    id,
+    name,
+    params,
+    ...(sessionId ? { sessionId } : {}),
+  });
   return waitFor((m) => m.type === 'tool-result' && m.id === id, `tool ${name}`);
 }
 
@@ -212,6 +243,110 @@ console.log(`  fixture: ${deckPath} (${original.length} bytes)\n`);
   writeFileSync(deckPath, saved);
   const reread = await callTool('office_read', { path: deckPath });
   check('the edit survives a re-read', reread.details?.slideCount === 2, `slideCount=${reread.details?.slideCount}`);
+}
+
+// ── one completion card per run, posted when the run settles ───────────
+//
+// The agent edits in batches, so a card per call stacks N near-identical
+// boxes in one run. A tool call WITH a conversation tallies into the run
+// ledger and returns no card; `agent.turnEnd` flushes exactly one
+// `messages.post` card listing every document the run wrote.
+{
+  const sessionId = 'smoke-session-1';
+  const runDeck = join(dir, 'run-card.pptx');
+  writeFileSync(runDeck, Buffer.from(await backend.createBlankPptx()));
+  const runPdf = join(dir, 'run-note.pdf');
+  const postedBefore = posted.length;
+
+  const first = await callTool(
+    'office_edit',
+    { path: runDeck, ops: [{ op: 'addBlankSlide', target: { slide: 0 } }] },
+    sessionId,
+  );
+  check('an agent edit returns no per-call card', first.card === undefined, JSON.stringify(first.card));
+  check('nothing is posted before the run settles', posted.length === postedBefore, `${posted.length} post(s)`);
+
+  // Same file again, then a second document: the card must fold the repeats
+  // and list two documents, not three rows.
+  await callTool(
+    'office_edit',
+    { path: runDeck, ops: [{ op: 'addBlankSlide', target: { slide: 0 } }] },
+    sessionId,
+  );
+  const created = await callTool('office_create', { path: runPdf }, sessionId);
+  check('create is tallied too (no per-call card)', created.card === undefined, JSON.stringify(created.card));
+
+  const beforeSettle = capabilityCalls.length;
+  hostSend({
+    type: 'host-event',
+    event: 'agent.turnEnd',
+    data: { sessionId, runId: 'run-1', aborted: false, outcome: 'completed' },
+  });
+  const settleCall = await waitForCapability('messages.post', beforeSettle);
+  check('the settle posts one plugin message', posted.length === postedBefore + 1, `${posted.length} post(s)`);
+  check('the message targets the run conversation', settleCall.params?.sessionId === sessionId);
+  check('a completed run posts a success card', settleCall.params?.status === 'success');
+
+  const paths = [];
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (node.component === 'Button' && node.props?.path) paths.push(node.props.path);
+    for (const child of node.children ?? []) walk(child);
+  };
+  walk(settleCall.params?.card);
+  check(
+    'the card lists each written document once',
+    paths.length === 2 && paths.includes(runDeck) && paths.includes(runPdf),
+    JSON.stringify(paths),
+  );
+  check(
+    'the title reports the document count',
+    settleCall.params?.card?.props?.title === '本轮已更新 2 个文档',
+    JSON.stringify(settleCall.params?.card?.props?.title),
+  );
+
+  // The ledger is consumed: a duplicate settle must not post again.
+  hostSend({
+    type: 'host-event',
+    event: 'agent.turnEnd',
+    data: { sessionId, runId: 'run-1', aborted: false, outcome: 'completed' },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  check('a repeated settle does not post twice', posted.length === postedBefore + 1, `${posted.length} post(s)`);
+
+  // A run the user stopped still reports what landed on disk.
+  const abortSession = 'smoke-session-2';
+  const abortDeck = join(dir, 'run-abort.pptx');
+  writeFileSync(abortDeck, Buffer.from(await backend.createBlankPptx()));
+  await callTool(
+    'office_edit',
+    { path: abortDeck, ops: [{ op: 'addBlankSlide', target: { slide: 0 } }] },
+    abortSession,
+  );
+  const beforeAbort = capabilityCalls.length;
+  hostSend({
+    type: 'host-event',
+    event: 'agent.turnEnd',
+    data: { sessionId: abortSession, runId: 'run-2', aborted: true, outcome: 'aborted' },
+  });
+  const abortCall = await waitForCapability('messages.post', beforeAbort);
+  check('an aborted run is a warning card', abortCall.params?.status === 'warning');
+  check(
+    'the aborted card says the edits were saved',
+    JSON.stringify(abortCall.params?.card).includes('本轮已停止'),
+    JSON.stringify(abortCall.params?.card),
+  );
+
+  // No conversation (a direct caller, or a test): keep the per-result card.
+  const noSession = await callTool('office_edit', {
+    path: runDeck,
+    ops: [{ op: 'addBlankSlide', target: { slide: 0 } }],
+  });
+  check(
+    'a call with no conversation keeps its own card',
+    noSession.card?.component === 'Card',
+    JSON.stringify(noSession.card),
+  );
 }
 
 // ── the file on disk is what the engine wrote ──────────────────────────

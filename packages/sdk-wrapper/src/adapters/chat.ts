@@ -1,4 +1,5 @@
 import * as path from 'path';
+import { randomUUID } from 'node:crypto';
 import { statSync, readFileSync, existsSync } from 'node:fs';
 import type { ChatService, SendMessageParams, StreamChunk } from '../services/chat.js';
 import type { Message, AssistantMessage, ContentBlock, ToolResultBlock, TokenUsage, ContextUsageInfo, SessionStatsInfo, MessageTiming, AgentContextConfig, AgentContextReloadResult, AgentToolInfo, AppendSegmentInfo, ContextFileInfo, ContextFileScope, PromptFileInfo, GlobalContextFile, GlobalContextInfo, ModelCapabilities, PluginMessageData, PluginMessagePatch } from '@pi/types';
@@ -276,6 +277,31 @@ export interface McpChatOptions {
   discoveryTool?: string;
 }
 
+/**
+ * One agent run's ending, reported after the SDK has settled it.
+ *
+ * `agent_end` is not this signal: it can be followed by a retry, and it fires
+ * before the run has actually released the session. The SDK's `agent_settled`
+ * event is emitted from the run driver's `finally`, so it covers success,
+ * error and abort alike — that is the fact this shape carries.
+ */
+export interface RunSettledInfo {
+  /** The conversation the run belongs to; '' when the caller had no id yet. */
+  sessionId: string;
+  /** The key the adapter cached the session under ('default' without an id). */
+  sessionKey: string;
+  /** Identity of this run, minted by the adapter (not an SDK concept). */
+  runId: string;
+  /** The SDK's own abort flag for the run that just settled. */
+  aborted: boolean;
+  /**
+   * Derived from what this adapter observed: an abort wins (the user's stop
+   * is the reason the run ended), then a run that threw is `error`, then
+   * `completed`.
+   */
+  outcome: 'completed' | 'aborted' | 'error';
+}
+
 export interface RealChatServiceOptions {
   customToolsProvider?: () => unknown[];
   /** Enabled plugins' PLUGIN.md index. Read per session, so installs take effect without a restart. */
@@ -288,6 +314,12 @@ export interface RealChatServiceOptions {
    * ('default' when the caller had no session id yet).
    */
   onSessionCreated?: (session: AgentSession, info: { sessionKey: string; cwd: string }) => void;
+  /**
+   * Called once per run, after the SDK has settled it (success, error or
+   * abort). This is the only layer that knows the fact; the host decides who
+   * hears about it. A throwing hook is contained — it cannot fail the run.
+   */
+  onRunSettled?: (info: RunSettledInfo) => void;
   /**
    * Settings → 工具 switches. Applied on every session creation, on top of the
    * per-conversation list, so a globally disabled tool can never be re-enabled
@@ -405,6 +437,22 @@ export function createRealChatService(
   const staleSessions = new Set<string>();
   // Track last message end time per session for thinking time calculation
   const sessionTimings = new Map<string, number>();
+
+  /**
+   * Report a settled run to the host, exactly once.
+   *
+   * This lives in the adapter, not at an IPC/transport boundary: a run can be
+   * started by more than one entry point (renderer stream, plugin turn, test
+   * harness), and only this layer sees the SDK's `agent_settled`. A hook that
+   * throws must not turn a completed run into a failed one.
+   */
+  function emitRunSettled(info: RunSettledInfo): void {
+    try {
+      options?.onRunSettled?.(info);
+    } catch {
+      /* the run is already over; the hook's failure is not the caller's */
+    }
+  }
 
   // Shared ModelRuntime — picks up built-in models + models from ~/.pi/agent/models.json.
   // pi 1.x resolves models/auth through ModelRuntime (async); the registry is a
@@ -1267,6 +1315,15 @@ export function createRealChatService(
         params.skills,
         requestedModel ? modelCapabilitiesOf(requestedModel) : null,
       );
+      const sessionKey = params.sessionId || 'default';
+      const runId = randomUUID();
+      let settledAborted = false;
+      let runError = false;
+      // One settle per run. The SDK emits it from the run driver's `finally`,
+      // so an abort or an error still settles; a retry does not settle twice.
+      const settleSub = session.subscribe((event: any) => {
+        if (event.type === 'agent_settled') settledAborted = event.aborted === true;
+      });
 
       try {
         if (requestedModel) await session.setModel(requestedModel);
@@ -1315,7 +1372,19 @@ export function createRealChatService(
 
       return asstMsg;
       } catch (err) {
+        runError = true;
         throw new Error(err instanceof Error ? err.message : 'Failed to send message');
+      } finally {
+        settleSub();
+        emitRunSettled({
+          sessionId: params.sessionId,
+          sessionKey,
+          runId,
+          aborted: settledAborted,
+          // An abort takes precedence: the user's stop is the reason the run
+          // ended, even if unwinding it also threw.
+          outcome: settledAborted ? 'aborted' : runError ? 'error' : 'completed',
+        });
       }
     },
 
@@ -1343,6 +1412,9 @@ export function createRealChatService(
       );
       const sessionKey = params.sessionId || 'default';
       const workspaceCwd = params.workspaceCwd;
+      const runId = randomUUID();
+      let settledAborted = false;
+      let runError = false;
 
       // Guard to prevent writing to a closed SSE stream
       let streamActive = true;
@@ -1363,6 +1435,13 @@ export function createRealChatService(
   const toolArgs = new Map<string, Record<string, unknown>>();
 
       const unsubscribe = session.subscribe((event: any) => {
+        // Settle is not a stream chunk: it must still be observed after the
+        // stream closed — an abort flips `streamActive` before the run's
+        // finally emits `agent_settled`.
+        if (event.type === 'agent_settled') {
+          settledAborted = event.aborted === true;
+          return;
+        }
         // Skip sending chunks if stream is already closed
         if (!streamActive) return;
         switch (event.type) {
@@ -1745,11 +1824,21 @@ export function createRealChatService(
         streamActive = false;
         return asstMsg;
       } catch (err) {
+        runError = true;
         safeChunk({ type: 'error', error: err instanceof Error ? err.message : 'Unknown error' });
         throw err;
       } finally {
         streamActive = false;
         unsubscribe();
+        emitRunSettled({
+          sessionId: params.sessionId,
+          sessionKey,
+          runId,
+          aborted: settledAborted,
+          // An abort takes precedence: the user's stop is the reason the run
+          // ended, even if unwinding it also threw.
+          outcome: settledAborted ? 'aborted' : runError ? 'error' : 'completed',
+        });
       }
     },
 
