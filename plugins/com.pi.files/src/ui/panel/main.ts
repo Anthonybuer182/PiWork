@@ -88,6 +88,13 @@ window.piSDK?.onMessage((payload) => {
   const showing =
     (window as unknown as { __PI_OPEN_PATH__?: string }).__PI_OPEN_PATH__ || readPersistedPath();
   if (!showing || !sameFile(showing, changed)) return;
+  // An editor holding unsaved edits (the slides panel, today) must not be
+  // reloaded out from under its work. It takes over the conflict from here:
+  // the shim shows the choose-one banner and reloads only when the user says so.
+  if ((window as unknown as { __PI_VIEWER_DIRTY__?: boolean }).__PI_VIEWER_DIRTY__) {
+    window.dispatchEvent(new CustomEvent('pi:external-change', { detail: { path: changed } }));
+    return;
+  }
   location.reload();
 });
 
