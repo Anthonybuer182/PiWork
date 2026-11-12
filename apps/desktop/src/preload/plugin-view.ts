@@ -270,11 +270,17 @@ ipcRenderer.on(
 // Theme tokens are collected in the shell (it owns the CSS variables) and
 // fanned out here by main. Delivered through the bridge rather than a window
 // message because the page's own `window` listeners live in a different world.
-let themeCallback: ((tokens: Record<string, string>) => void) | null = null;
+//
+// This is a LIST, not a single callback: the injected pi-sdk subscribes to
+// apply the tokens as CSS variables, and a panel's own theme bridge subscribes
+// to derive `data-theme` from them. A single slot meant the last subscriber
+// silently knocked the other one out (the panel stayed on the dark fallback),
+// and which one won depended on script order.
+const themeCallbacks: Array<(tokens: Record<string, string>) => void> = [];
 let lastThemeTokens: Record<string, string> | null = null;
 ipcRenderer.on('pi:plugin:theme', (_event, tokens: Record<string, string>) => {
   lastThemeTokens = tokens;
-  themeCallback?.(tokens);
+  for (const cb of themeCallbacks) cb(tokens);
 });
 
 /**
@@ -321,9 +327,9 @@ const bridge = {
     eventCallback = cb;
   },
 
-  /** Shell theme tokens (the shell owns the CSS variables). */
+  /** Shell theme tokens (the shell owns the CSS variables). Multiple subscribers. */
   onTheme: (cb: (tokens: Record<string, string>) => void): void => {
-    themeCallback = cb;
+    themeCallbacks.push(cb);
     // Replay if the tokens landed before the page subscribed.
     if (lastThemeTokens) cb(lastThemeTokens);
   },

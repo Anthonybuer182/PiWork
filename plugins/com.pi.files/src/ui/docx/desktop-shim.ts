@@ -167,11 +167,21 @@ function installThemeBridge(): void {
     const l = Number((bg.match(/([\d.]+)%\s*$/) ?? [])[1]);
     return Number.isFinite(l) ? l < 50 : true;
   };
-  apply(read());
+  const applyTokens = (tokens?: Record<string, string>) => {
+    // The bridge now fans tokens out to several subscribers, so this panel
+    // writes them itself rather than assuming the SDK already did.
+    if (tokens) {
+      for (const [name, value] of Object.entries(tokens)) {
+        document.documentElement.style.setProperty(name, value);
+      }
+    }
+    apply(read());
+  };
+  applyTokens();
   // The host pushes tokens on a theme change; that is the only signal. (An
   // earlier version also watched `data-theme` with a MutationObserver as a
   // fallback — which is exactly the loop described above.)
-  window.__piViewBridge?.onTheme(() => apply(read()));
+  window.__piViewBridge?.onTheme(applyTokens);
 }
 
 // ── the pending document ────────────────────────────────────────────────
