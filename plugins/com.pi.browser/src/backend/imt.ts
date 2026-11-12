@@ -24,6 +24,9 @@ export interface ImtState {
   failed: number;
   url: string;
   error?: string;
+  /** iframes on the page (blocked = cross-origin, cannot be translated). */
+  frames?: number;
+  blockedFrames?: number;
 }
 
 interface ImtUnit {
@@ -41,6 +44,8 @@ interface RuntimeStatus {
   /** Pending units inside the viewport — the only work the loop can do now. */
   pendingVisible?: number;
   visible: number;
+  frames?: number;
+  blockedFrames?: number;
 }
 
 interface CacheEntry {
@@ -110,6 +115,7 @@ export class PageTranslator {
       failed: this.stats?.failed ?? 0,
       url: this.url,
       ...(this.lastError ? { error: this.lastError } : {}),
+      ...(this.stats?.frames ? { frames: this.stats.frames, blockedFrames: this.stats.blockedFrames ?? 0 } : {}),
     };
   }
 
@@ -182,6 +188,24 @@ export class PageTranslator {
     void this.deps.evaluate('window.__piImt ? window.__piImt.setMode("source") : null');
     this.deps.notify(this.state());
     this.scheduleFlush();
+    return this.state();
+  }
+
+  /** Requeue failed units and resume the loop (panel 「重试」 button). */
+  async retry(): Promise<ImtState> {
+    try {
+      await this.deps.evaluate('window.__piImt && window.__piImt.retryFailed ? window.__piImt.retryFailed() : 0');
+    } catch {
+      // Runtime gone; nothing to retry.
+    }
+    this.stats = await this.status();
+    this.lastError = '';
+    if (this.stats && this.stats.pending > 0 && !this.running) {
+      this.abort = false;
+      this.running = true;
+      void this.loop(this.mode === 'replace' ? 'replace' : 'dual');
+    }
+    this.deps.notify(this.state());
     return this.state();
   }
 

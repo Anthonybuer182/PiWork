@@ -685,7 +685,8 @@ const INJECT_SOURCE = `(function () {
             'max-height:3.6em;overflow:hidden');
           t.textContent = clip.text && clip.text.length > 120 ? clip.text.slice(0, 120) + '…' : (clip.text || '');
           var src = styled('div', 'font:11px/1 system-ui,sans-serif;color:#8b93a7;margin-top:3px');
-          src.textContent = (clip.title || clip.url || '') + (clip.at ? ' · ' + whenLabel(clip.at) : '');
+          src.textContent = (clip.kind === 'page' ? '整页 · ' : '') +
+            (clip.title || clip.url || '') + (clip.at ? ' · ' + whenLabel(clip.at) : '');
           var x = styled('button',
             'all:unset;cursor:pointer;position:absolute;top:6px;right:4px;color:#8b93a7;font:11px/1 system-ui,sans-serif;padding:2px 3px');
           x.textContent = '×';
@@ -2711,6 +2712,12 @@ plugin({
         }
         return await imtStepRead(ctx, binding, method === 'imt.readNext' ? 1 : -1);
       }
+      case 'imt.retry': {
+        const binding = imtBindings.get(hostTabId || 'browser');
+        if (!binding) return { ...imtStateOf(), read: null };
+        await binding.translator.retry();
+        return imtStateOf(binding);
+      }
       case 'imt.explain':
       case 'imt.read':
       case 'imt.save': {
@@ -3733,6 +3740,12 @@ plugin({
         }
         return rows
           .map((c, i) => {
+            if (c.kind === 'page') {
+              // A page save carries a whole article; the agent only needs the
+              // identity and a taste, not 8000 characters of body text.
+              const head = c.text.length > 80 ? `${c.text.slice(0, 80)}…` : c.text;
+              return `${i + 1}. [整页] ${c.title || c.url}\n   ${head}\n   — ${c.url}(${formatWhen(c.at)})`;
+            }
             const body = c.text.length > 120 ? `${c.text.slice(0, 120)}…` : c.text;
             return `${i + 1}. ${body}\n   — 来自 ${c.title || c.url}(${formatWhen(c.at)})`;
           })

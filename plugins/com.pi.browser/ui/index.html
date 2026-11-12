@@ -109,6 +109,7 @@
     #imt-row button.on { background: hsl(var(--accent, 221 19% 17%)); color: hsl(var(--foreground, 210 20% 92%)); }
     #imt-row button.primary { background: hsl(30 65% 45%); color: #fff; }
     #imt-row .ir-meta { color: hsl(var(--muted-foreground, 217 9% 59%)); padding: 0 4px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    #imt-row .ir-retry { color: hsl(0 65% 65%); border-color: hsl(0 45% 38%); }
     #imt-row .ir-grow { flex: 1; min-width: 0; }
     #imt-row .ir-close { font-size: 15px; line-height: 1; }
     #imt-row .ir-icon { width: 28px; padding: 0; }
@@ -510,6 +511,7 @@
       <button type="button" data-imt-mode="source">原文</button>
     </div>
     <span class="ir-meta" id="ir-meta"></span>
+    <button type="button" id="ir-retry" class="ir-retry" hidden>重试</button>
     <span class="ir-grow"></span>
     <div class="ir-group" id="ir-actions">
       <button type="button" data-imt-act="read">朗读</button>
@@ -596,6 +598,7 @@
       var irMeta = document.getElementById('ir-meta');
       var irActions = document.getElementById('ir-actions');
       var irRead = document.getElementById('ir-read');
+      var irRetry = document.getElementById('ir-retry');
       var irPause = irRead.querySelector('[data-imt-read="pause"]');
       var imtState = { mode: 'idle', done: 0, total: 0, read: null };
 
@@ -628,15 +631,25 @@
           });
         }
 
+        var failed = st.failed || 0;
+        irRetry.hidden = failed === 0;
+        irRetry.textContent = '重试 ' + failed;
+        irRetry.title = '有 ' + failed + ' 段翻译失败，点此重试';
+
+        var blocked = st.blockedFrames || 0;
+        var frameNote = blocked > 0 && (busy || st.mode === 'dual' || st.mode === 'replace') ? '含内嵌框架' : '';
+        irMeta.title = frameNote ? '页面有 ' + blocked + ' 个内嵌框架，里面的文字无法翻译' : '';
+
+        var meta = '';
         if (read) {
-          irMeta.textContent = '朗读中 ' + ((read.index || 0) + 1) + '/' + (read.total || 0) + (read.layer ? ' · ' + read.layer : '');
+          meta = '朗读中 ' + ((read.index || 0) + 1) + '/' + (read.total || 0) + (read.layer ? ' · ' + read.layer : '');
           irPause.textContent = read.paused ? '▶' : '❚❚';
           irPause.title = read.paused ? '继续' : '暂停';
         } else if (busy) {
-          irMeta.textContent = (st.done || 0) + '/' + (st.total || 0);
-        } else {
-          irMeta.textContent = '';
+          meta = (st.done || 0) + '/' + (st.total || 0);
         }
+        if (frameNote) meta = meta ? meta + ' · ' + frameNote : frameNote;
+        irMeta.textContent = meta;
       }
 
       function renderImt(st) {
@@ -663,6 +676,7 @@
       imtRow.addEventListener('click', function (e) {
         var b = e.target.closest('button');
         if (!b) return;
+        if (b.id === 'ir-retry') { imtAct('imt.retry', {}); return; }
         var v;
         if ((v = b.getAttribute('data-imt-start'))) imtAct('imt.start', { mode: v });
         else if ((v = b.getAttribute('data-imt-mode'))) imtAct('imt.mode', { mode: v });

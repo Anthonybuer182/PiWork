@@ -351,6 +351,7 @@ export const IMT_SOURCE = String.raw`
   function unrender(u) {
     if (u.node && u.node.parentNode) u.node.parentNode.removeChild(u.node);
     u.node = null;
+    if (u.el && u.el.removeAttribute) u.el.removeAttribute('data-pi-imt-failed');
     if (u.kind === 'attribute') {
       if (u.orig !== null && u.el.getAttribute(u.attr) === u.tr) u.el.setAttribute(u.attr, u.orig);
       return;
@@ -407,8 +408,15 @@ export const IMT_SOURCE = String.raw`
       if (!u) continue;
       var text = String(map[id] == null ? '' : map[id]).trim();
       u.tr = text;
-      u.state = text ? 'done' : 'failed';
-      render(u);
+      if (text) {
+        u.state = 'done';
+        if (u.el && u.el.removeAttribute) u.el.removeAttribute('data-pi-imt-failed');
+        render(u);
+      } else {
+        unrender(u);
+        u.state = 'failed';
+        if (u.kind !== 'attribute' && u.el && u.el.setAttribute) u.el.setAttribute('data-pi-imt-failed', '1');
+      }
       n++;
     }
     return n;
@@ -419,7 +427,24 @@ export const IMT_SOURCE = String.raw`
     var n = 0;
     for (var i = 0; i < ids.length; i++) {
       var u = units[ids[i]];
-      if (u) { u.state = 'failed'; n++; }
+      if (!u) continue;
+      u.state = 'failed';
+      if (u.kind !== 'attribute' && u.el && u.el.setAttribute) u.el.setAttribute('data-pi-imt-failed', '1');
+      n++;
+    }
+    return n;
+  }
+
+  /** Put failed units back in the queue (the panel's retry button). */
+  function retryFailed() {
+    var n = 0;
+    for (var i = 0; i < list.length; i++) {
+      var u = list[i];
+      if (u.state !== 'failed') continue;
+      u.state = 'pending';
+      u.tr = '';
+      if (u.el && u.el.removeAttribute) u.el.removeAttribute('data-pi-imt-failed');
+      n++;
     }
     return n;
   }
@@ -623,6 +648,12 @@ export const IMT_SOURCE = String.raw`
     var done = 0;
     var failed = 0;
     var pendingVisible = 0;
+    var frames = document.querySelectorAll('iframe');
+    var blocked = 0;
+    for (var f = 0; f < frames.length; f++) {
+      try { if (!frames[f].contentDocument) blocked++; }
+      catch (e) { blocked++; }
+    }
     for (var i = 0; i < list.length; i++) {
       var s = list[i].state;
       if (s === 'done') done++;
@@ -639,6 +670,8 @@ export const IMT_SOURCE = String.raw`
       pending: list.length - done - failed,
       pendingVisible: pendingVisible,
       visible: visible.size,
+      frames: frames.length,
+      blockedFrames: blocked,
     };
   }
 
@@ -686,6 +719,7 @@ export const IMT_SOURCE = String.raw`
       'word-spacing:normal;font-variant:normal;font-feature-settings:normal;',
       '-webkit-text-fill-color:currentColor}',
       '.pi-imt-inline{text-transform:none;letter-spacing:normal;word-spacing:normal;font-variant:normal}',
+      '[data-pi-imt-failed]{text-decoration:underline dotted rgba(200,60,50,.65);text-underline-offset:3px}',
       '.pi-imt-inline::before{content:"·";margin:0 .4em;opacity:.45}',
     ].join('');
     document.head.appendChild(styleEl);
@@ -729,6 +763,7 @@ export const IMT_SOURCE = String.raw`
     takeVisible: takeVisible,
     apply: apply,
     fail: fail,
+    retryFailed: retryFailed,
     units: unitsApi,
     setMode: setMode,
     mode: function () { return mode; },
