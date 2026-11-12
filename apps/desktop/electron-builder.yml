@@ -109,6 +109,30 @@ mac:
   # entitlements: build/entitlements.mac.plist
   # entitlementsInherit: build/entitlements.mac.plist
 
+dmg:
+  # 没有 Developer ID 的安装包，下载后首次启动一定会被拦一次：老系统弹「无法
+  # 验证开发者」，macOS 26 干脆静默拒绝（双击毫无反应，连弹窗都没有）。把解
+  # 法直接放进 DMG 窗口，用户不用去翻 Release notes。
+  # 注意 contents 一旦写了就整体替换默认布局，应用本体那一项靠省略 path 补全
+  # 为打包出来的 .app（见 dmg-builder 的 `c.path || appPath`）。
+  # 说明文件的路径相对 apps/desktop 解析 —— electron-builder 在该目录运行
+  # （pack 脚本和 release.yml 的 working-directory 都是这里）。
+  window:
+    width: 540
+    height: 420
+  contents:
+    - x: 130
+      y: 180
+    - x: 410
+      y: 180
+      type: link
+      path: /Applications
+    - x: 270
+      y: 330
+      type: file
+      path: build/install-notes.txt
+      name: 安装说明.txt
+
 win:
   # Bundle MinGit BusyBox (shell + git + coreutils) so Windows users
   # get bash-like command execution out of the box.

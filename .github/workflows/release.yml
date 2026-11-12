@@ -7,7 +7,8 @@ name: Release
 # 打包前就失败（省下四台 runner 的时间）。
 #
 # 第一阶段不做代码签名：产物会被 macOS Gatekeeper / Windows SmartScreen
-# 拦一次，用户手动允许即可。
+# 拦一次，用户手动允许即可。安装说明同时写进 DMG 和 Release notes
+# （apps/desktop/build/install-notes.txt、.github/release-notes/install.md）。
 
 on:
   push:
@@ -266,6 +267,26 @@ jobs:
             }
           done
 
+      # 没有 Developer ID 时，DMG 里的安装说明就是用户唯一的离线指引。它不在
+      # 说明 dmg.contents 的相对路径前提被破坏了 —— 宁可出包失败，也别把一个
+      # 双击没反应又没有任何提示的安装包发出去。
+      - name: Check the DMG carries the install notes
+        if: matrix.platform == 'mac'
+        run: |
+          dmg="$(ls apps/desktop/release/*.dmg | head -1)"
+          mountpoint="$(mktemp -d)"
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mountpoint" > /dev/null
+          status=0
+          if [ -f "$mountpoint/安装说明.txt" ]; then
+            echo "install notes found in $dmg"
+          else
+            echo "::error::$dmg does not contain 安装说明.txt"
+            ls -la "$mountpoint"
+            status=1
+          fi
+          hdiutil detach "$mountpoint" > /dev/null
+          exit $status
+
       - uses: actions/upload-artifact@v7
         with:
           name: installers-${{ matrix.name }}
@@ -302,6 +323,9 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
+          # body 会排在自动生成的更新说明前面。没有 Developer ID 时这是用户
+          # 唯一的安装指引，DMG 里也放了同一份（见 electron-builder.yml 的 dmg）。
+          body_path: .github/release-notes/install.md
           generate_release_notes: true
           fail_on_unmatched_files: true
           # v0.2.0-beta.1 这类带后缀的 tag 自动标为预发布。
