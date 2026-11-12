@@ -145,8 +145,18 @@ export function installThemeBridge(): void {
     document.documentElement.setAttribute('data-theme', theme);
     signals.theme.fire(theme);
   };
-  apply(read());
-  (window as unknown as { __piViewBridge?: PiViewBridge }).__piViewBridge?.onTheme(() => apply(read()));
+  const applyTokens = (tokens?: Record<string, string>) => {
+    // Write the tokens before reading: the bridge hands them to every
+    // subscriber, but the SDK that normally writes them may not have run yet.
+    if (tokens) {
+      for (const [name, value] of Object.entries(tokens)) {
+        document.documentElement.style.setProperty(name, value);
+      }
+    }
+    apply(read());
+  };
+  applyTokens();
+  (window as unknown as { __piViewBridge?: PiViewBridge }).__piViewBridge?.onTheme(applyTokens);
 }
 
 /** Read a document's bytes, plus a hash and an mtime baseline for save. */
