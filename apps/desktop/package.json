@@ -31,17 +31,17 @@
     "undici": "8.3.0"
   },
   "devDependencies": {
-    "@types/adm-zip": "0.5.8",
+    "@types/adm-zip": "0.6.0",
     "@types/react": "^19.0.1",
     "@types/react-dom": "^19.0.1",
-    "@vitejs/plugin-react": "^6.2.1",
-    "electron": "^45.2.2",
+    "@vitejs/plugin-react": "^6.3.0",
+    "electron": "^45.2.3",
     "electron-builder": "^26.18.0",
     "electron-vite": "^6.0.0",
-    "tailwindcss": "^4.3.4",
+    "tailwindcss": "^4.3.5",
     "tailwindcss-animate": "^1.0.7",
-    "vite": "^8.3.5",
-    "@tailwindcss/postcss": "^4.3.4"
+    "vite": "^8.3.7",
+    "@tailwindcss/postcss": "^4.3.5"
   },
   "author": "PiWork <pi@example.com>",
   "homepage": "https://github.com/Anthonybuer182/PiWork"
