@@ -578,6 +578,50 @@
         });
       }
 
+      // ── Theme relay for the in-page selection popup ──
+      // The popup lives in the web page, a separate document that never sees
+      // the shell tokens this panel is styled with. Push them (and the
+      // resolved light/dark) to the backend so the popup matches the app
+      // instead of guessing from the OS preference.
+      //
+      // Only tokens the shell actually pushed count: the inline style is where
+      // plugin-sdk-js lands them. Reading computed styles here would also pick
+      // up this page's own blue-ish fallbacks and ship those to the popup,
+      // which is worse than letting the popup use its own neutral fallbacks.
+      var SEL_THEME_KEYS = [
+        'background', 'foreground', 'card', 'card-foreground', 'muted', 'muted-foreground',
+        'accent', 'accent-foreground', 'border', 'ring', 'primary', 'primary-foreground',
+        'radius', 'font-sans'
+      ];
+      function selThemePayload() {
+        var rootStyle = document.documentElement.style;
+        var tokens = {};
+        var count = 0;
+        for (var i = 0; i < SEL_THEME_KEYS.length; i++) {
+          var v = rootStyle.getPropertyValue('--' + SEL_THEME_KEYS[i]).trim();
+          if (v) { tokens[SEL_THEME_KEYS[i]] = v; count++; }
+        }
+        if (!count) return null; // the shell has not pushed its palette yet
+        // The token components are HSL, so the background's lightness is the
+        // theme: 100% is light, 13% is dark.
+        var dark = true;
+        var m = /(\d+(?:\.\d+)?)%\s*$/.exec(tokens.background || tokens.foreground || '');
+        if (m) dark = parseFloat(m[1]) < 50;
+        else if (window.matchMedia) dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        return { dark: dark, tokens: tokens };
+      }
+      var selThemeTimer = null;
+      function pushSelTheme() {
+        selThemeTimer = null;
+        var payload = selThemePayload();
+        if (payload) act('sel.theme', payload);
+      }
+      new MutationObserver(function () {
+        if (selThemeTimer) clearTimeout(selThemeTimer);
+        selThemeTimer = setTimeout(pushSelTheme, 150);
+      }).observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'class'] });
+      setTimeout(pushSelTheme, 400);
+
       // ── Whole-page translation row ──
       // All controls live in a real toolbar row above the engine view: a DOM
       // dropdown in this page would be covered by the native view below.

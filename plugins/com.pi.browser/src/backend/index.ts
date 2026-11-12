@@ -46,6 +46,7 @@ import {
   type PageUnit,
   type ReadItem,
 } from './imt';
+import { selSource, type SelThemeSeed } from './sel-runtime';
 
 /**
  * Loading a page waits on the outside world. The SDK's 30s default is right for
@@ -219,517 +220,45 @@ interface SelAction {
   at?: number;
 }
 
+/** The palette keys the in-page popup understands — the app's own token names. */
+const SEL_THEME_KEYS = new Set([
+  'background',
+  'foreground',
+  'card',
+  'card-foreground',
+  'muted',
+  'muted-foreground',
+  'accent',
+  'accent-foreground',
+  'border',
+  'ring',
+  'primary',
+  'primary-foreground',
+  'radius',
+  'font-sans',
+]);
+
 /**
- * The selection popup, as it is injected into the page.
- *
- * Everything the user sees and clicks is in here, because the page is the only
- * place it can be: the engine view covers this plugin's DOM, and a cross-origin
- * page cannot be reached from the panel either. The script therefore owns its
- * own composite popup, fallback card and toast, and talks to the backend
- * through globals:
- *
- *   __piSelAction    written on a button click or Enter; polled AND cleared by
- *                    the backend — the only page→plugin channel there is
- *   __piNoteShow     the backend calls this with a pending / final / timed-out
- *                    result; it renders inline while the popup is open, and
- *                    falls back to the bottom-right card when it is not
- *   __piRenderClips  the backend calls this with the saved clips (and the id
- *                    of the one just kept) to draw the list under the input
- *   __piToast        one-line confirmation for the rare failure path
- *
- * The popup pins itself on the first interaction (focus in the input, any
- * button) — before that it follows the selection and disappears when the
- * selection collapses; pinned, only × / Esc / a new selection closes it, so a
- * half-typed question or an in-flight translation cannot be lost to a stray
- * click. The textarea is the single source of truth for what every action
- * acts on: it is pre-filled with the selection, and the user can trim it
- * before 翻译 or append a question before 发送.
- *
- * The shadow root is `closed` and every style is set through CSSOM, so site CSS
- * cannot bleed in and a site CSP cannot refuse the popup its appearance.
- * Re-running it is a no-op (`already`), which is what makes the per-navigation
- * injection and the self-heal in the poll cheap.
+ * The panel pushes the shell's palette here; the page cannot see it otherwise.
+ * Values are HSL component lists ("0 0% 16%"), so anything that looks like a
+ * declaration rather than a component list is dropped.
  */
-const INJECT_SOURCE = `(function () {
-  if (window.__piSelInstalled) return 'already';
-  try {
-    var host = document.createElement('div');
-    host.setAttribute('data-pi-sel-host', '');
-    var root = host.attachShadow({ mode: 'closed' });
-
-    function styled(tag, css) {
-      var el = document.createElement(tag);
-      el.style.cssText = css;
-      return el;
-    }
-    function whenLabel(ts) {
-      var d = new Date(ts || 0);
-      if (isNaN(d.getTime())) return '';
-      return (d.getMonth() + 1) + '月' + d.getDate() + '日';
-    }
-
-    var BTN = 'all:unset;cursor:pointer;padding:4px 9px;border-radius:5px;color:#e8eaf0;font:12px/1 system-ui,sans-serif';
-
-    // ── the composite popup ──
-    var popup = styled('div',
-      'position:fixed;z-index:2147483647;display:none;width:340px;max-width:calc(100vw - 16px);' +
-      'padding:8px;border-radius:10px;background:rgba(18,20,28,.96);color:#e8eaf0;' +
-      'box-shadow:0 6px 22px rgba(0,0,0,.45)');
-    var pinned = false;
-    var anchorRect = null;
-
-    var row = styled('div', 'display:flex;gap:4px;align-items:center;margin-bottom:6px');
-    function actionBtn(label) {
-      var b = styled('button', BTN);
-      b.textContent = label;
-      b.addEventListener('mouseenter', function () { b.style.background = 'rgba(80,120,255,.85)'; });
-      b.addEventListener('mouseleave', function () { b.style.background = 'transparent'; });
-      return b;
-    }
-    var btnTranslate = actionBtn('翻译');
-    var btnExplain = actionBtn('解释');
-    var btnSpeak = actionBtn('朗读');
-    var btnClip = actionBtn('收藏');
-    var btnClose = styled('button',
-      'all:unset;cursor:pointer;margin-left:auto;padding:4px 6px;color:#8b93a7;font:14px/1 system-ui,sans-serif');
-    btnClose.textContent = '×';
-    row.appendChild(btnTranslate);
-    row.appendChild(btnExplain);
-    row.appendChild(btnSpeak);
-    row.appendChild(btnClip);
-    row.appendChild(btnClose);
-
-    var inputRow = styled('div', 'display:flex;gap:6px;align-items:flex-end');
-    var inputBox = styled('div',
-      'flex:1;padding:4px;border-radius:6px;border:1px solid rgba(255,255,255,.16);' +
-      'background:rgba(255,255,255,.06)');
-    // The quote is a chip, not textarea text: a long selection stays one line,
-    // and the question field below belongs to the user's words alone.
-    var quoteRow = styled('div', 'display:none;margin-bottom:3px');
-    var chip = styled('div',
-      'display:inline-flex;align-items:center;gap:4px;max-width:100%;padding:3px 5px 3px 8px;' +
-      'border-radius:5px;background:rgba(80,120,255,.22);font:11px/1.4 system-ui,sans-serif;color:#c3d2ff');
-    var chipText = styled('span', 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:230px');
-    var chipCount = styled('span', 'flex:none;color:#8b93a7');
-    var chipX = styled('button',
-      'all:unset;cursor:pointer;flex:none;padding:1px 4px;border-radius:4px;color:#8b93a7;' +
-      'font:11px/1 system-ui,sans-serif');
-    chipX.textContent = '×';
-    chip.appendChild(chipText);
-    chip.appendChild(chipCount);
-    chip.appendChild(chipX);
-    quoteRow.appendChild(chip);
-    var question = styled('textarea',
-      'width:100%;min-height:30px;max-height:78px;resize:none;border:none;padding:4px 4px 0 4px;' +
-      'display:block;background:transparent;color:#e8eaf0;font:12px/1.5 system-ui,sans-serif;outline:none');
-    question.placeholder = '问点什么,或直接回车发送引用…';
-    inputBox.appendChild(quoteRow);
-    inputBox.appendChild(question);
-    var btnSend = styled('button',
-      'all:unset;cursor:pointer;padding:6px 10px;border-radius:6px;background:rgba(80,120,255,.9);' +
-      'color:#fff;font:12px/1 system-ui,sans-serif;white-space:nowrap');
-    btnSend.textContent = '发送';
-    inputRow.appendChild(inputBox);
-    inputRow.appendChild(btnSend);
-
-    // The full quoted text lives here — the chip only shows a preview of it.
-    var quoteText = null;
-    function setQuote(text) {
-      quoteText = text;
-      if (quoteText) {
-        chipText.textContent = '「引用」' + (quoteText.length > 40 ? quoteText.slice(0, 40) + '…' : quoteText);
-        chipCount.textContent = quoteText.length > 40 ? '(' + quoteText.length + ' 字)' : '';
-        quoteRow.style.display = 'block';
-      } else {
-        quoteRow.style.display = 'none';
-      }
-      syncButtons();
-    }
-    // 翻译/解释/收藏 act on the quote; 发送 needs the quote or a question.
-    function syncButtons() {
-      var hasQuote = !!quoteText;
-      var hasQuestion = !!question.value.trim();
-      var quoteActions = [btnTranslate, btnExplain, btnSpeak, btnClip];
-      for (var i = 0; i < quoteActions.length; i++) {
-        quoteActions[i].style.opacity = hasQuote ? '1' : '0.4';
-        quoteActions[i].style.cursor = hasQuote ? 'pointer' : 'default';
-      }
-      btnSend.style.opacity = (hasQuote || hasQuestion) ? '1' : '0.4';
-      btnSend.style.cursor = (hasQuote || hasQuestion) ? 'pointer' : 'default';
-    }
-    question.addEventListener('input', syncButtons);
-    chipX.addEventListener('click', function () { setQuote(null); });
-
-    // ── the results area (and the clips list) ──
-    var results = styled('div', 'display:none;margin-top:6px;max-height:40vh;overflow:auto');
-    var resultsHeadRow = styled('div', 'display:flex;align-items:center;gap:6px;margin-bottom:4px');
-    var resultsHead = styled('div', 'font-weight:600;color:#9db2ff;font:12px/1 system-ui,sans-serif;flex:0 1 auto;min-width:0');
-    var COMPACT_BTN = 'all:unset;cursor:pointer;padding:2px 7px;border-radius:4px;' +
-      'border:1px solid rgba(255,255,255,.22);color:#cdd6e8;font:11px/1.2 system-ui,sans-serif;white-space:nowrap';
-    // Icon-only read control: the text label crowded the result heading.
-    var SPEAKER_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"' +
-      ' stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-      '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>' +
-      '<path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>' +
-      '<path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path></svg>';
-    var STOP_SVG = '<svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">' +
-      '<rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor"></rect></svg>';
-    var ICON_BTN = 'all:unset;cursor:pointer;padding:3px;border-radius:4px;display:inline-flex;' +
-      'align-items:center;justify-content:center;line-height:0;border:1px solid rgba(255,255,255,.22);' +
-      'color:#cdd6e8;background:rgba(255,255,255,.04)';
-    var lastResultText = '';
-    var btnReadResult = styled('button', ICON_BTN);
-    btnReadResult.innerHTML = SPEAKER_SVG;
-    btnReadResult.title = '朗读结果（再次点击停止）';
-    btnReadResult.setAttribute('aria-label', '朗读结果');
-    btnReadResult.style.display = 'none';
-    btnReadResult.addEventListener('click', function () {
-      if (!lastResultText) return;
-      pin();
-      report('朗读结果', { text: lastResultText.slice(0, 8000) });
-      setReadUI(!readPlaying);
-    });
-    resultsHeadRow.appendChild(resultsHead);
-    resultsHeadRow.appendChild(btnReadResult);
-    var resultsBody = styled('div', 'white-space:pre-wrap;word-break:break-word');
-    results.appendChild(resultsHeadRow);
-    results.appendChild(resultsBody);
-
-    popup.appendChild(row);
-    popup.appendChild(inputRow);
-    popup.appendChild(results);
-
-    // ── the fallback card, for results that arrive after the popup is gone ──
-    var card = styled('div',
-      'position:fixed;right:12px;bottom:12px;z-index:2147483647;display:none;max-width:340px;max-height:42vh;' +
-      'overflow:auto;padding:10px 30px 10px 12px;border-radius:10px;background:rgba(18,20,28,.96);' +
-      'color:#e8eaf0;box-shadow:0 6px 20px rgba(0,0,0,.4);font:12.5px/1.6 system-ui,sans-serif;' +
-      'white-space:pre-wrap;word-break:break-word');
-    var cardTitle = styled('div', 'font-weight:600;color:#9db2ff;font:12.5px/1.4 system-ui,sans-serif;flex:0 1 auto;min-width:0');
-    var cardBody = styled('div', '');
-    var cardClose = styled('button',
-      'all:unset;cursor:pointer;position:absolute;top:8px;right:9px;color:#8b93a7;font:14px/1 system-ui,sans-serif');
-    cardClose.textContent = '×';
-    cardClose.addEventListener('click', function () { card.style.display = 'none'; });
-    var cardRead = styled('button', ICON_BTN);
-    cardRead.innerHTML = SPEAKER_SVG;
-    cardRead.title = '朗读结果（再次点击停止）';
-    cardRead.setAttribute('aria-label', '朗读结果');
-    cardRead.style.display = 'none';
-    cardRead.addEventListener('click', function () {
-      var text = String(cardBody.textContent || '');
-      if (!text.trim()) return;
-      report('朗读结果', { text: text.slice(0, 8000) });
-      setReadUI(!readPlaying);
-    });
-    var cardHeadRow = styled('div', 'display:flex;align-items:center;gap:6px;margin-bottom:4px');
-    cardHeadRow.appendChild(cardTitle);
-    cardHeadRow.appendChild(cardRead);
-    card.appendChild(cardHeadRow);
-    card.appendChild(cardBody);
-    card.appendChild(cardClose);
-
-    var readPlaying = false;
-    function setReadUI(playing) {
-      readPlaying = !!playing;
-      var icon = readPlaying ? STOP_SVG : SPEAKER_SVG;
-      var color = readPlaying ? '#9db2ff' : '#cdd6e8';
-      var border = readPlaying ? 'rgba(120,160,255,.75)' : 'rgba(255,255,255,.22)';
-      var bg = readPlaying ? 'rgba(80,120,255,.22)' : 'rgba(255,255,255,.04)';
-      btnReadResult.innerHTML = icon;
-      cardRead.innerHTML = icon;
-      btnReadResult.title = readPlaying ? '停止朗读' : '朗读结果（再次点击停止）';
-      cardRead.title = btnReadResult.title;
-      btnReadResult.style.color = color;
-      btnReadResult.style.borderColor = border;
-      btnReadResult.style.background = bg;
-      cardRead.style.color = color;
-      cardRead.style.borderColor = border;
-      cardRead.style.background = bg;
-    }
-    // The backend pushes the host's real playback state here, so the icon
-    // resets when a clip finishes on its own.
-    window.__piReadState = function (playing) { setReadUI(!!playing); };
-
-    // ── one-line toast, for the failure paths only ──
-    var toast = styled('div',
-      'position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:2147483647;display:none;' +
-      'padding:6px 14px;border-radius:16px;background:rgba(18,20,28,.92);color:#e8eaf0;' +
-      'font:12px/1 system-ui,sans-serif;box-shadow:0 4px 14px rgba(0,0,0,.3)');
-    var toastTimer = null;
-
-    root.appendChild(popup);
-    root.appendChild(card);
-    root.appendChild(toast);
-    document.documentElement.appendChild(host);
-
-    // ── popup lifecycle ──
-    function hidePopup() {
-      popup.style.display = 'none';
-      pinned = false;
-    }
-    function place() {
-      var w = popup.offsetWidth || 340;
-      var h = popup.offsetHeight || 130;
-      var left = anchorRect ? Math.round(anchorRect.left) : 12;
-      left = Math.min(Math.max(4, left), Math.max(4, window.innerWidth - w - 8));
-      var top = anchorRect ? Math.round(anchorRect.bottom + 6) : 12;
-      if (top + h > window.innerHeight - 8) top = Math.max(8, window.innerHeight - h - 12);
-      popup.style.left = Math.round(left) + 'px';
-      popup.style.top = Math.round(top) + 'px';
-    }
-    function showPopup(text) {
-      pinned = false;
-      card.style.display = 'none';
-      results.style.display = 'none';
-      resultsBody.textContent = '';
-      resultsHead.textContent = '';
-      setQuote(text && text.trim() ? String(text) : null);
-      question.value = '';
-      // No autofocus: selecting-to-copy must keep working like on any page.
-      popup.style.display = 'block';
-      place();
-    }
-    // The popup grows when results arrive; re-clamp it inside the viewport.
-    if (typeof ResizeObserver === 'function') {
-      new ResizeObserver(function () {
-        if (popup.style.display !== 'none') place();
-      }).observe(popup);
-    }
-
-    function pin() { pinned = true; }
-    function report(action, extra) {
-      window.__piSelAction = {
-        action: action,
-        text: '',
-        url: location.href,
-        title: document.title,
-        at: Date.now()
-      };
-      if (extra) {
-        for (var k in extra) window.__piSelAction[k] = extra[k];
-      }
-    }
-    function showResult(title, body, readable) {
-      resultsHead.textContent = title;
-      resultsBody.textContent = body || '';
-      results.style.display = 'block';
-      lastResultText = body ? String(body) : '';
-      if (!readable) setReadUI(false);
-      btnReadResult.style.display = readable && lastResultText.trim() ? 'inline-flex' : 'none';
-    }
-
-    // ── selection tracking ──
-    function onMouseUp(e) {
-      // Mouseups inside our own popup are interactions, not selections.
-      if (e && e.composedPath && e.composedPath().indexOf(host) >= 0) return;
-      setTimeout(function () {
-        var s = document.getSelection();
-        var text = String(s || '').trim();
-        if (!text) {
-          // A plain click elsewhere: dismiss only if nothing was started here.
-          if (!pinned && popup.style.display !== 'none') hidePopup();
-          return;
-        }
-        // Fresh selection — new popup, even over a pinned one.
-        anchorRect = s.rangeCount ? s.getRangeAt(0).getBoundingClientRect() : null;
-        showPopup(String(s));
-      }, 0);
-    }
-    function onSelectionChange() {
-      if (pinned) return;
-      if (!String(document.getSelection() || '').trim() && popup.style.display !== 'none') hidePopup();
-    }
-    document.addEventListener('mouseup', onMouseUp);
-    document.addEventListener('selectionchange', onSelectionChange);
-    // The popup must stay under its text: whenever the page moves under it —
-    // scroll, panel resize, fullscreen transitions, zoomFactor changes — the
-    // anchor is re-derived from the live selection (which survives all of
-    // those) and the popup is re-placed. Without this the popup hangs where
-    // the layout used to put the text.
-    function reanchor() {
-      if (popup.style.display === 'none') return;
-      var s = document.getSelection();
-      if (s && s.rangeCount) {
-        var r = s.getRangeAt(0).getBoundingClientRect();
-        if (r && (r.width || r.height)) anchorRect = r;
-      }
-      if (anchorRect) place();
-    }
-    function onScroll() {
-      if (popup.style.display === 'none') return;
-      var s = document.getSelection();
-      if (s && s.rangeCount) {
-        var r = s.getRangeAt(0).getBoundingClientRect();
-        if (r && (r.width || r.height)) { anchorRect = r; place(); return; }
-      }
-      // The text is gone (cleared selection): a pinned popup stays put — the
-      // user pinned it on purpose; an unpinned one has no reason to exist.
-      if (!pinned) hidePopup();
-    }
-    function onResize() {
-      reanchor();
-      // Fullscreen/maximize transitions animate; the final layout settles
-      // after the resize event, so place once more when it has.
-      setTimeout(reanchor, 250);
-    }
-    window.addEventListener('scroll', onScroll, true);
-    window.addEventListener('resize', onResize);
-    // zoomFactor changes (auto-fit and manual zoom) relayout the page WITHOUT
-    // firing a window resize — matchMedia sees the device pixel ratio move.
-    var zoomMq = window.matchMedia('(resolution: ' + window.devicePixelRatio + 'dppx)');
-    var onZoomMq = function () {
-      zoomMq.removeEventListener('change', onZoomMq);
-      reanchor();
-      zoomMq = window.matchMedia('(resolution: ' + window.devicePixelRatio + 'dppx)');
-      zoomMq.addEventListener('change', onZoomMq);
-    };
-    zoomMq.addEventListener('change', onZoomMq);
-
-    // ── actions ──
-    question.addEventListener('focus', pin);
-    question.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') {
-        e.stopPropagation();
-        hidePopup();
-        return;
-      }
-      if (e.key === 'Enter' && !e.shiftKey) {
-        e.preventDefault();
-        doSend();
-      }
-    });
-    btnClose.addEventListener('click', hidePopup);
-
-    btnTranslate.addEventListener('click', function () {
-      if (!quoteText) return;
-      pin();
-      report('翻译', { text: quoteText.slice(0, 8000) });
-      showResult('翻译中…', '');
-    });
-    btnExplain.addEventListener('click', function () {
-      if (!quoteText) return;
-      pin();
-      report('解释', { text: quoteText.slice(0, 8000) });
-      showResult('解释中…', '');
-    });
-    btnSpeak.addEventListener('click', function () {
-      if (!quoteText) return;
-      pin();
-      report('朗读', { text: quoteText.slice(0, 8000) });
-      showResult('朗读', '用宿主语音朗读选中内容；再点一次停止。');
-    });
-    btnClip.addEventListener('click', function () {
-      if (!quoteText) return;
-      pin();
-      report('收藏', { text: quoteText.slice(0, 8000) });
-      showResult('收藏', '…');
-    });
-
-    function doSend() {
-      var q = String(question.value || '').trim();
-      if (!quoteText && !q) return;
-      pin();
-      // Question and quote travel separately: the backend composes the message.
-      report('chat', { text: q, quote: quoteText ? quoteText.slice(0, 8000) : null });
-      // The reply lands in the conversation — the popup is a launcher, not a chat.
-      showResult('已发送 →', '回答在对话里,继续追问也在对话进行。');
-    }
-    btnSend.addEventListener('click', doSend);
-
-    // ── the backend's handles into this UI ──
-    window.__piNoteShow = function (payload) {
-      if (!payload) return;
-      var kind = payload.kind || '';
-      var inPopup = popup.style.display !== 'none';
-      var pendingText = '';
-      if (payload.state === 'pending-hint') {
-        pendingText = '还没回来 — 多半是第一次调用在等授权:去对话里点「总是允许」,本次会话就不再问了。';
-      }
-      if (payload.state === 'pending' || payload.state === 'pending-hint') {
-        var head = kind === 'explain' ? '解释中…' : kind === 'chat' ? '思考中…' : '翻译中…';
-        if (inPopup) { showResult(head, pendingText); }
-        else { cardTitle.textContent = head; cardBody.textContent = pendingText; cardRead.style.display = 'none'; card.style.display = 'block'; }
-        return;
-      }
-      if (payload.state === 'timeout') {
-        var tmsg = '等得有点久了 — 去对话里看看进度。';
-        if (inPopup) { showResult('还在等结果', tmsg); }
-        else { cardTitle.textContent = '还在等结果'; cardBody.textContent = tmsg; cardRead.style.display = 'none'; card.style.display = 'block'; }
-        return;
-      }
-      var title = payload.title || (kind === 'explain' ? '解释' : kind === 'translate' ? '译文' : kind === 'chat' ? '回答' : '结果');
-      if (inPopup) {
-        setReadUI(false);
-        showResult(title, payload.text || '', true);
-      } else {
-        cardTitle.textContent = title;
-        cardBody.textContent = payload.text || '';
-        setReadUI(false);
-        cardRead.style.display = (payload.text || '').trim() ? 'inline-flex' : 'none';
-        card.style.display = 'block';
-      }
-    };
-    window.__piRenderClips = function (clips, newestId) {
-      resultsHead.textContent = '收藏的文字';
-      resultsBody.textContent = '';
-      var list = Array.isArray(clips) ? clips : [];
-      for (var i = 0; i < list.length; i++) {
-        (function (clip) {
-          var item = styled('div',
-            'position:relative;padding:6px 24px 6px 8px;border-radius:6px;margin-bottom:4px;' +
-            'border-left:3px solid ' + (clip.id === newestId ? 'rgba(110,150,255,.95)' : 'rgba(255,255,255,.16)') + ';' +
-            'background:rgba(255,255,255,.05)');
-          var t = styled('div',
-            'font:12.5px/1.5 system-ui,sans-serif;color:#e8eaf0;white-space:pre-wrap;word-break:break-word;' +
-            'max-height:3.6em;overflow:hidden');
-          t.textContent = clip.text && clip.text.length > 120 ? clip.text.slice(0, 120) + '…' : (clip.text || '');
-          var src = styled('div', 'font:11px/1 system-ui,sans-serif;color:#8b93a7;margin-top:3px');
-          src.textContent = (clip.kind === 'page' ? '整页 · ' : '') +
-            (clip.title || clip.url || '') + (clip.at ? ' · ' + whenLabel(clip.at) : '');
-          var x = styled('button',
-            'all:unset;cursor:pointer;position:absolute;top:6px;right:4px;color:#8b93a7;font:11px/1 system-ui,sans-serif;padding:2px 3px');
-          x.textContent = '×';
-          x.addEventListener('click', function () {
-            window.__piSelAction = { action: 'removeClip', id: clip.id, at: Date.now() };
-          });
-          item.appendChild(t);
-          item.appendChild(src);
-          item.appendChild(x);
-          resultsBody.appendChild(item);
-        })(list[i]);
-      }
-      if (!list.length) {
-        var empty = styled('div', 'font:11px/1 system-ui,sans-serif;color:#8b93a7;padding:4px 0');
-        empty.textContent = '还没有收藏的文字';
-        resultsBody.appendChild(empty);
-      }
-      results.style.display = 'block';
-    };
-    window.__piToast = function (msg) {
-      toast.textContent = String(msg || '');
-      toast.style.display = 'block';
-      if (toastTimer) clearTimeout(toastTimer);
-      toastTimer = setTimeout(function () { toast.style.display = 'none'; }, 1800);
-    };
-    window.__piSelDisable = function () {
-      document.removeEventListener('mouseup', onMouseUp);
-      document.removeEventListener('selectionchange', onSelectionChange);
-      window.removeEventListener('scroll', onScroll, true);
-      window.removeEventListener('resize', onResize);
-      zoomMq.removeEventListener('change', onZoomMq);
-      if (host.parentNode) host.parentNode.removeChild(host);
-      window.__piSelInstalled = false;
-      window.__piSelAction = null;
-    };
-
-    window.__piSelInstalled = true;
-    window.__piSelAction = null;
-    return 'installed';
-  } catch (e) {
-    return 'failed: ' + (e && e.message ? e.message : String(e));
+function normalizeSelTheme(input: unknown): SelThemeSeed | null {
+  if (!input || typeof input !== 'object') return null;
+  const raw = input as { dark?: unknown; tokens?: unknown };
+  const src = raw.tokens && typeof raw.tokens === 'object' ? (raw.tokens as Record<string, unknown>) : {};
+  const tokens: Record<string, string> = {};
+  for (const key of SEL_THEME_KEYS) {
+    const value = src[key];
+    if (typeof value !== 'string' || !value.trim() || value.length > 240) continue;
+    if (/[;{}<>]/.test(value)) continue;
+    tokens[key] = value;
   }
-})()`;
+  return { dark: raw.dark === true, tokens };
+}
+
+/** The last palette the panel pushed; baked into every later injection. */
+let selTheme: SelThemeSeed | null = null;
 
 /**
  * One evaluate that both reads and consumes a pending click, and reports
@@ -2151,7 +1680,7 @@ async function injectOnce(ctx: PluginContext): Promise<boolean> {
   try {
     const r = await ctx.call<{ result?: string }>(
       'browser.evaluate',
-      { expression: INJECT_SOURCE },
+      { expression: selSource(selTheme) },
       { timeoutMs: 5_000 },
     );
     return r?.result === 'installed' || r?.result === 'already';
@@ -2160,6 +1689,15 @@ async function injectOnce(ctx: PluginContext): Promise<boolean> {
     // (or the poll's self-heal) will catch it.
     return false;
   }
+}
+
+/** Paint an already-installed popup with a theme that arrived after injection. */
+async function pushSelTheme(ctx: PluginContext, theme: SelThemeSeed | null): Promise<void> {
+  if (!theme) return;
+  await callInjected(
+    ctx,
+    `window.__piSelTheme ? (window.__piSelTheme(${JSON.stringify(theme)}), true) : false`,
+  );
 }
 
 /**
@@ -3083,6 +2621,14 @@ plugin({
         broadcast(ctx, 'ui.historyCleared');
         return { ok: true };
 
+      case 'sel.theme': {
+        // The panel's palette for the in-page selection popup. Its own document
+        // never sees the shell tokens (separate WebContentsView), so this is
+        // the only way the popup can match the app's light/dark theme.
+        selTheme = normalizeSelTheme(params);
+        await pushSelTheme(ctx, selTheme);
+        return { ok: true };
+      }
       case 'settings.setPrivate': {
         privateMode = params.private === true;
         await save(ctx, SETTINGS_KEY, { private: privateMode, selPopup }, 'settings');
@@ -3100,7 +2646,7 @@ plugin({
         throw new Error(
           `unknown panel method: ${method} (known: nav.open, nav.back, nav.forward, nav.reload, ` +
             `state.get, omnibox.search, favorites.toggle, favorites.remove, history.clear, ` +
-            `settings.setPrivate, settings.setSelPopup, tabs.new, tabs.activate, tabs.close, ` +
+            `sel.theme, settings.setPrivate, settings.setSelPopup, tabs.new, tabs.activate, tabs.close, ` +
             `tabs.reorder, split.set, recipes.list, recipes.update, recipes.delete, recipes.run)`,
         );
     }
