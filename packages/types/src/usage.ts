@@ -44,22 +44,3 @@ export interface ToolTiming {
   toolName: string;
   durationMs: number;
 }
-
-export interface CostEstimate {
-  inputCost: number;
-  outputCost: number;
-  totalCost: number;
-  currency: string;
-}
-
-export interface UsageStats {
-  sessionId: string;
-  totalTokens: number;
-  tokenUsage: TokenUsage;
-  costEstimate: CostEstimate;
-  messageCount: number;
-  toolCallCount: number;
-  streamingDuration: number;
-  periodStart: string;
-  periodEnd: string;
-}

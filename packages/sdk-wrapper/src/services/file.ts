@@ -36,8 +36,6 @@ export interface FileContent {
 
 // --- Office document structured content ---
 
-export type OfficeFileType = 'docx' | 'xlsx' | 'pptx';
-
 export interface DocxContent {
   type: 'docx';
   data: string; // base64-encoded raw DOCX file

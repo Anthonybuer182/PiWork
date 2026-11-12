@@ -7,11 +7,6 @@
 
 import { wrapPcm16ToWav } from '../wav.js';
 
-export interface ParsedWav {
-  sampleRate: number;
-  samples: Float32Array;
-}
-
 export function wav16kToFloat32(wav: Buffer): Float32Array {
   if (wav.length < 44) throw new Error('录音数据无效');
   if (wav.subarray(0, 4).toString('ascii') !== 'RIFF' ||

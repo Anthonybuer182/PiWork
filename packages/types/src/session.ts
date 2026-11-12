@@ -32,12 +32,6 @@ export interface SessionWithMessages extends Session {
   messages: Message[];
 }
 
-export interface SessionGroup {
-  workspaceId: string;
-  workspaceName: string;
-  sessions: Session[];
-}
-
 export interface TreeNodeToolCall {
   toolCallId: string;
   toolName: string;
