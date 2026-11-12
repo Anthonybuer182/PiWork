@@ -1931,8 +1931,8 @@ var IMT_SOURCE = String.raw`
     styleEl.setAttribute('data-pi-imt-style', '1');
     styleEl.textContent = [
       '[data-pi-imt-hl]{outline:2px solid rgba(196,120,44,.85);outline-offset:2px;border-radius:3px}',
-      '.pi-imt-block{display:block;margin:.4em 0 .7em;padding:.08em 0 .08em .65em;',
-      'border-left:2px solid rgba(190,110,40,.45);text-transform:none;letter-spacing:normal;',
+      '.pi-imt-block{display:block;margin:.4em 0 .7em;padding:0;',
+      'text-transform:none;letter-spacing:normal;',
       'word-spacing:normal;font-variant:normal;font-feature-settings:normal;',
       '-webkit-text-fill-color:currentColor}',
       '.pi-imt-inline{text-transform:none;letter-spacing:normal;word-spacing:normal;font-variant:normal}',
@@ -2027,6 +2027,8 @@ var PageTranslator = class {
   mode = "idle";
   abort = false;
   running = false;
+  /** Mode to keep when the loop aborts (原文 switch), else idle on abort. */
+  keepModeOnAbort = null;
   stats = null;
   cache = /* @__PURE__ */ new Map();
   cacheLoaded = false;
@@ -2087,14 +2089,33 @@ var PageTranslator = class {
     void this.loop(mode);
     return this.state();
   }
+  /**
+   * 原文 is a display mode, not a teardown: the translations and the cache stay,
+   * so switching back is instant and costs no model calls. Only `stop()` (and
+   * navigation) actually clears the page state.
+   */
   async setMode(mode) {
     if (mode === "source") {
-      return this.stop();
+      this.abort = true;
+      this.running = false;
+      this.keepModeOnAbort = "source";
+      await this.deps.evaluate('window.__piImt ? window.__piImt.setMode("source") : null');
+      this.mode = "source";
+      this.stats = await this.status();
+      this.scheduleFlush();
+      this.deps.notify(this.state());
+      return this.state();
     }
     await this.deps.evaluate("window.__piImt ? window.__piImt.setMode(" + JSON.stringify(mode) + ") : null");
+    this.stats = await this.status();
+    const pending = (this.stats?.pending ?? 0) > 0;
     if (!this.running) {
       this.mode = mode;
-      this.stats = await this.status();
+      if (pending) {
+        this.abort = false;
+        this.running = true;
+        void this.loop(mode);
+      }
     } else {
       this.mode = "translating";
     }
@@ -2141,6 +2162,7 @@ var PageTranslator = class {
   }
   // ── loop ────────────────────────────────────────────────────────────────
   async loop(mode) {
+    this.keepModeOnAbort = null;
     this.mode = "translating";
     this.deps.notify(this.state());
     let waitingForScroll = false;
@@ -2179,7 +2201,8 @@ var PageTranslator = class {
       this.deps.log.warn("imt loop failed: " + this.lastError);
     } finally {
       this.running = false;
-      this.mode = this.abort ? "idle" : mode;
+      this.mode = this.abort ? this.keepModeOnAbort ?? "idle" : mode;
+      this.keepModeOnAbort = null;
       this.scheduleFlush();
       this.deps.notify(this.state());
       if (waitingForScroll && !this.abort) this.scheduleWatch(mode);

@@ -15,7 +15,7 @@
 import { createHash } from 'node:crypto';
 import { IMT_SOURCE } from './imt-runtime';
 
-export type ImtMode = 'idle' | 'translating' | 'dual' | 'replace';
+export type ImtMode = 'idle' | 'translating' | 'dual' | 'replace' | 'source';
 
 export interface ImtState {
   mode: ImtMode;
@@ -95,6 +95,8 @@ export class PageTranslator {
   private mode: ImtMode = 'idle';
   private abort = false;
   private running = false;
+  /** Mode to keep when the loop aborts (原文 switch), else idle on abort. */
+  private keepModeOnAbort: ImtMode | null = null;
   private stats: RuntimeStatus | null = null;
   private cache = new Map<string, CacheEntry>();
   private cacheLoaded = false;
@@ -163,14 +165,33 @@ export class PageTranslator {
     return this.state();
   }
 
+  /**
+   * 原文 is a display mode, not a teardown: the translations and the cache stay,
+   * so switching back is instant and costs no model calls. Only `stop()` (and
+   * navigation) actually clears the page state.
+   */
   async setMode(mode: 'dual' | 'replace' | 'source'): Promise<ImtState> {
     if (mode === 'source') {
-      return this.stop();
+      this.abort = true;
+      this.running = false;
+      this.keepModeOnAbort = 'source';
+      await this.deps.evaluate('window.__piImt ? window.__piImt.setMode("source") : null');
+      this.mode = 'source';
+      this.stats = await this.status();
+      this.scheduleFlush();
+      this.deps.notify(this.state());
+      return this.state();
     }
     await this.deps.evaluate('window.__piImt ? window.__piImt.setMode(' + JSON.stringify(mode) + ') : null');
+    this.stats = await this.status();
+    const pending = (this.stats?.pending ?? 0) > 0;
     if (!this.running) {
       this.mode = mode;
-      this.stats = await this.status();
+      if (pending) {
+        this.abort = false;
+        this.running = true;
+        void this.loop(mode);
+      }
     } else {
       this.mode = 'translating';
     }
@@ -225,6 +246,7 @@ export class PageTranslator {
   // ── loop ────────────────────────────────────────────────────────────────
 
   private async loop(mode: 'dual' | 'replace'): Promise<void> {
+    this.keepModeOnAbort = null;
     this.mode = 'translating';
     this.deps.notify(this.state());
     let waitingForScroll = false;
@@ -268,7 +290,8 @@ export class PageTranslator {
       this.deps.log.warn('imt loop failed: ' + this.lastError);
     } finally {
       this.running = false;
-      this.mode = this.abort ? 'idle' : mode;
+      this.mode = this.abort ? (this.keepModeOnAbort ?? 'idle') : mode;
+      this.keepModeOnAbort = null;
       this.scheduleFlush();
       this.deps.notify(this.state());
       if (waitingForScroll && !this.abort) this.scheduleWatch(mode);

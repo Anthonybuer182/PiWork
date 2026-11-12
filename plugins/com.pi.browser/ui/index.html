@@ -75,6 +75,7 @@
       font: 600 12px/1 inherit;
       letter-spacing: 0.02em;
     }
+    #btn-imt.on { background: hsl(var(--accent, 221 19% 17%)); color: hsl(var(--foreground, 210 20% 92%)); }
     #btn-imt.busy { color: hsl(43 90% 62%); }
     /* Second toolbar row: all whole-page controls live here, above the engine
        view, so nothing is ever covered by the page. */
@@ -604,6 +605,7 @@
 
       function showRow(show) {
         imtRow.hidden = !show;
+        paintImt();
         if (show) imtAct('imt.state', {});
       }
 
@@ -611,6 +613,9 @@
         var st = imtState;
         var busy = st.mode === 'translating';
         imtBtn.classList.toggle('busy', busy);
+        imtBtn.classList.toggle('on', !imtRow.hidden);
+        imtBtn.setAttribute('aria-pressed', imtRow.hidden ? 'false' : 'true');
+        imtBtn.textContent = imtRow.hidden ? '译 ▾' : '译 ▴';
         var toolbarLabel = busy ? ((st.done || 0) + '/' + (st.total || 0))
           : st.mode === 'dual' ? '双语' : st.mode === 'replace' ? '替换' : '';
         // While the row is open it already shows the mode; the toolbar badge is
@@ -620,7 +625,7 @@
         imtBtn.title = st.error ? '整页翻译：' + st.error : '整页翻译';
 
         var read = st.read;
-        var translated = busy || st.mode === 'dual' || st.mode === 'replace';
+        var translated = busy || st.mode === 'dual' || st.mode === 'replace' || st.mode === 'source';
         irStart.hidden = translated || !!read;
         irModes.hidden = !translated || !!read;
         irActions.hidden = !!read;
@@ -636,10 +641,6 @@
         irRetry.textContent = '重试 ' + failed;
         irRetry.title = '有 ' + failed + ' 段翻译失败，点此重试';
 
-        var blocked = st.blockedFrames || 0;
-        var frameNote = blocked > 0 && (busy || st.mode === 'dual' || st.mode === 'replace') ? '含内嵌框架' : '';
-        irMeta.title = frameNote ? '页面有 ' + blocked + ' 个内嵌框架，里面的文字无法翻译' : '';
-
         var meta = '';
         if (read) {
           meta = '朗读中 ' + ((read.index || 0) + 1) + '/' + (read.total || 0) + (read.layer ? ' · ' + read.layer : '');
@@ -648,7 +649,6 @@
         } else if (busy) {
           meta = (st.done || 0) + '/' + (st.total || 0);
         }
-        if (frameNote) meta = meta ? meta + ' · ' + frameNote : frameNote;
         irMeta.textContent = meta;
       }
 

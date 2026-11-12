@@ -714,8 +714,8 @@ export const IMT_SOURCE = String.raw`
     styleEl.setAttribute('data-pi-imt-style', '1');
     styleEl.textContent = [
       '[data-pi-imt-hl]{outline:2px solid rgba(196,120,44,.85);outline-offset:2px;border-radius:3px}',
-      '.pi-imt-block{display:block;margin:.4em 0 .7em;padding:.08em 0 .08em .65em;',
-      'border-left:2px solid rgba(190,110,40,.45);text-transform:none;letter-spacing:normal;',
+      '.pi-imt-block{display:block;margin:.4em 0 .7em;padding:0;',
+      'text-transform:none;letter-spacing:normal;',
       'word-spacing:normal;font-variant:normal;font-feature-settings:normal;',
       '-webkit-text-fill-color:currentColor}',
       '.pi-imt-inline{text-transform:none;letter-spacing:normal;word-spacing:normal;font-variant:normal}',
