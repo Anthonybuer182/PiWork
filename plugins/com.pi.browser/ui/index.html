@@ -76,6 +76,46 @@
       letter-spacing: 0.02em;
     }
     #btn-imt.busy { color: hsl(43 90% 62%); }
+    /* Second toolbar row: all whole-page controls live here, above the engine
+       view, so nothing is ever covered by the page. */
+    #imt-row {
+      flex: none;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      height: 36px;
+      padding: 0 8px;
+      border-bottom: 1px solid hsl(var(--border, 218 14% 20%));
+      background: hsl(var(--card, 222 15% 11%));
+      font-size: 12px;
+      overflow: hidden;
+    }
+    #imt-row[hidden] { display: none; }
+    /* The UA's [hidden] rule loses to `.ir-group { display:flex }`; keep hiding explicit. */
+    #imt-row [hidden] { display: none !important; }
+    #imt-row .ir-group { display: flex; align-items: center; gap: 2px; flex: none; }
+    #imt-row button {
+      height: 26px;
+      padding: 0 8px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: hsl(var(--muted-foreground, 217 9% 59%));
+      font: inherit;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    #imt-row button:hover { background: hsl(var(--accent, 221 19% 17%)); color: hsl(var(--foreground, 210 20% 92%)); }
+    #imt-row button.on { background: hsl(var(--accent, 221 19% 17%)); color: hsl(var(--foreground, 210 20% 92%)); }
+    #imt-row button.primary { background: hsl(30 65% 45%); color: #fff; }
+    #imt-row .ir-meta { color: hsl(var(--muted-foreground, 217 9% 59%)); padding: 0 4px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    #imt-row .ir-grow { flex: 1; min-width: 0; }
+    #imt-row .ir-close { font-size: 15px; line-height: 1; }
+    #imt-row .ir-icon { width: 28px; padding: 0; }
+    @media (max-width: 560px) {
+      #imt-row { gap: 2px; padding: 0 4px; }
+      #imt-row .ir-hide-sm { display: none; }
+    }
     #imt-status {
       flex: none;
       font-size: 11px;
@@ -459,6 +499,32 @@
     <input id="url" type="text" spellcheck="false" placeholder="输入网址,回车打开" autocomplete="off" />
   </div>
 
+  <div id="imt-row" hidden>
+    <div class="ir-group" id="ir-start">
+      <button type="button" data-imt-start="replace" class="primary">翻译</button>
+      <button type="button" data-imt-start="dual">双语</button>
+    </div>
+    <div class="ir-group" id="ir-modes" hidden>
+      <button type="button" data-imt-mode="dual">双语</button>
+      <button type="button" data-imt-mode="replace">替换</button>
+      <button type="button" data-imt-mode="source">原文</button>
+    </div>
+    <span class="ir-meta" id="ir-meta"></span>
+    <span class="ir-grow"></span>
+    <div class="ir-group" id="ir-actions">
+      <button type="button" data-imt-act="read">朗读</button>
+      <button type="button" data-imt-act="explain" class="ir-hide-sm">解释</button>
+      <button type="button" data-imt-act="save" class="ir-hide-sm">收藏</button>
+    </div>
+    <div class="ir-group" id="ir-read" hidden>
+      <button type="button" data-imt-read="prev" class="ir-icon" title="上一段">‹</button>
+      <button type="button" data-imt-read="pause" class="ir-icon" title="暂停">❚❚</button>
+      <button type="button" data-imt-read="next" class="ir-icon" title="下一段">›</button>
+      <button type="button" data-imt-read="stop">停止</button>
+    </div>
+    <button type="button" class="ir-close" id="ir-close" title="收起">×</button>
+  </div>
+
   <div id="omnibox" hidden>
     <div id="omni-list"></div>
     <div id="omni-foot">
@@ -519,53 +585,96 @@
         });
       }
 
-      // ── Whole-page translation ──
-      // The menu MUST be the host's native popup: the engine view is a native
-      // WebContentsView painted above this page, so any DOM dropdown would be
-      // covered by the page itself.
+      // ── Whole-page translation row ──
+      // All controls live in a real toolbar row above the engine view: a DOM
+      // dropdown in this page would be covered by the native view below.
       var imtBtn = document.getElementById('btn-imt');
       var imtStatus = document.getElementById('imt-status');
-      var imtMode = 'idle';
+      var imtRow = document.getElementById('imt-row');
+      var irStart = document.getElementById('ir-start');
+      var irModes = document.getElementById('ir-modes');
+      var irMeta = document.getElementById('ir-meta');
+      var irActions = document.getElementById('ir-actions');
+      var irRead = document.getElementById('ir-read');
+      var irPause = irRead.querySelector('[data-imt-read="pause"]');
+      var imtState = { mode: 'idle', done: 0, total: 0, read: null };
+
+      function showRow(show) {
+        imtRow.hidden = !show;
+        if (show) imtAct('imt.state', {});
+      }
+
+      function paintImt() {
+        var st = imtState;
+        var busy = st.mode === 'translating';
+        imtBtn.classList.toggle('busy', busy);
+        var toolbarLabel = busy ? ((st.done || 0) + '/' + (st.total || 0))
+          : st.mode === 'dual' ? '双语' : st.mode === 'replace' ? '替换' : '';
+        // While the row is open it already shows the mode; the toolbar badge is
+        // for the collapsed state only.
+        imtStatus.hidden = !toolbarLabel || !imtRow.hidden;
+        imtStatus.textContent = toolbarLabel;
+        imtBtn.title = st.error ? '整页翻译：' + st.error : '整页翻译';
+
+        var read = st.read;
+        var translated = busy || st.mode === 'dual' || st.mode === 'replace';
+        irStart.hidden = translated || !!read;
+        irModes.hidden = !translated || !!read;
+        irActions.hidden = !!read;
+        irRead.hidden = !read;
+        if (!imtRow.hidden) {
+          irModes.querySelectorAll('button[data-imt-mode]').forEach(function (b) {
+            b.classList.toggle('on', b.getAttribute('data-imt-mode') === st.mode);
+          });
+        }
+
+        if (read) {
+          irMeta.textContent = '朗读中 ' + ((read.index || 0) + 1) + '/' + (read.total || 0) + (read.layer ? ' · ' + read.layer : '');
+          irPause.textContent = read.paused ? '▶' : '❚❚';
+          irPause.title = read.paused ? '继续' : '暂停';
+        } else if (busy) {
+          irMeta.textContent = (st.done || 0) + '/' + (st.total || 0);
+        } else {
+          irMeta.textContent = '';
+        }
+      }
+
       function renderImt(st) {
         if (!st) return;
-        imtMode = st.mode || 'idle';
-        var busy = imtMode === 'translating';
-        imtBtn.classList.toggle('busy', busy);
-        var label = '';
-        if (busy) label = (st.done || 0) + '/' + (st.total || 0);
-        else if (imtMode === 'dual') label = '双语';
-        else if (imtMode === 'replace') label = '替换';
-        imtStatus.hidden = !label;
-        imtStatus.textContent = label;
-        imtBtn.title = st.error ? '整页翻译：' + st.error : '整页翻译';
+        imtState = st;
+        paintImt();
       }
+
       function imtAct(method, params) {
-        return window.piSDK.request(method, params).then(renderImt).catch(function (e) {
+        return window.piSDK.request(method, params).then(function (st) {
+          if (st && typeof st === 'object' && st.mode) renderImt(st);
+          return st;
+        }).catch(function (e) {
           imtStatus.hidden = false;
-          imtStatus.textContent = (e && e.message) ? e.message : '翻译失败';
+          imtStatus.textContent = (e && e.message) ? e.message : '操作失败';
         });
       }
-      function imtItems() {
-        var mark = function (mode) { return imtMode === mode ? '\u2713 ' : ''; };
-        return [
-          { id: 'replace', label: mark('replace') + '翻译（替换原文）' },
-          { id: 'dual', label: mark('dual') + '双语（保留原文）' },
-          { id: 'read', label: '朗读' },
-          { id: 'explain', label: '解释' },
-          { id: 'save', label: '收藏' },
-          { id: 'source', label: '原文' }
-        ];
-      }
+
       imtBtn.addEventListener('click', function (e) {
         e.stopPropagation();
-        var rect = imtBtn.getBoundingClientRect();
-        window.piSDK.showPopupMenu(imtItems(), rect.left, rect.bottom).then(function (picked) {
-          if (!picked) return;
-          if (picked === 'source') imtAct('imt.mode', { mode: 'source' });
-          else if (picked === 'read' || picked === 'explain' || picked === 'save') imtAct('imt.' + picked, {});
-          else imtAct('imt.start', { mode: picked });
-        });
+        showRow(imtRow.hidden);
       });
+      document.getElementById('ir-close').addEventListener('click', function () { showRow(false); });
+      imtRow.addEventListener('click', function (e) {
+        var b = e.target.closest('button');
+        if (!b) return;
+        var v;
+        if ((v = b.getAttribute('data-imt-start'))) imtAct('imt.start', { mode: v });
+        else if ((v = b.getAttribute('data-imt-mode'))) imtAct('imt.mode', { mode: v });
+        else if ((v = b.getAttribute('data-imt-act'))) imtAct('imt.' + v, {});
+        else if ((v = b.getAttribute('data-imt-read'))) {
+          if (v === 'pause') imtAct('imt.readPause', {});
+          else if (v === 'next') imtAct('imt.readNext', {});
+          else if (v === 'prev') imtAct('imt.readPrev', {});
+          else imtAct('imt.readStop', {});
+        }
+      });
+      paintImt();
 
       // ── Tab strip ──
       var tabsEl = document.getElementById('tabs');

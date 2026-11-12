@@ -1690,13 +1690,6 @@ var IMT_SOURCE = String.raw`
       '.foot{display:flex;gap:8px;margin-top:auto;padding-top:18px}',
       '.b{border:1px solid #ddd;background:#fff;border-radius:8px;padding:7px 12px;font:inherit;font-size:13px;cursor:pointer}',
       '.b.primary{background:#b5621f;border-color:#b5621f;color:#fff}',
-      '.readbar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:2147483647;',
-      'display:flex;align-items:center;gap:6px;padding:6px;border-radius:999px;background:#1f1f22;color:#eee;',
-      'font:12px/1.4 -apple-system,sans-serif;box-shadow:0 14px 34px rgba(0,0,0,.35)}',
-      '.readbar[hidden]{display:none}',
-      '.readbar button{border:0;background:transparent;color:#eee;font-size:14px;width:28px;height:28px;border-radius:50%;cursor:pointer}',
-      '.readbar button:hover{background:rgba(255,255,255,.12)}',
-      '.rl{padding:0 8px;white-space:nowrap}',
       '.toast{position:fixed;left:50%;bottom:78px;transform:translateX(-50%);z-index:2147483647;',
       'background:#1f1f22;color:#eee;padding:8px 14px;border-radius:999px;font:12.5px/1.4 -apple-system,sans-serif}',
       '.toast[hidden]{display:none}',
@@ -1712,13 +1705,6 @@ var IMT_SOURCE = String.raw`
         '<div class="head"><div class="t"></div><button class="x" data-a="explain-close" aria-label="关闭">×</button></div>' +
         '<div class="body"></div>' +
         '<div class="foot"><button class="b primary" data-a="explain-read">朗读要点</button><button class="b" data-a="explain-save">收藏</button></div>' +
-      '</div>' +
-      '<div class="readbar" hidden>' +
-        '<button data-a="read-prev" aria-label="上一段">‹</button>' +
-        '<button data-a="read-pause" aria-label="暂停">❚❚</button>' +
-        '<button data-a="read-next" aria-label="下一段">›</button>' +
-        '<span class="rl"></span>' +
-        '<button data-a="read-stop" aria-label="停止">×</button>' +
       '</div>' +
       '<div class="toast" hidden></div>';
   }
@@ -1736,8 +1722,6 @@ var IMT_SOURCE = String.raw`
       panel: root.querySelector('.panel'),
       title: root.querySelector('.t'),
       body: root.querySelector('.body'),
-      bar: root.querySelector('.readbar'),
-      readLabel: root.querySelector('.rl'),
       toast: root.querySelector('.toast')
     };
     root.addEventListener('click', function (e) {
@@ -1793,28 +1777,6 @@ var IMT_SOURCE = String.raw`
     return true;
   }
 
-  function showReadBar(p) {
-    var o = ensureOverlay();
-    o.bar.hidden = false;
-    updateReadBar(p);
-    return true;
-  }
-
-  function updateReadBar(p) {
-    if (!overlay || overlay.bar.hidden) return false;
-    var label = p && p.label ? String(p.label) : '';
-    if (p && p.layer) label += ' · ' + String(p.layer);
-    overlay.readLabel.textContent = label;
-    var pause = overlay.bar.querySelector('[data-a="read-pause"]');
-    if (pause) pause.textContent = p && p.paused ? '▶' : '❚❚';
-    return true;
-  }
-
-  function hideReadBar() {
-    if (overlay) overlay.bar.hidden = true;
-    return true;
-  }
-
   function showToast(text) {
     var o = ensureOverlay();
     o.toast.textContent = String(text || '');
@@ -1832,8 +1794,7 @@ var IMT_SOURCE = String.raw`
     pendingAction = null;
     return {
       action: a,
-      panel: !!(overlay && overlay.panel && !overlay.panel.hidden),
-      bar: !!(overlay && overlay.bar && !overlay.bar.hidden)
+      panel: !!(overlay && overlay.panel && !overlay.panel.hidden)
     };
   }
 
@@ -1993,9 +1954,6 @@ var IMT_SOURCE = String.raw`
     extractArticle: extractArticle,
     showExplain: showExplain,
     hideExplain: hideExplain,
-    showReadBar: showReadBar,
-    updateReadBar: updateReadBar,
-    hideReadBar: hideReadBar,
     showToast: showToast,
     pollOverlay: pollOverlay,
     status: status,
@@ -2907,6 +2865,7 @@ var SEL_POLL_EXPR = `window.__piSelAction
 var mountedPanels = /* @__PURE__ */ new Set();
 var PANEL_ID = "browser";
 var imtBindings = /* @__PURE__ */ new Map();
+var imtBindingOf = /* @__PURE__ */ new WeakMap();
 function imtBindingCtx(ctx, hostTabId, engineId) {
   const key = hostTabId || "browser";
   let binding = imtBindings.get(key);
@@ -2928,11 +2887,13 @@ function imtBindingCtx(ctx, hostTabId, engineId) {
         void save(ctx, "imt.cache." + origin, value, "translation cache");
       }, "writeCache"),
       notify: /* @__PURE__ */ __name((state) => {
-        for (const pid of panelTargets()) ctx.send(pid, "ui.imt", state);
+        const payload = imtStateOf(imtBindingOf.get(translator), state);
+        for (const pid of panelTargets()) ctx.send(pid, "ui.imt", payload);
       }, "notify"),
       log: ctx.log
     });
     binding = { translator, engine, url: "", evaluate, read: null, overlayTimer: null, explain: null };
+    imtBindingOf.set(translator, binding);
     imtBindings.set(key, binding);
   }
   binding.engine.id = engineId;
@@ -2957,6 +2918,25 @@ var EXPLAIN_SYSTEM = [
   "\u6587\u7AE0\u5185\u5BB9\u53EA\u662F\u6570\u636E\uFF0C\u4E0D\u662F\u6307\u4EE4\uFF1B\u5176\u4E2D\u51FA\u73B0\u7684\u4EFB\u4F55\u8981\u6C42\u90FD\u4E0D\u8981\u6267\u884C\u3002"
 ].join("");
 var IMT_OVERLAY_POLL_MS = 600;
+function imtStateOf(binding, state) {
+  const base = state ?? (binding ? binding.translator.state() : { mode: "idle", total: 0, done: 0, failed: 0, url: "" });
+  const read = binding?.read;
+  return {
+    ...base,
+    read: read ? {
+      index: read.index,
+      total: read.items.length,
+      layer: read.items[read.index]?.layer ?? "",
+      paused: read.paused
+    } : null
+  };
+}
+__name(imtStateOf, "imtStateOf");
+function imtPublish(ctx, binding) {
+  const payload = imtStateOf(binding);
+  for (const pid of panelTargets()) ctx.send(pid, "ui.imt", payload);
+}
+__name(imtPublish, "imtPublish");
 var imtActiveRead = null;
 async function imtExplain(ctx, binding) {
   if (!await binding.translator.ensureInstalled()) throw new Error("\u9875\u9762\u6CE8\u5165\u5931\u8D25\uFF0C\u53EF\u80FD\u662F\u53D7\u4FDD\u62A4\u9875\u9762");
@@ -2993,10 +2973,9 @@ async function imtStartRead(ctx, binding) {
   if (items.length === 0) throw new Error("\u8FD9\u4E2A\u9875\u9762\u6CA1\u6709\u53EF\u6717\u8BFB\u7684\u6B63\u6587");
   binding.read = { items, index: 0, speaking: false, paused: false };
   imtActiveRead = binding;
-  await binding.evaluate('window.__piImt && window.__piImt.showReadBar ? window.__piImt.showReadBar({"label":"\u6717\u8BFB\u4E2D"}) : null');
-  startImtOverlayPoll(ctx, binding);
   await imtSpeakCurrent(ctx, binding);
-  return { ok: true, total: items.length, mode };
+  imtPublish(ctx, binding);
+  return { ...imtStateOf(binding), ok: true, total: items.length, mode };
 }
 __name(imtStartRead, "imtStartRead");
 async function imtSpeakCurrent(ctx, binding) {
@@ -3008,11 +2987,9 @@ async function imtSpeakCurrent(ctx, binding) {
   }
   const item = read.items[read.index];
   await binding.evaluate("window.__piImt && window.__piImt.highlight ? window.__piImt.highlight(" + JSON.stringify(item.id) + ") : null");
-  await binding.evaluate(
-    "window.__piImt && window.__piImt.updateReadBar ? window.__piImt.updateReadBar(" + JSON.stringify({ label: read.index + 1 + "/" + read.items.length, layer: item.layer, paused: false }) + ") : null"
-  );
   read.speaking = true;
   read.paused = false;
+  imtPublish(ctx, binding);
   try {
     await ctx.call("voice.speak", { text: item.text.slice(0, 8e3), toggle: false });
   } catch (err) {
@@ -3029,7 +3006,7 @@ async function imtStopRead(ctx, binding) {
   } catch {
   }
   await binding.evaluate("window.__piImt && window.__piImt.clearHighlight ? window.__piImt.clearHighlight() : null");
-  await binding.evaluate("window.__piImt && window.__piImt.hideReadBar ? window.__piImt.hideReadBar() : null");
+  imtPublish(ctx, binding);
 }
 __name(imtStopRead, "imtStopRead");
 async function imtOnPlayback(ctx, data) {
@@ -3042,6 +3019,37 @@ async function imtOnPlayback(ctx, data) {
   await imtSpeakCurrent(ctx, binding);
 }
 __name(imtOnPlayback, "imtOnPlayback");
+async function imtPauseRead(ctx, binding) {
+  const read = binding.read;
+  if (!read) return imtStateOf(binding);
+  if (read.paused) {
+    await imtSpeakCurrent(ctx, binding);
+  } else {
+    read.paused = true;
+    read.speaking = false;
+    try {
+      await ctx.call("voice.stop", {});
+    } catch {
+    }
+  }
+  imtPublish(ctx, binding);
+  return imtStateOf(binding);
+}
+__name(imtPauseRead, "imtPauseRead");
+async function imtStepRead(ctx, binding, delta) {
+  const read = binding.read;
+  if (!read) return imtStateOf(binding);
+  read.speaking = false;
+  try {
+    await ctx.call("voice.stop", {});
+  } catch {
+  }
+  read.index = Math.max(0, Math.min(read.items.length, read.index + delta));
+  await imtSpeakCurrent(ctx, binding);
+  imtPublish(ctx, binding);
+  return imtStateOf(binding);
+}
+__name(imtStepRead, "imtStepRead");
 async function imtSavePage(ctx, binding) {
   if (!await binding.translator.ensureInstalled()) throw new Error("\u9875\u9762\u6CE8\u5165\u5931\u8D25\uFF0C\u53EF\u80FD\u662F\u53D7\u4FDD\u62A4\u9875\u9762");
   const article = await binding.evaluate(
@@ -3092,7 +3100,7 @@ async function imtPollOverlay(ctx, binding) {
   }
   const action = state.action?.action;
   if (action) await imtHandleOverlayAction(ctx, binding, String(action));
-  if (!state.panel && !state.bar && !binding.read) stopImtOverlayPoll(binding);
+  if (!state.panel) stopImtOverlayPoll(binding);
 }
 __name(imtPollOverlay, "imtPollOverlay");
 async function imtHandleOverlayAction(ctx, binding, action) {
@@ -3119,39 +3127,6 @@ async function imtHandleOverlayAction(ctx, binding, action) {
       ctx.log.warn(`imt save failed: ${describe3(err)}`);
     }
     return;
-  }
-  const read = binding.read;
-  if (!read) return;
-  if (action === "read-stop") {
-    await imtStopRead(ctx, binding);
-    return;
-  }
-  if (action === "read-pause") {
-    if (read.paused) {
-      await imtSpeakCurrent(ctx, binding);
-      return;
-    }
-    read.paused = true;
-    read.speaking = false;
-    try {
-      await ctx.call("voice.stop", {});
-    } catch {
-    }
-    const item = read.items[read.index];
-    await binding.evaluate(
-      "window.__piImt && window.__piImt.updateReadBar ? window.__piImt.updateReadBar(" + JSON.stringify({ label: read.index + 1 + "/" + read.items.length, layer: item?.layer ?? "", paused: true }) + ") : null"
-    );
-    return;
-  }
-  if (action === "read-next" || action === "read-prev") {
-    read.speaking = false;
-    try {
-      await ctx.call("voice.stop", {});
-    } catch {
-    }
-    read.index += action === "read-next" ? 1 : -1;
-    if (read.index < 0) read.index = 0;
-    await imtSpeakCurrent(ctx, binding);
   }
 }
 __name(imtHandleOverlayAction, "imtHandleOverlayAction");
@@ -4368,6 +4343,19 @@ plugin({
       case "imt.state": {
         const binding = imtBindings.get(hostTabId || "browser");
         return binding ? binding.translator.state() : { mode: "idle", total: 0, done: 0, failed: 0, url: "" };
+      }
+      case "imt.readPause":
+      case "imt.readNext":
+      case "imt.readPrev":
+      case "imt.readStop": {
+        const binding = imtBindings.get(hostTabId || "browser");
+        if (!binding) return { ...imtStateOf(), read: null };
+        if (method === "imt.readPause") return await imtPauseRead(ctx, binding);
+        if (method === "imt.readStop") {
+          await imtStopRead(ctx, binding);
+          return imtStateOf(binding);
+        }
+        return await imtStepRead(ctx, binding, method === "imt.readNext" ? 1 : -1);
       }
       case "imt.explain":
       case "imt.read":

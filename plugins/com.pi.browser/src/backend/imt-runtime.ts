@@ -473,13 +473,6 @@ export const IMT_SOURCE = String.raw`
       '.foot{display:flex;gap:8px;margin-top:auto;padding-top:18px}',
       '.b{border:1px solid #ddd;background:#fff;border-radius:8px;padding:7px 12px;font:inherit;font-size:13px;cursor:pointer}',
       '.b.primary{background:#b5621f;border-color:#b5621f;color:#fff}',
-      '.readbar{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);z-index:2147483647;',
-      'display:flex;align-items:center;gap:6px;padding:6px;border-radius:999px;background:#1f1f22;color:#eee;',
-      'font:12px/1.4 -apple-system,sans-serif;box-shadow:0 14px 34px rgba(0,0,0,.35)}',
-      '.readbar[hidden]{display:none}',
-      '.readbar button{border:0;background:transparent;color:#eee;font-size:14px;width:28px;height:28px;border-radius:50%;cursor:pointer}',
-      '.readbar button:hover{background:rgba(255,255,255,.12)}',
-      '.rl{padding:0 8px;white-space:nowrap}',
       '.toast{position:fixed;left:50%;bottom:78px;transform:translateX(-50%);z-index:2147483647;',
       'background:#1f1f22;color:#eee;padding:8px 14px;border-radius:999px;font:12.5px/1.4 -apple-system,sans-serif}',
       '.toast[hidden]{display:none}',
@@ -495,13 +488,6 @@ export const IMT_SOURCE = String.raw`
         '<div class="head"><div class="t"></div><button class="x" data-a="explain-close" aria-label="关闭">×</button></div>' +
         '<div class="body"></div>' +
         '<div class="foot"><button class="b primary" data-a="explain-read">朗读要点</button><button class="b" data-a="explain-save">收藏</button></div>' +
-      '</div>' +
-      '<div class="readbar" hidden>' +
-        '<button data-a="read-prev" aria-label="上一段">‹</button>' +
-        '<button data-a="read-pause" aria-label="暂停">❚❚</button>' +
-        '<button data-a="read-next" aria-label="下一段">›</button>' +
-        '<span class="rl"></span>' +
-        '<button data-a="read-stop" aria-label="停止">×</button>' +
       '</div>' +
       '<div class="toast" hidden></div>';
   }
@@ -519,8 +505,6 @@ export const IMT_SOURCE = String.raw`
       panel: root.querySelector('.panel'),
       title: root.querySelector('.t'),
       body: root.querySelector('.body'),
-      bar: root.querySelector('.readbar'),
-      readLabel: root.querySelector('.rl'),
       toast: root.querySelector('.toast')
     };
     root.addEventListener('click', function (e) {
@@ -576,28 +560,6 @@ export const IMT_SOURCE = String.raw`
     return true;
   }
 
-  function showReadBar(p) {
-    var o = ensureOverlay();
-    o.bar.hidden = false;
-    updateReadBar(p);
-    return true;
-  }
-
-  function updateReadBar(p) {
-    if (!overlay || overlay.bar.hidden) return false;
-    var label = p && p.label ? String(p.label) : '';
-    if (p && p.layer) label += ' · ' + String(p.layer);
-    overlay.readLabel.textContent = label;
-    var pause = overlay.bar.querySelector('[data-a="read-pause"]');
-    if (pause) pause.textContent = p && p.paused ? '▶' : '❚❚';
-    return true;
-  }
-
-  function hideReadBar() {
-    if (overlay) overlay.bar.hidden = true;
-    return true;
-  }
-
   function showToast(text) {
     var o = ensureOverlay();
     o.toast.textContent = String(text || '');
@@ -615,8 +577,7 @@ export const IMT_SOURCE = String.raw`
     pendingAction = null;
     return {
       action: a,
-      panel: !!(overlay && overlay.panel && !overlay.panel.hidden),
-      bar: !!(overlay && overlay.bar && !overlay.bar.hidden)
+      panel: !!(overlay && overlay.panel && !overlay.panel.hidden)
     };
   }
 
@@ -776,9 +737,6 @@ export const IMT_SOURCE = String.raw`
     extractArticle: extractArticle,
     showExplain: showExplain,
     hideExplain: hideExplain,
-    showReadBar: showReadBar,
-    updateReadBar: updateReadBar,
-    hideReadBar: hideReadBar,
     showToast: showToast,
     pollOverlay: pollOverlay,
     status: status,

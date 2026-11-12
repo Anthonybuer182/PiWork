@@ -42,6 +42,7 @@ import {
   buildReadQueue,
   parseExplain,
   type ExplainDoc,
+  type ImtState,
   type PageUnit,
   type ReadItem,
 } from './imt';
@@ -777,6 +778,8 @@ interface ImtReadState {
 }
 
 const imtBindings = new Map<string, ImtBinding>();
+/** The translator's notify runs before the binding exists; this bridge fixes that. */
+const imtBindingOf = new WeakMap<PageTranslator, ImtBinding>();
 
 function imtBindingCtx(ctx: PluginContext, hostTabId: string, engineId: string | null): ImtBinding {
   const key = hostTabId || 'browser';
@@ -799,11 +802,13 @@ function imtBindingCtx(ctx: PluginContext, hostTabId: string, engineId: string |
         void save(ctx, 'imt.cache.' + origin, value, 'translation cache');
       },
       notify: (state) => {
-        for (const pid of panelTargets()) ctx.send(pid, 'ui.imt', state);
+        const payload = imtStateOf(imtBindingOf.get(translator), state);
+        for (const pid of panelTargets()) ctx.send(pid, 'ui.imt', payload);
       },
       log: ctx.log,
     });
     binding = { translator, engine, url: '', evaluate, read: null, overlayTimer: null, explain: null };
+    imtBindingOf.set(translator, binding);
     imtBindings.set(key, binding);
   }
   binding.engine.id = engineId;
@@ -832,6 +837,32 @@ const EXPLAIN_SYSTEM = [
 ].join('');
 
 const IMT_OVERLAY_POLL_MS = 600;
+
+/** State for the panel's second row: translation progress + the read queue. */
+function imtStateOf(binding?: ImtBinding, state?: ImtState): Record<string, unknown> {
+  const base: ImtState =
+    state ??
+    (binding
+      ? binding.translator.state()
+      : { mode: 'idle', total: 0, done: 0, failed: 0, url: '' });
+  const read = binding?.read;
+  return {
+    ...base,
+    read: read
+      ? {
+          index: read.index,
+          total: read.items.length,
+          layer: read.items[read.index]?.layer ?? '',
+          paused: read.paused,
+        }
+      : null,
+  };
+}
+
+function imtPublish(ctx: PluginContext, binding: ImtBinding): void {
+  const payload = imtStateOf(binding);
+  for (const pid of panelTargets()) ctx.send(pid, 'ui.imt', payload);
+}
 
 /** One read queue at a time: the host has a single player per window. */
 let imtActiveRead: ImtBinding | null = null;
@@ -871,10 +902,9 @@ async function imtStartRead(ctx: PluginContext, binding: ImtBinding): Promise<Re
   if (items.length === 0) throw new Error('这个页面没有可朗读的正文');
   binding.read = { items, index: 0, speaking: false, paused: false };
   imtActiveRead = binding;
-  await binding.evaluate('window.__piImt && window.__piImt.showReadBar ? window.__piImt.showReadBar({"label":"朗读中"}) : null');
-  startImtOverlayPoll(ctx, binding);
   await imtSpeakCurrent(ctx, binding);
-  return { ok: true, total: items.length, mode };
+  imtPublish(ctx, binding);
+  return { ...imtStateOf(binding), ok: true, total: items.length, mode };
 }
 
 async function imtSpeakCurrent(ctx: PluginContext, binding: ImtBinding): Promise<void> {
@@ -886,13 +916,9 @@ async function imtSpeakCurrent(ctx: PluginContext, binding: ImtBinding): Promise
   }
   const item = read.items[read.index];
   await binding.evaluate('window.__piImt && window.__piImt.highlight ? window.__piImt.highlight(' + JSON.stringify(item.id) + ') : null');
-  await binding.evaluate(
-    'window.__piImt && window.__piImt.updateReadBar ? window.__piImt.updateReadBar(' +
-      JSON.stringify({ label: read.index + 1 + '/' + read.items.length, layer: item.layer, paused: false }) +
-      ') : null',
-  );
   read.speaking = true;
   read.paused = false;
+  imtPublish(ctx, binding);
   try {
     await ctx.call('voice.speak', { text: item.text.slice(0, 8000), toggle: false });
   } catch (err) {
@@ -910,7 +936,7 @@ async function imtStopRead(ctx: PluginContext, binding: ImtBinding): Promise<voi
     // Voice not configured: nothing to stop.
   }
   await binding.evaluate('window.__piImt && window.__piImt.clearHighlight ? window.__piImt.clearHighlight() : null');
-  await binding.evaluate('window.__piImt && window.__piImt.hideReadBar ? window.__piImt.hideReadBar() : null');
+  imtPublish(ctx, binding);
 }
 
 /**
@@ -926,6 +952,41 @@ async function imtOnPlayback(ctx: PluginContext, data: { key?: string; playing?:
   binding.read.speaking = false;
   binding.read.index += 1;
   await imtSpeakCurrent(ctx, binding);
+}
+
+/** Pause/resume the read queue from the panel row. */
+async function imtPauseRead(ctx: PluginContext, binding: ImtBinding): Promise<Record<string, unknown>> {
+  const read = binding.read;
+  if (!read) return imtStateOf(binding);
+  if (read.paused) {
+    await imtSpeakCurrent(ctx, binding);
+  } else {
+    read.paused = true;
+    read.speaking = false;
+    try {
+      await ctx.call('voice.stop', {});
+    } catch {
+      // Nothing playing.
+    }
+  }
+  imtPublish(ctx, binding);
+  return imtStateOf(binding);
+}
+
+/** Move the read queue forward/back and speak the new item. */
+async function imtStepRead(ctx: PluginContext, binding: ImtBinding, delta: number): Promise<Record<string, unknown>> {
+  const read = binding.read;
+  if (!read) return imtStateOf(binding);
+  read.speaking = false;
+  try {
+    await ctx.call('voice.stop', {});
+  } catch {
+    // Nothing playing.
+  }
+  read.index = Math.max(0, Math.min(read.items.length, read.index + delta));
+  await imtSpeakCurrent(ctx, binding);
+  imtPublish(ctx, binding);
+  return imtStateOf(binding);
 }
 
 async function imtSavePage(ctx: PluginContext, binding: ImtBinding): Promise<Record<string, unknown>> {
@@ -977,14 +1038,14 @@ function stopImtOverlayPoll(binding: ImtBinding): void {
 async function imtPollOverlay(ctx: PluginContext, binding: ImtBinding): Promise<void> {
   const state = (await binding.evaluate(
     'window.__piImt && window.__piImt.pollOverlay ? window.__piImt.pollOverlay() : null',
-  )) as { action?: { action?: string } | null; panel?: boolean; bar?: boolean } | null;
+  )) as { action?: { action?: string } | null; panel?: boolean } | null;
   if (!state) {
     stopImtOverlayPoll(binding);
     return;
   }
   const action = state.action?.action;
   if (action) await imtHandleOverlayAction(ctx, binding, String(action));
-  if (!state.panel && !state.bar && !binding.read) stopImtOverlayPoll(binding);
+  if (!state.panel) stopImtOverlayPoll(binding);
 }
 
 async function imtHandleOverlayAction(ctx: PluginContext, binding: ImtBinding, action: string): Promise<void> {
@@ -1013,43 +1074,6 @@ async function imtHandleOverlayAction(ctx: PluginContext, binding: ImtBinding, a
     return;
   }
 
-  const read = binding.read;
-  if (!read) return;
-  if (action === 'read-stop') {
-    await imtStopRead(ctx, binding);
-    return;
-  }
-  if (action === 'read-pause') {
-    if (read.paused) {
-      await imtSpeakCurrent(ctx, binding);
-      return;
-    }
-    read.paused = true;
-    read.speaking = false;
-    try {
-      await ctx.call('voice.stop', {});
-    } catch {
-      // Nothing playing.
-    }
-    const item = read.items[read.index];
-    await binding.evaluate(
-      'window.__piImt && window.__piImt.updateReadBar ? window.__piImt.updateReadBar(' +
-        JSON.stringify({ label: read.index + 1 + '/' + read.items.length, layer: item?.layer ?? '', paused: true }) +
-        ') : null',
-    );
-    return;
-  }
-  if (action === 'read-next' || action === 'read-prev') {
-    read.speaking = false;
-    try {
-      await ctx.call('voice.stop', {});
-    } catch {
-      // Nothing playing.
-    }
-    read.index += action === 'read-next' ? 1 : -1;
-    if (read.index < 0) read.index = 0;
-    await imtSpeakCurrent(ctx, binding);
-  }
 }
 
 function panelTargets(): Set<string> {
@@ -2673,6 +2697,19 @@ plugin({
         return binding
           ? binding.translator.state()
           : { mode: 'idle', total: 0, done: 0, failed: 0, url: '' };
+      }
+      case 'imt.readPause':
+      case 'imt.readNext':
+      case 'imt.readPrev':
+      case 'imt.readStop': {
+        const binding = imtBindings.get(hostTabId || 'browser');
+        if (!binding) return { ...imtStateOf(), read: null };
+        if (method === 'imt.readPause') return await imtPauseRead(ctx, binding);
+        if (method === 'imt.readStop') {
+          await imtStopRead(ctx, binding);
+          return imtStateOf(binding);
+        }
+        return await imtStepRead(ctx, binding, method === 'imt.readNext' ? 1 : -1);
       }
       case 'imt.explain':
       case 'imt.read':
