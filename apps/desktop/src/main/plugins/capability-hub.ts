@@ -9,6 +9,7 @@ import { deleteFileWithMtimeGuard, writeFileWithMtimeGuard } from '@pi/sdk-wrapp
 import type { PluginRegistry } from './registry';
 import type { BrowserManager } from '@main/browser/browser-manager';
 import type { VlmAnalyzer } from '@main/browser/vlm-analyzer';
+import type { TextModelClient } from '@main/ai/text-model-client';
 import { TabRegistry } from '@main/browser/tab-registry';
 import { extractOfficeText } from './office-extract';
 
@@ -39,6 +40,8 @@ export interface CapabilityDeps {
   browserRouter?: BrowserRouter;
   /** Screenshot-based planner for browser.walk (needs a configured VLM model). */
   vlmAnalyzer?: VlmAnalyzer;
+  /** One-shot text completions for plugins (whole-page translation). */
+  aiClient?: TextModelClient;
   /** Push a message to the renderer (used by chat.send). */
   sendToRenderer?: (channel: string, payload: unknown) => void;
   /** The conversation's permission mode (默认 / 完全访问), for dialog policy. */
@@ -244,6 +247,7 @@ export class CapabilityHub {
   private readonly emitEvent: (evt: PluginEvent) => void;
   private readonly browserRouter?: BrowserRouter;
   private readonly vlmAnalyzer?: VlmAnalyzer;
+  private readonly aiClient?: TextModelClient;
   private readonly sendToRenderer?: (channel: string, payload: unknown) => void;
   private readonly getPermissionMode?: (sessionId: string) => 'default' | 'full';
   private readonly voiceReady?: () => { ok: boolean; error?: string };
@@ -271,12 +275,18 @@ export class CapabilityHub {
    * message must not be throttled as if it were spamming new ones.
    */
   private readonly messagePosts = new Map<string, number[]>();
+  /**
+   * In-flight `ai.complete` calls per plugin. Two is what the translation loop
+   * uses; the cap keeps a buggy plugin from fanning out over one page.
+   */
+  private readonly aiInflight = new Map<string, number>();
 
   constructor(deps: CapabilityDeps) {
     this.registry = deps.registry;
     this.emitEvent = deps.emitEvent;
     this.browserRouter = deps.browserRouter;
     this.vlmAnalyzer = deps.vlmAnalyzer;
+    this.aiClient = deps.aiClient;
     this.sendToRenderer = deps.sendToRenderer;
     this.getPermissionMode = deps.getPermissionMode;
     this.voiceReady = deps.voiceReady;
@@ -365,6 +375,35 @@ export class CapabilityHub {
           ...(workspaceId ? { workspaceId } : {}),
         });
         return { ok: true, messageId: data.id };
+      },
+    });
+
+    // ── ai.complete (permission: ai) ──
+    // Whole-page translation needs many small independent model calls. Routing
+    // them through the agent would cost a chat turn (and a tool-permission
+    // gate) per batch, so plugins get a narrow one-shot completion instead.
+    // The prompt cap and the per-plugin concurrency limit live here, not in the
+    // caller: a plugin cannot spend more than the user grant implies.
+    this.capabilities.set('ai.complete', {
+      permission: 'ai',
+      handler: async ({ pluginId, params }) => {
+        if (!this.aiClient) throw new Error('ai.complete: 未配置模型');
+        const inflight = this.aiInflight.get(pluginId) ?? 0;
+        if (inflight >= 2) throw new Error('ai.complete: 并发请求过多（每个插件上限 2）');
+        this.aiInflight.set(pluginId, inflight + 1);
+        try {
+          return await this.aiClient.complete({
+            prompt: String(params.prompt ?? ''),
+            system: params.system ? String(params.system) : undefined,
+            maxTokens: typeof params.maxTokens === 'number' ? params.maxTokens : undefined,
+            temperature: typeof params.temperature === 'number' ? params.temperature : undefined,
+            timeoutMs: typeof params.timeoutMs === 'number' ? params.timeoutMs : undefined,
+          });
+        } finally {
+          const left = (this.aiInflight.get(pluginId) ?? 1) - 1;
+          if (left <= 0) this.aiInflight.delete(pluginId);
+          else this.aiInflight.set(pluginId, left);
+        }
       },
     });
 

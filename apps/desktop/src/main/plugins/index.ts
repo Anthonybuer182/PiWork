@@ -19,6 +19,7 @@ import { parseFrontmatter } from '@earendil-works/pi-coding-agent';
 import { CapabilityHub } from './capability-hub';
 import type { BrowserRouter } from './capability-hub';
 import type { VlmAnalyzer } from '@main/browser/vlm-analyzer';
+import type { TextModelClient } from '@main/ai/text-model-client';
 import { PluginProcess, spawnBackend } from './plugin-process';
 import { takeToolSession } from './session-context';
 import { registerPluginProtocolHandler } from './protocol';
@@ -144,6 +145,7 @@ export class PluginSystem {
     agentDir?: string;
     browserRouter?: BrowserRouter;
     vlmAnalyzer?: VlmAnalyzer;
+    aiClient?: TextModelClient;
     sendToRenderer?: (channel: string, payload: unknown) => void;
     getPermissionMode?: (sessionId: string) => 'default' | 'full';
     /** Whether the app's TTS is usable; exposed as the `voice` capability. */
@@ -161,6 +163,7 @@ export class PluginSystem {
       emitEvent: (evt) => this.emitEvent(evt),
       browserRouter: opts?.browserRouter,
       vlmAnalyzer: opts?.vlmAnalyzer,
+      aiClient: opts?.aiClient,
       sendToRenderer: opts?.sendToRenderer,
       getPermissionMode: opts?.getPermissionMode,
       voiceReady: opts?.voiceReady,

@@ -309,6 +309,11 @@ export type CapabilityMethod =
   /** Put a message into the conversation, exactly as typing it would. */
   | 'chat.send'
   /**
+   * One-shot text completion with the user's default chat model. Plugins call
+   * this for whole-page translation; requires the `ai` permission.
+   */
+  | 'ai.complete'
+  /**
    * Read text aloud through the app's configured TTS. `toggle: true` stops
    * when this plugin is already speaking; requires the `voice` permission.
    */

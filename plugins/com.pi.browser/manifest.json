@@ -11,7 +11,8 @@
   "permissions": [
     "browser",
     "storage",
-    "voice"
+    "voice",
+    "ai"
   ],
   "contributes": {
     "panels": [

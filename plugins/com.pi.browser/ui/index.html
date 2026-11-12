@@ -66,6 +66,23 @@
     #toolbar button:disabled { opacity: 0.4; cursor: default; }
     #toolbar button:disabled:hover { background: transparent; }
     #btn-star.on { color: hsl(43 90% 62%); }
+
+    /* Whole-page translation: the menu is a NATIVE popup (piSDK.showPopupMenu),
+       because a DOM dropdown would be covered by the engine view below. */
+    #btn-imt {
+      width: auto;
+      padding: 0 8px;
+      font: 600 12px/1 inherit;
+      letter-spacing: 0.02em;
+    }
+    #btn-imt.busy { color: hsl(43 90% 62%); }
+    #imt-status {
+      flex: none;
+      font-size: 11px;
+      color: hsl(var(--muted-foreground, 217 9% 59%));
+      font-variant-numeric: tabular-nums;
+    }
+    #imt-status[hidden] { display: none; }
     #btn-star.on svg { fill: currentColor; }
     #url {
       flex: 1;
@@ -437,6 +454,8 @@
     <button id="btn-forward" title="前进" aria-label="前进"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></button>
     <button id="btn-reload" title="刷新" aria-label="刷新"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg></button>
     <button id="btn-star" title="收藏此页" aria-label="收藏此页" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button>
+    <button id="btn-imt" title="整页翻译" aria-label="整页翻译" aria-haspopup="menu">译</button>
+    <span id="imt-status" hidden></span>
     <input id="url" type="text" spellcheck="false" placeholder="输入网址,回车打开" autocomplete="off" />
   </div>
 
@@ -499,6 +518,54 @@
           console.warn(method, e && e.message ? e.message : e);
         });
       }
+
+      // ── Whole-page translation ──
+      // The menu MUST be the host's native popup: the engine view is a native
+      // WebContentsView painted above this page, so any DOM dropdown would be
+      // covered by the page itself.
+      var imtBtn = document.getElementById('btn-imt');
+      var imtStatus = document.getElementById('imt-status');
+      var imtMode = 'idle';
+      function renderImt(st) {
+        if (!st) return;
+        imtMode = st.mode || 'idle';
+        var busy = imtMode === 'translating';
+        imtBtn.classList.toggle('busy', busy);
+        var label = '';
+        if (busy) label = (st.done || 0) + '/' + (st.total || 0);
+        else if (imtMode === 'dual') label = '双语';
+        else if (imtMode === 'replace') label = '替换';
+        imtStatus.hidden = !label;
+        imtStatus.textContent = label;
+        imtBtn.title = st.error ? '整页翻译：' + st.error : '整页翻译';
+      }
+      function imtAct(method, params) {
+        return window.piSDK.request(method, params).then(renderImt).catch(function (e) {
+          imtStatus.hidden = false;
+          imtStatus.textContent = (e && e.message) ? e.message : '翻译失败';
+        });
+      }
+      function imtItems() {
+        var mark = function (mode) { return imtMode === mode ? '\u2713 ' : ''; };
+        return [
+          { id: 'replace', label: mark('replace') + '翻译（替换原文）' },
+          { id: 'dual', label: mark('dual') + '双语（保留原文）' },
+          { id: 'read', label: '朗读' },
+          { id: 'explain', label: '解释' },
+          { id: 'save', label: '收藏' },
+          { id: 'source', label: '原文' }
+        ];
+      }
+      imtBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        var rect = imtBtn.getBoundingClientRect();
+        window.piSDK.showPopupMenu(imtItems(), rect.left, rect.bottom).then(function (picked) {
+          if (!picked) return;
+          if (picked === 'source') imtAct('imt.mode', { mode: 'source' });
+          else if (picked === 'read' || picked === 'explain' || picked === 'save') imtAct('imt.' + picked, {});
+          else imtAct('imt.start', { mode: picked });
+        });
+      });
 
       // ── Tab strip ──
       var tabsEl = document.getElementById('tabs');
@@ -1410,6 +1477,8 @@
           updateStar();
           syncNewTab();
           if (!omnibox.hidden) refreshList();
+        } else if (msg.event === 'ui.imt') {
+          renderImt(msg.data);
         } else if (msg.event === 'ui.tabs') {
           state.tabs = msg.data.tabs || [];
           state.activeTabId = String(msg.data.activeTabId || '');

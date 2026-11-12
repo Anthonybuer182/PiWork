@@ -9,6 +9,7 @@ import type { RunSettledInfo } from '@pi/sdk-wrapper/adapters';
 import { copyFileSync, existsSync, mkdirSync, readdirSync } from 'fs';
 import { join } from 'path';
 import { ENGINE_UA, VlmAnalyzer } from '@main/browser';
+import { TextModelClient } from '@main/ai/text-model-client';
 import { McpConfigStore } from '@main/mcp/config-store';
 import { registerMcpIpc } from '@main/mcp/ipc';
 import { persistBrowserSessionCookies } from '@main/browser/browser-session';
@@ -164,6 +165,9 @@ if (!gotLock) {
     // VLM analyzer for goal-directed browser navigation (gracefully handles
     // missing VLM config).
     const vlmAnalyzer = new VlmAnalyzer(sharedModelRegistry, { timeoutMs: 15000 });
+    // One-shot text completions for plugins (whole-page translation). Uses the
+    // same model registry and the user's default chat model.
+    const aiClient = new TextModelClient(sharedModelRegistry, settingsManager);
 
     injectBundledShell(settingsManager);
 
@@ -309,6 +313,7 @@ if (!gotLock) {
     const pluginSystem = new PluginSystem({
       browserRouter: windows,
       vlmAnalyzer,
+      aiClient,
       resolveSessionWorkspace,
       // chat.send: relay a plugin's message to the renderer, which owns the
       // composer. A payload naming a workspace goes to the window showing that
