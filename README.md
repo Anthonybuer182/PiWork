@@ -170,7 +170,6 @@ pnpm plugins:publish --install       # 额外无界面安装到 ~/.pi/agent/plug
 | 命令 | 说明 |
 |------|------|
 | `pnpm typecheck` | TypeScript 类型检查 |
-| `pnpm lint` | 代码检查 |
 | `pnpm test` | 跑测试（desktop 的 `node:test` + plugin-sdk 冒烟） |
 | `pnpm format` | 代码格式化 (Prettier) |
 | `pnpm clean` | 清理构建产物 |
@@ -191,7 +190,7 @@ git push origin HEAD --tags
 
 push tag 后 `.github/workflows/release.yml` 依次执行：
 
-1. **verify** —— 与 CI 相同的 build / typecheck / lint / test，不通过就停在这里；
+1. **verify** —— 与 CI 相同的 build / typecheck / test，不通过就停在这里；
 2. **build** —— macOS（arm64 + x64）、Windows x64、Linux x64 各出一份安装包；
 3. **publish** —— 创建 GitHub Release，把四个平台的产物挂到 Assets，正文自动生成。
 

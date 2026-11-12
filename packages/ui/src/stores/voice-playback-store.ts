@@ -195,11 +195,6 @@ export const useVoicePlaybackStore = create<VoicePlaybackState>((set, get) => ({
   },
 }));
 
-/** Imperative helpers for the auto-read effect (outside React render). */
-export function speakMessage(messageId: string, text: string): Promise<void> {
-  return getVoiceState().speak(messageId, text);
-}
-
 export function stopSpeaking(): void {
   getVoiceState().stop();
 }

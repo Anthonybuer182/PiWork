@@ -172,10 +172,3 @@ export const BUILTIN_TTS_LOCAL_NAME = '内置朗读（本地）';
 
 /** Reserved dropdown sentinel: "use the built-in". */
 export const BUILTIN_PROVIDER_SENTINEL = '__builtin__';
-
-export function voiceProviderSupports(
-  type: VoiceProviderType,
-  capability: VoiceCapability,
-): boolean {
-  return VOICE_PROVIDER_CAPABILITIES[type]?.[capability] ?? false;
-}

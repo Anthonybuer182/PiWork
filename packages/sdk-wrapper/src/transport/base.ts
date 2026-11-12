@@ -1,17 +1,5 @@
 import type { TransportEventHandler, TransportEventType } from '@pi/types';
 
-export interface TransportRequest {
-  id: string;
-  method: string;
-  params: unknown;
-}
-
-export interface TransportResponse {
-  id: string;
-  result?: unknown;
-  error?: { code: number; message: string; data?: unknown };
-}
-
 export interface Transport {
   connect(): Promise<void>;
   disconnect(): Promise<void>;

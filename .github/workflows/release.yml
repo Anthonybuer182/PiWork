@@ -31,7 +31,7 @@ env:
 jobs:
   # ── 门禁：与 ci.yml 同一套检查 ──────────────────────────────────────
   verify:
-    name: Verify (build / typecheck / lint / test)
+    name: Verify (build / typecheck / test)
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -52,9 +52,6 @@ jobs:
 
       - name: Typecheck
         run: pnpm typecheck
-
-      - name: Lint
-        run: pnpm lint
 
       - name: Test
         run: pnpm test

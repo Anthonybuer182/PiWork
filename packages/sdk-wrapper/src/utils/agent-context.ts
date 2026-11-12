@@ -117,17 +117,6 @@ export function promptStatusLabel(status: PromptFileStatus): string {
   }
 }
 
-export const PROMPT_KIND_LABEL: Record<PromptFileInfo['kind'], string> = {
-  system: '替换系统提示词',
-  append: '追加到系统提示词',
-};
-
-export const PROMPT_KIND_HINT: Record<PromptFileInfo['kind'], string> = {
-  system:
-    '整个替换掉 SDK 内置的系统提示词。写它会让 agent 失去内置的工具用法与行为说明，除非你自己把这些写进去。',
-  append: '在内置提示词之后追加你自己的指令，原有的内容都保留。',
-};
-
 /**
  * Prompt files grouped by kind, project row before global, each kind's pair
  * intact so a shadowed file is visible next to the file shadowing it.

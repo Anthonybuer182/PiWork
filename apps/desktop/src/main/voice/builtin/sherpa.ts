@@ -269,7 +269,3 @@ export function evictBuiltinModel(id: BuiltinModelId): void {
   }
   ttsInstances.delete(id);
 }
-
-export function modelFilesPresent(id: BuiltinModelId): boolean {
-  return id in BUILTIN_MODELS;
-}

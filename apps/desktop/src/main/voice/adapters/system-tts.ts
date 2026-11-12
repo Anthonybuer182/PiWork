@@ -27,10 +27,6 @@ export function buildSayArgs({ textPath, outPath, voice }: SayArgs): string[] {
   return args;
 }
 
-export interface PowerShellArgs {
-  script: string;
-}
-
 /** `-EncodedCommand` takes base64 UTF-16LE, which sidesteps every quoting rule. */
 export function buildPowerShellCommand(script: string): string[] {
   return [

@@ -55,12 +55,6 @@ export function isPreviewableInRightPanel(filePath: string): boolean {
   return isTextEditableFile(filePath) || PREVIEWABLE_EXTENSIONS.has(ext);
 }
 
-/** Reveal a file in the system file manager (Finder on macOS, Explorer on Windows) */
-export function showInFinder(filePath: string): void {
-  const electronAPI = (window as unknown as { electronAPI?: { shell?: { showItemInFolder?: (p: string) => void } } }).electronAPI;
-  electronAPI?.shell?.showItemInFolder?.(filePath);
-}
-
 /** Open a file with the system's default application */
 export function openWithSystemApp(filePath: string, workspaceId?: string): void {
   const electronAPI = (window as unknown as { electronAPI?: { shell?: { openPath: (p: string) => Promise<void> } } }).electronAPI;

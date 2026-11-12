@@ -93,8 +93,3 @@ export interface PluginMessagePatch {
   /** This revision also enters model context (pi custom_message entry). */
   agentVisible?: boolean;
 }
-
-/** Live signal sent to the renderer after a plugin message changes. */
-export interface PluginMessageSignal {
-  sessionId: string;
-}

@@ -25,7 +25,6 @@
     "@pi/ui": "workspace:*",
     "@tanstack/react-query": "^5.105.0",
     "adm-zip": "0.6.1",
-    "playwright-core": "^1.61.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "sherpa-onnx-node": "^2.0.1",

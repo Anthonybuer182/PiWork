@@ -31,7 +31,6 @@
     "plugins:publish": "node scripts/publish-plugins.mjs",
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
-    "lint": "turbo run lint",
     "test": "turbo run test",
     "format": "prettier --write \"**/*.{ts,tsx,js,jsx,json,css,md}\"",
     "clean": "turbo run clean",

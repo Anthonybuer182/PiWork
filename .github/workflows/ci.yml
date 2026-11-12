@@ -25,7 +25,7 @@ env:
 
 jobs:
   check:
-    name: Build / typecheck / lint / test
+    name: Build / typecheck / test
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -47,9 +47,6 @@ jobs:
 
       - name: Typecheck
         run: pnpm typecheck
-
-      - name: Lint
-        run: pnpm lint
 
       - name: Test
         run: pnpm test

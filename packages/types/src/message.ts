@@ -140,10 +140,6 @@ export interface AssistantMessage extends Message {
   usage?: TokenUsage;
 }
 
-export interface SystemMessage extends Message {
-  role: 'system';
-}
-
 /**
  * A plugin-originated message in the timeline.
  *

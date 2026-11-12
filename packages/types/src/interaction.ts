@@ -86,13 +86,6 @@ export interface AskRequest {
  */
 export type AskAnswers = (string[] | null)[];
 
-/** Renderer → main: the user finished the card. */
-export interface AskResolution {
-  requestId: string;
-  sessionId: string;
-  answers: AskAnswers;
-}
-
 /** Minimum/asked limits, enforced in the tool before a card is ever shown. */
 export const MAX_ASK_QUESTIONS = 20;
 export const MAX_ASK_QUESTION_CHARS = 300;
