@@ -183,7 +183,9 @@ function handleFromBackend(msg) {
           sendToBackend({ type: 'call-result', id: msg.id, result: { result: fakeEvaluate(msg.params.expression) } });
           break;
         case 'chat.send':
-          sentChats.push(String(msg.params.text ?? ''));
+          // The composed instruction is `agentText`; `text` is only the
+          // user-facing question shown on the card.
+          sentChats.push(String(msg.params.agentText ?? msg.params.text ?? ''));
           sendToBackend({ type: 'call-result', id: msg.id, result: { ok: true } });
           break;
         case 'voice.speak':
