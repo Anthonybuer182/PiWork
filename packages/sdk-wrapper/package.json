@@ -21,6 +21,6 @@
     "exceljs": "^4.4.0"
   },
   "devDependencies": {
-    "@types/adm-zip": "^0.5.8"
+    "@types/adm-zip": "^0.6.0"
   }
 }
