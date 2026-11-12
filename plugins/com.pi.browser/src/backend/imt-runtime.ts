@@ -32,7 +32,7 @@ export const IMT_SOURCE = String.raw`
   if (existing && existing.__v === VERSION) return 'already';
   if (!document.body) return 'no-body';
 
-  var MAX_UNITS = 800;
+  var MAX_UNITS = 1200;
   var SKIP = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, IFRAME: 1, CANVAS: 1, SVG: 1, VIDEO: 1, AUDIO: 1, PRE: 1, CODE: 1, KBD: 1, SAMP: 1, TEXTAREA: 1, INPUT: 1, SELECT: 1, OPTION: 1 };
   var TEXT_BLOCK = { P: 1, H1: 1, H2: 1, H3: 1, H4: 1, H5: 1, H6: 1, LI: 1, TD: 1, TH: 1, DT: 1, DD: 1, BLOCKQUOTE: 1, FIGCAPTION: 1, CAPTION: 1, SUMMARY: 1, ADDRESS: 1 };
   var INLINE_UI = { A: 1, BUTTON: 1, LABEL: 1 };
@@ -284,8 +284,17 @@ export const IMT_SOURCE = String.raw`
     if (byEl.has(el)) return;
 
     var tag = el.tagName;
+    // Open shadow roots are a separate subtree: scan them alongside the light
+    // DOM (some component libraries put all their text there).
+    if (el.shadowRoot) {
+      var shadowKids = el.shadowRoot.children;
+      for (var sh = 0; sh < shadowKids.length; sh++) walk(shadowKids[sh], added);
+    }
+
     if (TEXT_BLOCK[tag]) { addBlock(el, added); return; }
-    if (INLINE_UI[tag]) { addInline(el, added); return; }
+    // A link/button that wraps block content is a card, not UI chrome: recurse
+    // instead of taking its whole (often >240 char) text as one inline unit.
+    if (INLINE_UI[tag] && !hasBlockChild(el)) { addInline(el, added); return; }
 
     if (hasBlockChild(el)) {
       for (var i = 0; i < el.children.length; i++) walk(el.children[i], added);
@@ -745,6 +754,7 @@ export const IMT_SOURCE = String.raw`
       frames: frames.length,
       blockedFrames: blocked,
       pageCjk: pageCjk,
+      htmlLang: String((document.documentElement && document.documentElement.lang) || '').toLowerCase(),
     };
   }
 
@@ -847,6 +857,7 @@ export const IMT_SOURCE = String.raw`
     hideExplain: hideExplain,
     showToast: showToast,
     pollOverlay: pollOverlay,
+    hasUnit: function (el) { return byEl.has(el); },
     status: status,
     restore: restore,
     disable: disable,

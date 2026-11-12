@@ -109,6 +109,8 @@
     #imt-row button:hover { background: hsl(var(--accent, 221 19% 17%)); color: hsl(var(--foreground, 210 20% 92%)); }
     #imt-row button.on { background: hsl(var(--accent, 221 19% 17%)); color: hsl(var(--foreground, 210 20% 92%)); }
     #imt-row button.primary { background: hsl(30 65% 45%); color: #fff; }
+    #imt-row button:disabled { opacity: 0.35; cursor: default; }
+    #imt-row button:disabled:hover { background: transparent; color: hsl(var(--muted-foreground, 217 9% 59%)); }
     #imt-row .ir-meta { color: hsl(var(--muted-foreground, 217 9% 59%)); padding: 0 4px; font-variant-numeric: tabular-nums; white-space: nowrap; }
     #imt-row .ir-retry { color: hsl(0 65% 65%); border-color: hsl(0 45% 38%); }
     #imt-row .ir-grow { flex: 1; min-width: 0; }
@@ -494,14 +496,10 @@
   </div>
 
   <div id="imt-row" hidden>
-    <div class="ir-group" id="ir-start">
-      <button type="button" data-imt-start="replace" class="primary">翻译</button>
-      <button type="button" data-imt-start="dual">双语</button>
-    </div>
-    <div class="ir-group" id="ir-modes" hidden>
-      <button type="button" data-imt-mode="dual">双语</button>
-      <button type="button" data-imt-mode="replace">替换</button>
-      <button type="button" data-imt-mode="source">原文</button>
+    <div class="ir-group" id="ir-modes">
+      <button type="button" data-imt-mode="dual" title="翻译并保留原文对照">双语</button>
+      <button type="button" data-imt-mode="replace" title="翻译并替换原文">替换</button>
+      <button type="button" data-imt-mode="source" title="显示原文">原文</button>
     </div>
     <span class="ir-meta" id="ir-meta"></span>
     <button type="button" id="ir-retry" class="ir-retry" hidden>重试</button>
@@ -585,7 +583,6 @@
       // dropdown in this page would be covered by the native view below.
       var imtBtn = document.getElementById('btn-imt');
       var imtRow = document.getElementById('imt-row');
-      var irStart = document.getElementById('ir-start');
       var irModes = document.getElementById('ir-modes');
       var irMeta = document.getElementById('ir-meta');
       var irActions = document.getElementById('ir-actions');
@@ -593,6 +590,7 @@
       var irRetry = document.getElementById('ir-retry');
       var irPause = irRead.querySelector('[data-imt-read="pause"]');
       var imtState = { mode: 'idle', done: 0, total: 0, read: null };
+      var imtTranslated = false;
 
       function showRow(show) {
         imtRow.hidden = !show;
@@ -611,15 +609,15 @@
 
         var read = st.read;
         var translated = busy || st.mode === 'dual' || st.mode === 'replace' || st.mode === 'source';
-        irStart.hidden = translated || !!read;
-        irModes.hidden = !translated || !!read;
+        imtTranslated = translated;
+        irModes.hidden = !!read;
         irActions.hidden = !!read;
         irRead.hidden = !read;
-        if (!imtRow.hidden) {
-          irModes.querySelectorAll('button[data-imt-mode]').forEach(function (b) {
-            b.classList.toggle('on', b.getAttribute('data-imt-mode') === st.mode);
-          });
-        }
+        irModes.querySelectorAll('button[data-imt-mode]').forEach(function (b) {
+          var mode = b.getAttribute('data-imt-mode');
+          b.classList.toggle('on', mode === st.mode);
+          b.disabled = mode === 'source' && !translated;
+        });
 
         var failed = st.failed || 0;
         irRetry.hidden = failed === 0;
@@ -672,8 +670,10 @@
         if (!b) return;
         if (b.id === 'ir-retry') { imtAct('imt.retry', {}); return; }
         var v;
-        if ((v = b.getAttribute('data-imt-start'))) imtAct('imt.start', { mode: v });
-        else if ((v = b.getAttribute('data-imt-mode'))) imtAct('imt.mode', { mode: v });
+        if ((v = b.getAttribute('data-imt-mode'))) {
+          if (v === 'source' && !imtTranslated) return;
+          imtAct(imtTranslated ? 'imt.mode' : 'imt.start', { mode: v });
+        }
         else if ((v = b.getAttribute('data-imt-act'))) imtAct('imt.' + v, {});
         else if ((v = b.getAttribute('data-imt-read'))) {
           if (v === 'pause') imtAct('imt.readPause', {});

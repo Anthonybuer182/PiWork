@@ -29,6 +29,8 @@ export interface ImtState {
   blockedFrames?: number;
   /** Share of CJK characters in a body sample (0-1). */
   pageCjk?: number;
+  /** <html lang>, lower-cased. */
+  htmlLang?: string;
 }
 
 interface ImtUnit {
@@ -49,6 +51,7 @@ interface RuntimeStatus {
   frames?: number;
   blockedFrames?: number;
   pageCjk?: number;
+  htmlLang?: string;
 }
 
 interface CacheEntry {
@@ -72,8 +75,10 @@ export interface ImtDeps {
   log: { warn: (message: string) => void };
 }
 
-const BATCH_MAX_UNITS = 10;
-const BATCH_MAX_CHARS = 1200;
+const BATCH_MAX_UNITS = 12;
+const BATCH_MAX_CHARS = 1500;
+/** Two workers: the host allows two concurrent ai.complete calls per plugin. */
+const TRANSLATE_CONCURRENCY = 2;
 const CACHE_MAX_ENTRIES = 500;
 const CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const POLL_IDLE_MS = 350;
@@ -122,6 +127,7 @@ export class PageTranslator {
       ...(this.lastError ? { error: this.lastError } : {}),
       ...(this.stats?.frames ? { frames: this.stats.frames, blockedFrames: this.stats.blockedFrames ?? 0 } : {}),
       ...(this.stats?.pageCjk !== undefined ? { pageCjk: this.stats.pageCjk } : {}),
+      ...(this.stats?.htmlLang ? { htmlLang: this.stats.htmlLang } : {}),
     };
   }
 
@@ -157,7 +163,8 @@ export class PageTranslator {
       throw new Error('页面注入失败，可能是受保护页面');
     }
     const initial = await this.status();
-    if (initial && (initial.pageCjk ?? 0) > 0.5) {
+    const lang = String(initial?.htmlLang || '');
+    if (/^zh/.test(lang) || (initial && (initial.pageCjk ?? 0) > 0.5)) {
       throw new Error('这个页面已经是中文，不需要翻译');
     }
     if (!initial || initial.total === 0) {
@@ -264,7 +271,9 @@ export class PageTranslator {
     try {
       while (!this.abort) {
         const batch = (await this.deps.evaluate(
-          'window.__piImt && window.__piImt.takeVisible ? window.__piImt.takeVisible(' + BATCH_MAX_UNITS + ') : null',
+          'window.__piImt && window.__piImt.takeVisible ? window.__piImt.takeVisible(' +
+            BATCH_MAX_UNITS * TRANSLATE_CONCURRENCY +
+            ') : null',
         )) as ImtUnit[] | null;
 
         if (this.abort) return;
@@ -352,19 +361,31 @@ export class PageTranslator {
     }
     if (Object.keys(hits).length > 0) await this.applyMap(hits);
 
-    for (const chunk of chunkUnits(todo)) {
-      if (this.abort) return;
-      const translated = await this.translateChunk(chunk);
-      const map: Record<string, string> = {};
-      const now = Date.now();
-      for (let i = 0; i < chunk.length; i++) {
-        const text = translated[i];
-        map[chunk[i].id] = text;
-        if (text) this.cache.set(keyOf(chunk[i].text), { t: text, at: now });
+    const chunks = chunkUnits(todo);
+    let next = 0;
+    const worker = async (): Promise<void> => {
+      while (!this.abort) {
+        const index = next++;
+        if (index >= chunks.length) return;
+        await this.handleChunk(chunks[index]);
       }
-      this.dirty = true;
-      await this.applyMap(map);
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(TRANSLATE_CONCURRENCY, chunks.length) }, () => worker()),
+    );
+  }
+
+  private async handleChunk(chunk: ImtUnit[]): Promise<void> {
+    const translated = await this.translateChunk(chunk);
+    const map: Record<string, string> = {};
+    const now = Date.now();
+    for (let i = 0; i < chunk.length; i++) {
+      const text = translated[i];
+      map[chunk[i].id] = text;
+      if (text) this.cache.set(keyOf(chunk[i].text), { t: text, at: now });
     }
+    this.dirty = true;
+    await this.applyMap(map);
   }
 
   /**

@@ -1249,7 +1249,7 @@ var IMT_SOURCE = String.raw`
   if (existing && existing.__v === VERSION) return 'already';
   if (!document.body) return 'no-body';
 
-  var MAX_UNITS = 800;
+  var MAX_UNITS = 1200;
   var SKIP = { SCRIPT: 1, STYLE: 1, NOSCRIPT: 1, IFRAME: 1, CANVAS: 1, SVG: 1, VIDEO: 1, AUDIO: 1, PRE: 1, CODE: 1, KBD: 1, SAMP: 1, TEXTAREA: 1, INPUT: 1, SELECT: 1, OPTION: 1 };
   var TEXT_BLOCK = { P: 1, H1: 1, H2: 1, H3: 1, H4: 1, H5: 1, H6: 1, LI: 1, TD: 1, TH: 1, DT: 1, DD: 1, BLOCKQUOTE: 1, FIGCAPTION: 1, CAPTION: 1, SUMMARY: 1, ADDRESS: 1 };
   var INLINE_UI = { A: 1, BUTTON: 1, LABEL: 1 };
@@ -1501,8 +1501,17 @@ var IMT_SOURCE = String.raw`
     if (byEl.has(el)) return;
 
     var tag = el.tagName;
+    // Open shadow roots are a separate subtree: scan them alongside the light
+    // DOM (some component libraries put all their text there).
+    if (el.shadowRoot) {
+      var shadowKids = el.shadowRoot.children;
+      for (var sh = 0; sh < shadowKids.length; sh++) walk(shadowKids[sh], added);
+    }
+
     if (TEXT_BLOCK[tag]) { addBlock(el, added); return; }
-    if (INLINE_UI[tag]) { addInline(el, added); return; }
+    // A link/button that wraps block content is a card, not UI chrome: recurse
+    // instead of taking its whole (often >240 char) text as one inline unit.
+    if (INLINE_UI[tag] && !hasBlockChild(el)) { addInline(el, added); return; }
 
     if (hasBlockChild(el)) {
       for (var i = 0; i < el.children.length; i++) walk(el.children[i], added);
@@ -1962,6 +1971,7 @@ var IMT_SOURCE = String.raw`
       frames: frames.length,
       blockedFrames: blocked,
       pageCjk: pageCjk,
+      htmlLang: String((document.documentElement && document.documentElement.lang) || '').toLowerCase(),
     };
   }
 
@@ -2064,6 +2074,7 @@ var IMT_SOURCE = String.raw`
     hideExplain: hideExplain,
     showToast: showToast,
     pollOverlay: pollOverlay,
+    hasUnit: function (el) { return byEl.has(el); },
     status: status,
     restore: restore,
     disable: disable,
@@ -2078,8 +2089,9 @@ var IMT_SOURCE = String.raw`
 `;
 
 // src/backend/imt.ts
-var BATCH_MAX_UNITS = 10;
-var BATCH_MAX_CHARS = 1200;
+var BATCH_MAX_UNITS = 12;
+var BATCH_MAX_CHARS = 1500;
+var TRANSLATE_CONCURRENCY = 2;
 var CACHE_MAX_ENTRIES = 500;
 var CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1e3;
 var POLL_IDLE_MS = 350;
@@ -2121,7 +2133,8 @@ var PageTranslator = class {
       url: this.url,
       ...this.lastError ? { error: this.lastError } : {},
       ...this.stats?.frames ? { frames: this.stats.frames, blockedFrames: this.stats.blockedFrames ?? 0 } : {},
-      ...this.stats?.pageCjk !== void 0 ? { pageCjk: this.stats.pageCjk } : {}
+      ...this.stats?.pageCjk !== void 0 ? { pageCjk: this.stats.pageCjk } : {},
+      ...this.stats?.htmlLang ? { htmlLang: this.stats.htmlLang } : {}
     };
   }
   /** A navigation happened: everything about the old document is gone. */
@@ -2153,7 +2166,8 @@ var PageTranslator = class {
       throw new Error("\u9875\u9762\u6CE8\u5165\u5931\u8D25\uFF0C\u53EF\u80FD\u662F\u53D7\u4FDD\u62A4\u9875\u9762");
     }
     const initial = await this.status();
-    if (initial && (initial.pageCjk ?? 0) > 0.5) {
+    const lang = String(initial?.htmlLang || "");
+    if (/^zh/.test(lang) || initial && (initial.pageCjk ?? 0) > 0.5) {
       throw new Error("\u8FD9\u4E2A\u9875\u9762\u5DF2\u7ECF\u662F\u4E2D\u6587\uFF0C\u4E0D\u9700\u8981\u7FFB\u8BD1");
     }
     if (!initial || initial.total === 0) {
@@ -2250,7 +2264,7 @@ var PageTranslator = class {
     try {
       while (!this.abort) {
         const batch = await this.deps.evaluate(
-          "window.__piImt && window.__piImt.takeVisible ? window.__piImt.takeVisible(" + BATCH_MAX_UNITS + ") : null"
+          "window.__piImt && window.__piImt.takeVisible ? window.__piImt.takeVisible(" + BATCH_MAX_UNITS * TRANSLATE_CONCURRENCY + ") : null"
         );
         if (this.abort) return;
         if (!Array.isArray(batch)) {
@@ -2328,19 +2342,30 @@ var PageTranslator = class {
       else todo.push(unit);
     }
     if (Object.keys(hits).length > 0) await this.applyMap(hits);
-    for (const chunk of chunkUnits(todo)) {
-      if (this.abort) return;
-      const translated = await this.translateChunk(chunk);
-      const map = {};
-      const now = Date.now();
-      for (let i = 0; i < chunk.length; i++) {
-        const text = translated[i];
-        map[chunk[i].id] = text;
-        if (text) this.cache.set(keyOf(chunk[i].text), { t: text, at: now });
+    const chunks = chunkUnits(todo);
+    let next = 0;
+    const worker = /* @__PURE__ */ __name(async () => {
+      while (!this.abort) {
+        const index = next++;
+        if (index >= chunks.length) return;
+        await this.handleChunk(chunks[index]);
       }
-      this.dirty = true;
-      await this.applyMap(map);
+    }, "worker");
+    await Promise.all(
+      Array.from({ length: Math.min(TRANSLATE_CONCURRENCY, chunks.length) }, () => worker())
+    );
+  }
+  async handleChunk(chunk) {
+    const translated = await this.translateChunk(chunk);
+    const map = {};
+    const now = Date.now();
+    for (let i = 0; i < chunk.length; i++) {
+      const text = translated[i];
+      map[chunk[i].id] = text;
+      if (text) this.cache.set(keyOf(chunk[i].text), { t: text, at: now });
     }
+    this.dirty = true;
+    await this.applyMap(map);
   }
   /**
    * Translate a chunk, splitting on failure until single segments: one bad
