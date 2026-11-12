@@ -86,8 +86,27 @@ export const IMT_SOURCE = String.raw`
     return false;
   }
 
+  /** Screen-reader-only text (clip, 1px, opacity 0) must never be surfaced. */
+  function isVisuallyHidden(el) {
+    var r = el.getBoundingClientRect();
+    if (r.width <= 1 || r.height <= 1) return true;
+    if (r.right <= 0) return true;
+    var cs = getComputedStyle(el);
+    if (parseFloat(cs.fontSize) <= 0) return true;
+    if (cs.opacity === '0') return true;
+    if (cs.clip && cs.clip !== 'auto') return true;
+    if (cs.clipPath && cs.clipPath !== 'none') return true;
+    if (cs.textIndent && parseFloat(cs.textIndent) < -1000) return true;
+    // Sprite text (logo over an image) is often fully transparent. Gradient
+    // text also has a transparent fill but paints a background, so keep that.
+    var gradientText = String(cs.backgroundClip || cs.webkitBackgroundClip || '').indexOf('text') >= 0;
+    if (!gradientText && (cs.color === 'rgba(0, 0, 0, 0)' || cs.webkitTextFillColor === 'rgba(0, 0, 0, 0)')) return true;
+    return false;
+  }
+
   function isVisible(el) {
     if (!el.getClientRects || el.getClientRects().length === 0) return false;
+    if (isVisuallyHidden(el)) return false;
     var cs = getComputedStyle(el);
     return cs.visibility !== 'hidden' && cs.display !== 'none';
   }
@@ -95,14 +114,27 @@ export const IMT_SOURCE = String.raw`
   function inViewport(el) {
     var r = el.getBoundingClientRect();
     var h = window.innerHeight || document.documentElement.clientHeight;
-    return r.bottom > -240 && r.top < h + 480;
+    return r.bottom > -120 && r.top < h + 240;
   }
 
   function textOf(el) {
     var parts = [];
+    var root = el;
     (function walkText(node) {
       for (var c = node.firstChild; c; c = c.nextSibling) {
-        if (c.nodeType === 3) { parts.push(c.nodeValue); continue; }
+        if (c.nodeType === 3) {
+          // Screen-reader-only text inside a visible element must not become
+          // the unit's text (a 1px span inside a logo link or a paragraph).
+          var owner = c.parentElement;
+          var hidden = false;
+          while (owner && owner !== root) {
+            if (isVisuallyHidden(owner)) { hidden = true; break; }
+            owner = owner.parentElement;
+          }
+          if (hidden) continue;
+          parts.push(c.nodeValue);
+          continue;
+        }
         if (c.nodeType !== 1) continue;
         if (c.tagName === 'BR') { parts.push(' '); continue; }
         if (c.hasAttribute('data-pi-imt')) continue;
@@ -111,6 +143,30 @@ export const IMT_SOURCE = String.raw`
       }
     })(el);
     return parts.join('').replace(/[ \t\r\n]+/g, ' ').trim();
+  }
+
+  function scriptCounts(text) {
+    var cjk = 0;
+    var latin = 0;
+    for (var i = 0; i < text.length; i++) {
+      var c = text.charCodeAt(i);
+      if ((c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3400 && c <= 0x4DBF) ||
+          (c >= 0xF900 && c <= 0xFAFF) || (c >= 0x3040 && c <= 0x30FF) ||
+          (c >= 0xAC00 && c <= 0xD7AF)) cjk++;
+      else if ((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 0xC0 && c <= 0x24F)) latin++;
+    }
+    return { cjk: cjk, latin: latin };
+  }
+
+  /** Chinese/Japanese/Korean text needs no Chinese translation. */
+  function normalizeText(text) {
+    return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  function isMostlyCjk(text) {
+    var n = scriptCounts(text);
+    if (n.cjk < 2) return false;
+    return n.cjk / (n.cjk + n.latin) > 0.35;
   }
 
   function hasLetters(text) {
@@ -179,7 +235,7 @@ export const IMT_SOURCE = String.raw`
     if (list.length >= MAX_UNITS) return;
     if (!isVisible(el)) return;
     var text = textOf(el);
-    if (text.length < 2 || !hasLetters(text)) return;
+    if (text.length < 2 || !hasLetters(text) || isMostlyCjk(text)) return;
     makeUnit(el, 'block', text, added);
   }
 
@@ -187,7 +243,7 @@ export const IMT_SOURCE = String.raw`
     if (list.length >= MAX_UNITS) return;
     if (!isVisible(el)) return;
     var text = textOf(el);
-    if (text.length < 2 || text.length > 240 || !hasLetters(text)) return;
+    if (text.length < 2 || text.length > 240 || !hasLetters(text) || isMostlyCjk(text)) return;
     makeUnit(el, 'inline', text, added);
   }
 
@@ -199,7 +255,7 @@ export const IMT_SOURCE = String.raw`
     var val = el.getAttribute(attr);
     if (!val) return;
     val = val.trim();
-    if (val.length < 2 || val.length > 160 || !hasLetters(val)) return;
+    if (val.length < 2 || val.length > 160 || !hasLetters(val) || isMostlyCjk(val)) return;
     var u = {
       id: 'a' + (++seq),
       el: el,
@@ -408,10 +464,16 @@ export const IMT_SOURCE = String.raw`
       if (!u) continue;
       var text = String(map[id] == null ? '' : map[id]).trim();
       u.tr = text;
-      if (text) {
+      var identical = text.length > 0 && normalizeText(text) === normalizeText(u.src);
+      if (text && !identical) {
         u.state = 'done';
         if (u.el && u.el.removeAttribute) u.el.removeAttribute('data-pi-imt-failed');
         render(u);
+      } else if (text) {
+        // The model returned the source unchanged (names, brand + Chinese
+        // labels): rendering it again would just duplicate the line.
+        u.state = 'done';
+        unrender(u);
       } else {
         unrender(u);
         u.state = 'failed';
@@ -655,6 +717,9 @@ export const IMT_SOURCE = String.raw`
     var done = 0;
     var failed = 0;
     var pendingVisible = 0;
+    var sample = String((document.body && document.body.innerText) || '').slice(0, 3000);
+    var script = scriptCounts(sample);
+    var pageCjk = script.cjk + script.latin > 0 ? script.cjk / (script.cjk + script.latin) : 0;
     var frames = document.querySelectorAll('iframe');
     var blocked = 0;
     for (var f = 0; f < frames.length; f++) {
@@ -679,6 +744,7 @@ export const IMT_SOURCE = String.raw`
       visible: visible.size,
       frames: frames.length,
       blockedFrames: blocked,
+      pageCjk: pageCjk,
     };
   }
 

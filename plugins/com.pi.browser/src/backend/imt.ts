@@ -27,6 +27,8 @@ export interface ImtState {
   /** iframes on the page (blocked = cross-origin, cannot be translated). */
   frames?: number;
   blockedFrames?: number;
+  /** Share of CJK characters in a body sample (0-1). */
+  pageCjk?: number;
 }
 
 interface ImtUnit {
@@ -46,6 +48,7 @@ interface RuntimeStatus {
   visible: number;
   frames?: number;
   blockedFrames?: number;
+  pageCjk?: number;
 }
 
 interface CacheEntry {
@@ -118,6 +121,7 @@ export class PageTranslator {
       url: this.url,
       ...(this.lastError ? { error: this.lastError } : {}),
       ...(this.stats?.frames ? { frames: this.stats.frames, blockedFrames: this.stats.blockedFrames ?? 0 } : {}),
+      ...(this.stats?.pageCjk !== undefined ? { pageCjk: this.stats.pageCjk } : {}),
     };
   }
 
@@ -151,6 +155,13 @@ export class PageTranslator {
     }
     if (!(await this.ensureInstalled())) {
       throw new Error('页面注入失败，可能是受保护页面');
+    }
+    const initial = await this.status();
+    if (initial && (initial.pageCjk ?? 0) > 0.5) {
+      throw new Error('这个页面已经是中文，不需要翻译');
+    }
+    if (!initial || initial.total === 0) {
+      throw new Error('这个页面没有可翻译的文字');
     }
     await this.deps.evaluate('window.__piImt.setMode(' + JSON.stringify(mode) + ')');
     await this.loadCache();
@@ -344,7 +355,6 @@ export class PageTranslator {
     for (const chunk of chunkUnits(todo)) {
       if (this.abort) return;
       const translated = await this.translateChunk(chunk);
-      if (!translated) continue;
       const map: Record<string, string> = {};
       const now = Date.now();
       for (let i = 0; i < chunk.length; i++) {
@@ -357,14 +367,22 @@ export class PageTranslator {
     }
   }
 
-  private async translateChunk(chunk: ImtUnit[]): Promise<string[] | null> {
+  /**
+   * Translate a chunk, splitting on failure until single segments: one bad
+   * item (a stray quote, a length mismatch) must not fail the other nine.
+   * Empty strings in the result mark the segments that failed.
+   */
+  private async translateChunk(chunk: ImtUnit[]): Promise<string[]> {
     const first = await this.request(chunk);
     if (first) return first;
-    // One retry: a malformed array is usually a glitch, not a permanent state.
-    const second = await this.request(chunk);
-    if (second) return second;
-    await this.fail(chunk.map((u) => u.id));
-    return null;
+    if (chunk.length > 1) {
+      const mid = Math.ceil(chunk.length / 2);
+      const left = await this.translateChunk(chunk.slice(0, mid));
+      const right = await this.translateChunk(chunk.slice(mid));
+      return left.concat(right);
+    }
+    this.deps.log.warn('imt segment failed: ' + chunk[0].text.slice(0, 60));
+    return [''];
   }
 
   private async request(chunk: ImtUnit[]): Promise<string[] | null> {
@@ -377,7 +395,10 @@ export class PageTranslator {
         maxTokens,
         timeoutMs: 90_000,
       });
-      return parseTranslations(String(res?.text ?? ''), chunk.length);
+      const raw = String(res?.text ?? '');
+      const parsed = parseTranslations(raw, chunk.length);
+      if (!parsed) this.deps.log.warn('imt parse mismatch (' + chunk.length + '): ' + raw.slice(0, 160));
+      return parsed;
     } catch (err) {
       this.deps.log.warn('imt translate failed: ' + describe(err));
       return null;
@@ -391,12 +412,7 @@ export class PageTranslator {
     );
   }
 
-  private async fail(ids: string[]): Promise<void> {
-    if (ids.length === 0) return;
-    await this.deps.evaluate(
-      'window.__piImt && window.__piImt.fail ? window.__piImt.fail(' + JSON.stringify(ids) + ') : 0',
-    );
-  }
+
 
   private async status(): Promise<RuntimeStatus | null> {
     const value = await this.deps.evaluate(
