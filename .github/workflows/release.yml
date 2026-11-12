@@ -311,6 +311,12 @@ jobs:
       # 唯一需要写权限的 job：创建 Release 并上传 Assets。
       contents: write
     steps:
+      # body_path 指向仓库里的文件。这个 job 以前没有 checkout，文件根本不存在，
+      # action-gh-release 只打一行 warning 就退回空 body —— v0.3.3 的 Release
+      # notes 里因此没有安装提示，而且流水线照样绿。checkout 加下面的断言把
+      # 这类静默降级变成构建失败。
+      - uses: actions/checkout@v7
+
       # 只取安装包产物。不写 pattern 会把 plugin-market 那个 artifact 也下载
       # 下来，于是每个插件的 zip 和 index.json 都会作为 Release asset 挂出去
       # ——它们是打进安装包里的中间产物，不是给用户下载的文件。
@@ -319,6 +325,15 @@ jobs:
           pattern: installers-*
           path: artifacts
           merge-multiple: true
+
+      # body_path 读不到时 action 只警告不报错（见 util.ts 的 releaseBody），
+      # 所以文件在不在必须自己断。
+      - name: Check the install notes are present
+        run: |
+          test -s .github/release-notes/install.md || {
+            echo "::error::.github/release-notes/install.md 缺失或为空，Release notes 里不会有安装提示"
+            exit 1
+          }
 
       - uses: softprops/action-gh-release@v3
         with:

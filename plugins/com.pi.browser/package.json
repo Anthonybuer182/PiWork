@@ -1,6 +1,6 @@
 {
   "name": "com.pi.browser",
-  "version": "0.9.31",
+  "version": "0.9.32",
   "private": true,
   "description": "浏览器自动化 — 给 agent 的三个工具(打开网页 / 读当前页 / 截图)",
   "type": "module",

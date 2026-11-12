@@ -66,6 +66,60 @@
     #toolbar button:disabled { opacity: 0.4; cursor: default; }
     #toolbar button:disabled:hover { background: transparent; }
     #btn-star.on { color: hsl(43 90% 62%); }
+
+    /* Whole-page translation: the menu is a NATIVE popup (piSDK.showPopupMenu),
+       because a DOM dropdown would be covered by the engine view below. */
+    #btn-imt {
+      width: auto;
+      padding: 0 8px;
+      font: 600 12px/1 inherit;
+      letter-spacing: 0.02em;
+    }
+    #btn-imt.on { background: hsl(var(--accent, 221 19% 17%)); color: hsl(var(--foreground, 210 20% 92%)); }
+    #btn-imt.busy { color: hsl(43 90% 62%); }
+    /* Second toolbar row: all whole-page controls live here, above the engine
+       view, so nothing is ever covered by the page. */
+    #imt-row {
+      flex: none;
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      height: 36px;
+      padding: 0 8px;
+      border-bottom: 1px solid hsl(var(--border, 218 14% 20%));
+      background: hsl(var(--card, 222 15% 11%));
+      font-size: 12px;
+      overflow: hidden;
+    }
+    #imt-row[hidden] { display: none; }
+    /* The UA's [hidden] rule loses to `.ir-group { display:flex }`; keep hiding explicit. */
+    #imt-row [hidden] { display: none !important; }
+    #imt-row .ir-group { display: flex; align-items: center; gap: 2px; flex: none; }
+    #imt-row button {
+      height: 26px;
+      padding: 0 8px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: transparent;
+      color: hsl(var(--muted-foreground, 217 9% 59%));
+      font: inherit;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    #imt-row button:hover { background: hsl(var(--accent, 221 19% 17%)); color: hsl(var(--foreground, 210 20% 92%)); }
+    #imt-row button.on { background: hsl(var(--accent, 221 19% 17%)); color: hsl(var(--foreground, 210 20% 92%)); }
+    #imt-row button.primary { background: hsl(30 65% 45%); color: #fff; }
+    #imt-row button:disabled { opacity: 0.35; cursor: default; }
+    #imt-row button:disabled:hover { background: transparent; color: hsl(var(--muted-foreground, 217 9% 59%)); }
+    #imt-row .ir-meta { color: hsl(var(--muted-foreground, 217 9% 59%)); padding: 0 4px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    #imt-row .ir-retry { color: hsl(0 65% 65%); border-color: hsl(0 45% 38%); }
+    #imt-row .ir-grow { flex: 1; min-width: 0; }
+    #imt-row .ir-close { font-size: 15px; line-height: 1; }
+    #imt-row .ir-icon { width: 28px; padding: 0; }
+    @media (max-width: 560px) {
+      #imt-row { gap: 2px; padding: 0 4px; }
+      #imt-row .ir-hide-sm { display: none; }
+    }
     #btn-star.on svg { fill: currentColor; }
     #url {
       flex: 1;
@@ -437,7 +491,31 @@
     <button id="btn-forward" title="前进" aria-label="前进"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/><path d="m12 5 7 7-7 7"/></svg></button>
     <button id="btn-reload" title="刷新" aria-label="刷新"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12a9 9 0 0 1 9-9 9.75 9.75 0 0 1 6.74 2.74L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-9 9 9.75 9.75 0 0 1-6.74-2.74L3 16"/><path d="M8 16H3v5"/></svg></button>
     <button id="btn-star" title="收藏此页" aria-label="收藏此页" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg></button>
+    <button id="btn-imt" title="整页翻译" aria-label="整页翻译">译</button>
     <input id="url" type="text" spellcheck="false" placeholder="输入网址,回车打开" autocomplete="off" />
+  </div>
+
+  <div id="imt-row" hidden>
+    <div class="ir-group" id="ir-modes">
+      <button type="button" data-imt-mode="dual" title="翻译并保留原文对照">双语</button>
+      <button type="button" data-imt-mode="replace" title="翻译并替换原文">替换</button>
+      <button type="button" data-imt-mode="source" title="显示原文">原文</button>
+    </div>
+    <span class="ir-meta" id="ir-meta"></span>
+    <button type="button" id="ir-retry" class="ir-retry" hidden>重试</button>
+    <span class="ir-grow"></span>
+    <div class="ir-group" id="ir-actions">
+      <button type="button" data-imt-act="read">朗读</button>
+      <button type="button" data-imt-act="explain" class="ir-hide-sm">解释</button>
+      <button type="button" data-imt-act="save" class="ir-hide-sm">收藏</button>
+    </div>
+    <div class="ir-group" id="ir-read" hidden>
+      <button type="button" data-imt-read="prev" class="ir-icon" title="上一段">‹</button>
+      <button type="button" data-imt-read="pause" class="ir-icon" title="暂停">❚❚</button>
+      <button type="button" data-imt-read="next" class="ir-icon" title="下一段">›</button>
+      <button type="button" data-imt-read="stop">停止</button>
+    </div>
+    <button type="button" class="ir-close" id="ir-close" title="收起">×</button>
   </div>
 
   <div id="omnibox" hidden>
@@ -499,6 +577,156 @@
           console.warn(method, e && e.message ? e.message : e);
         });
       }
+
+      // ── Theme relay for the in-page selection popup ──
+      // The popup lives in the web page, a separate document that never sees
+      // the shell tokens this panel is styled with. Push them (and the
+      // resolved light/dark) to the backend so the popup matches the app
+      // instead of guessing from the OS preference.
+      //
+      // Only tokens the shell actually pushed count: the inline style is where
+      // plugin-sdk-js lands them. Reading computed styles here would also pick
+      // up this page's own blue-ish fallbacks and ship those to the popup,
+      // which is worse than letting the popup use its own neutral fallbacks.
+      var SEL_THEME_KEYS = [
+        'background', 'foreground', 'card', 'card-foreground', 'muted', 'muted-foreground',
+        'accent', 'accent-foreground', 'border', 'ring', 'primary', 'primary-foreground',
+        'radius', 'font-sans'
+      ];
+      function selThemePayload() {
+        var rootStyle = document.documentElement.style;
+        var tokens = {};
+        var count = 0;
+        for (var i = 0; i < SEL_THEME_KEYS.length; i++) {
+          var v = rootStyle.getPropertyValue('--' + SEL_THEME_KEYS[i]).trim();
+          if (v) { tokens[SEL_THEME_KEYS[i]] = v; count++; }
+        }
+        if (!count) return null; // the shell has not pushed its palette yet
+        // The token components are HSL, so the background's lightness is the
+        // theme: 100% is light, 13% is dark.
+        var dark = true;
+        var m = /(\d+(?:\.\d+)?)%\s*$/.exec(tokens.background || tokens.foreground || '');
+        if (m) dark = parseFloat(m[1]) < 50;
+        else if (window.matchMedia) dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        return { dark: dark, tokens: tokens };
+      }
+      var selThemeTimer = null;
+      function pushSelTheme() {
+        selThemeTimer = null;
+        var payload = selThemePayload();
+        if (payload) act('sel.theme', payload);
+      }
+      new MutationObserver(function () {
+        if (selThemeTimer) clearTimeout(selThemeTimer);
+        selThemeTimer = setTimeout(pushSelTheme, 150);
+      }).observe(document.documentElement, { attributes: true, attributeFilter: ['style', 'class'] });
+      setTimeout(pushSelTheme, 400);
+
+      // ── Whole-page translation row ──
+      // All controls live in a real toolbar row above the engine view: a DOM
+      // dropdown in this page would be covered by the native view below.
+      var imtBtn = document.getElementById('btn-imt');
+      var imtRow = document.getElementById('imt-row');
+      var irModes = document.getElementById('ir-modes');
+      var irMeta = document.getElementById('ir-meta');
+      var irActions = document.getElementById('ir-actions');
+      var irRead = document.getElementById('ir-read');
+      var irRetry = document.getElementById('ir-retry');
+      var irPause = irRead.querySelector('[data-imt-read="pause"]');
+      var imtState = { mode: 'idle', done: 0, total: 0, read: null };
+      var imtTranslated = false;
+
+      function showRow(show) {
+        imtRow.hidden = !show;
+        paintImt();
+        if (show) imtAct('imt.state', {});
+      }
+
+      function paintImt() {
+        var st = imtState;
+        var busy = st.mode === 'translating';
+        imtBtn.classList.toggle('busy', busy);
+        imtBtn.classList.toggle('on', !imtRow.hidden);
+        imtBtn.setAttribute('aria-pressed', imtRow.hidden ? 'false' : 'true');
+        imtBtn.textContent = imtRow.hidden ? '译 ▾' : '译 ▴';
+        imtBtn.title = st.error ? '整页翻译：' + st.error : (imtRow.hidden ? '打开整页工具栏' : '收起整页工具栏');
+
+        var read = st.read;
+        var translated = busy || st.mode === 'dual' || st.mode === 'replace' || st.mode === 'source';
+        imtTranslated = translated;
+        irModes.hidden = !!read;
+        irActions.hidden = !!read;
+        irRead.hidden = !read;
+        irModes.querySelectorAll('button[data-imt-mode]').forEach(function (b) {
+          var mode = b.getAttribute('data-imt-mode');
+          b.classList.toggle('on', mode === st.mode);
+          b.disabled = mode === 'source' && !translated;
+        });
+
+        var failed = st.failed || 0;
+        irRetry.hidden = failed === 0;
+        irRetry.textContent = '重试 ' + failed;
+        irRetry.title = '有 ' + failed + ' 段翻译失败，点此重试';
+
+        var meta = '';
+        if (read) {
+          meta = '朗读中 ' + ((read.index || 0) + 1) + '/' + (read.total || 0) + (read.layer ? ' · ' + read.layer : '');
+          irPause.textContent = read.paused ? '▶' : '❚❚';
+          irPause.title = read.paused ? '继续' : '暂停';
+        } else if (busy) {
+          meta = (st.done || 0) + '/' + (st.total || 0);
+        }
+        irMeta.textContent = imtError || meta;
+        irMeta.style.color = imtError ? 'hsl(0 65% 65%)' : '';
+      }
+
+      var imtError = '';
+      function renderImt(st) {
+        if (!st) return;
+        imtState = st;
+        imtError = st.error || '';
+        paintImt();
+      }
+
+      function imtAct(method, params) {
+        imtError = '';
+        return window.piSDK.request(method, params).then(function (st) {
+          if (st && typeof st === 'object' && st.mode) renderImt(st);
+          return st;
+        }).catch(function (e) {
+          imtError = (e && e.message) ? e.message : '操作失败';
+          if (imtRow.hidden) {
+            imtRow.hidden = false;
+            paintImt();
+          } else {
+            paintImt();
+          }
+        });
+      }
+
+      imtBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        showRow(imtRow.hidden);
+      });
+      document.getElementById('ir-close').addEventListener('click', function () { showRow(false); });
+      imtRow.addEventListener('click', function (e) {
+        var b = e.target.closest('button');
+        if (!b) return;
+        if (b.id === 'ir-retry') { imtAct('imt.retry', {}); return; }
+        var v;
+        if ((v = b.getAttribute('data-imt-mode'))) {
+          if (v === 'source' && !imtTranslated) return;
+          imtAct(imtTranslated ? 'imt.mode' : 'imt.start', { mode: v });
+        }
+        else if ((v = b.getAttribute('data-imt-act'))) imtAct('imt.' + v, {});
+        else if ((v = b.getAttribute('data-imt-read'))) {
+          if (v === 'pause') imtAct('imt.readPause', {});
+          else if (v === 'next') imtAct('imt.readNext', {});
+          else if (v === 'prev') imtAct('imt.readPrev', {});
+          else imtAct('imt.readStop', {});
+        }
+      });
+      paintImt();
 
       // ── Tab strip ──
       var tabsEl = document.getElementById('tabs');
@@ -1410,6 +1638,8 @@
           updateStar();
           syncNewTab();
           if (!omnibox.hidden) refreshList();
+        } else if (msg.event === 'ui.imt') {
+          renderImt(msg.data);
         } else if (msg.event === 'ui.tabs') {
           state.tabs = msg.data.tabs || [];
           state.activeTabId = String(msg.data.activeTabId || '');

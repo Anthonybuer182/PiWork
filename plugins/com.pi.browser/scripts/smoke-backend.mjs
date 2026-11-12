@@ -30,7 +30,7 @@ const voiceCalls = [];
  * ONLY channel into the page, so the fake reads the expression to tell which
  * injected global it touches, and answers the way the real page would.
  */
-const fakePage = { installed: false, action: null, notes: [], toasts: [], clips: [], disabled: 0 };
+const fakePage = { installed: false, action: null, notes: [], toasts: [], clips: [], disabled: 0, theme: null };
 
 function fakeEvaluate(expression) {
   // Order matters: the inject source also mentions __piSelDisable (it defines
@@ -43,6 +43,11 @@ function fakeEvaluate(expression) {
   if (/__piSelDisable \?/.test(expression)) {
     fakePage.installed = false;
     fakePage.disabled++;
+    return true;
+  }
+  if (/__piSelTheme \?/.test(expression)) {
+    const m = expression.match(/__piSelTheme\((\{.*\})\)/s);
+    fakePage.theme = m ? JSON.parse(m[1]) : null;
     return true;
   }
   if (expression.includes('__piNoteShow')) {
@@ -183,7 +188,9 @@ function handleFromBackend(msg) {
           sendToBackend({ type: 'call-result', id: msg.id, result: { result: fakeEvaluate(msg.params.expression) } });
           break;
         case 'chat.send':
-          sentChats.push(String(msg.params.text ?? ''));
+          // The composed instruction is `agentText`; `text` is only the
+          // user-facing question shown on the card.
+          sentChats.push(String(msg.params.agentText ?? msg.params.text ?? ''));
           sendToBackend({ type: 'call-result', id: msg.id, result: { ok: true } });
           break;
         case 'voice.speak':
@@ -569,6 +576,20 @@ check(
 await panelRequest('s1', 'settings.setSelPopup', { on: true });
 await new Promise((r) => setTimeout(r, 900)); // let an injection attempt land
 check('the popup is installed into the page', fakePage.installed === true, JSON.stringify(fakePage));
+
+// The panel's palette reaches the page, minus keys the popup cannot use.
+const themeReq = await panelRequest('s0', 'sel.theme', {
+  dark: true,
+  tokens: { card: '0 0% 16%', foreground: '0 0% 92%', 'font-sans': 'system-ui', bogus: 'red' },
+});
+check(
+  'sel.theme reaches the page and drops unknown keys',
+  themeReq?.result?.ok === true &&
+    fakePage.theme?.dark === true &&
+    fakePage.theme?.tokens?.card === '0 0% 16%' &&
+    !('bogus' in (fakePage.theme?.tokens ?? {})),
+  JSON.stringify({ result: themeReq?.result, theme: fakePage.theme }),
+);
 
 // The user clicks 收藏 on the popup — the list comes back into the popup.
 fakePage.action = { action: '收藏', text: '选中的这段话', url: 'https://example.com/', title: 'Example Domain' };
