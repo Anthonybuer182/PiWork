@@ -455,13 +455,20 @@ export const IMT_SOURCE = String.raw`
     });
   }
 
-  function highlight(id) {
+  /**
+   * Highlight the layer being read: 'tr' marks the appended translation node
+   * (or the source element in replace mode, where the translation lives there),
+   * 'src' marks the source block.
+   */
+  function highlight(id, layer) {
     clearHighlight();
     var u = units[id];
     if (!u) return false;
-    u.el.setAttribute('data-pi-imt-hl', '1');
-    try { u.el.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
-    catch (e) { u.el.scrollIntoView(); }
+    var target = layer === 'tr' && u.node && u.node.isConnected ? u.node : u.el;
+    if (!target) return false;
+    target.setAttribute('data-pi-imt-hl', '1');
+    try { target.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+    catch (e) { target.scrollIntoView(); }
     return true;
   }
 

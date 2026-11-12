@@ -1672,13 +1672,20 @@ var IMT_SOURCE = String.raw`
     });
   }
 
-  function highlight(id) {
+  /**
+   * Highlight the layer being read: 'tr' marks the appended translation node
+   * (or the source element in replace mode, where the translation lives there),
+   * 'src' marks the source block.
+   */
+  function highlight(id, layer) {
     clearHighlight();
     var u = units[id];
     if (!u) return false;
-    u.el.setAttribute('data-pi-imt-hl', '1');
-    try { u.el.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
-    catch (e) { u.el.scrollIntoView(); }
+    var target = layer === 'tr' && u.node && u.node.isConnected ? u.node : u.el;
+    if (!target) return false;
+    target.setAttribute('data-pi-imt-hl', '1');
+    try { target.scrollIntoView({ block: 'center', behavior: 'smooth' }); }
+    catch (e) { target.scrollIntoView(); }
     return true;
   }
 
@@ -3047,7 +3054,7 @@ async function imtStartRead(ctx, binding) {
   );
   const items = buildReadQueue(units, mode);
   if (items.length === 0) throw new Error("\u8FD9\u4E2A\u9875\u9762\u6CA1\u6709\u53EF\u6717\u8BFB\u7684\u6B63\u6587");
-  binding.read = { items, index: 0, speaking: false, paused: false };
+  binding.read = { items, index: 0, speaking: false, paused: false, ignoreEndCount: 0 };
   imtActiveRead = binding;
   await imtSpeakCurrent(ctx, binding);
   imtPublish(ctx, binding);
@@ -3062,7 +3069,10 @@ async function imtSpeakCurrent(ctx, binding) {
     return;
   }
   const item = read.items[read.index];
-  await binding.evaluate("window.__piImt && window.__piImt.highlight ? window.__piImt.highlight(" + JSON.stringify(item.id) + ") : null");
+  const layer = item.layer === "\u8BD1\u6587" ? "tr" : "src";
+  await binding.evaluate(
+    "window.__piImt && window.__piImt.highlight ? window.__piImt.highlight(" + JSON.stringify(item.id) + ", " + JSON.stringify(layer) + ") : null"
+  );
   read.speaking = true;
   read.paused = false;
   imtPublish(ctx, binding);
@@ -3089,6 +3099,10 @@ async function imtOnPlayback(ctx, data) {
   const binding = imtActiveRead;
   if (!binding || !binding.read || data.playing !== false) return;
   if (data.key && !String(data.key).startsWith("plugin:")) return;
+  if (binding.read.ignoreEndCount > 0) {
+    binding.read.ignoreEndCount -= 1;
+    return;
+  }
   if (!binding.read.speaking) return;
   binding.read.speaking = false;
   binding.read.index += 1;
@@ -3102,6 +3116,7 @@ async function imtPauseRead(ctx, binding) {
     await imtSpeakCurrent(ctx, binding);
   } else {
     read.paused = true;
+    if (read.speaking) read.ignoreEndCount += 1;
     read.speaking = false;
     try {
       await ctx.call("voice.stop", {});
@@ -3115,6 +3130,7 @@ __name(imtPauseRead, "imtPauseRead");
 async function imtStepRead(ctx, binding, delta) {
   const read = binding.read;
   if (!read) return imtStateOf(binding);
+  if (read.speaking) read.ignoreEndCount += 1;
   read.speaking = false;
   try {
     await ctx.call("voice.stop", {});

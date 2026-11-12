@@ -776,6 +776,8 @@ interface ImtReadState {
   index: number;
   speaking: boolean;
   paused: boolean;
+  /** Playback-end events caused by our own voice.stop, not by a finished item. */
+  ignoreEndCount: number;
 }
 
 const imtBindings = new Map<string, ImtBinding>();
@@ -901,7 +903,7 @@ async function imtStartRead(ctx: PluginContext, binding: ImtBinding): Promise<Re
   );
   const items = buildReadQueue(units, mode);
   if (items.length === 0) throw new Error('这个页面没有可朗读的正文');
-  binding.read = { items, index: 0, speaking: false, paused: false };
+  binding.read = { items, index: 0, speaking: false, paused: false, ignoreEndCount: 0 };
   imtActiveRead = binding;
   await imtSpeakCurrent(ctx, binding);
   imtPublish(ctx, binding);
@@ -916,7 +918,11 @@ async function imtSpeakCurrent(ctx: PluginContext, binding: ImtBinding): Promise
     return;
   }
   const item = read.items[read.index];
-  await binding.evaluate('window.__piImt && window.__piImt.highlight ? window.__piImt.highlight(' + JSON.stringify(item.id) + ') : null');
+  const layer = item.layer === '译文' ? 'tr' : 'src';
+  await binding.evaluate(
+    'window.__piImt && window.__piImt.highlight ? window.__piImt.highlight(' +
+      JSON.stringify(item.id) + ', ' + JSON.stringify(layer) + ') : null',
+  );
   read.speaking = true;
   read.paused = false;
   imtPublish(ctx, binding);
@@ -949,6 +955,12 @@ async function imtOnPlayback(ctx: PluginContext, data: { key?: string; playing?:
   const binding = imtActiveRead;
   if (!binding || !binding.read || data.playing !== false) return;
   if (data.key && !String(data.key).startsWith('plugin:')) return;
+  // A deliberate stop (pause / next / prev) also reports playing:false. That
+  // event may land after the next item already started; count it and ignore.
+  if (binding.read.ignoreEndCount > 0) {
+    binding.read.ignoreEndCount -= 1;
+    return;
+  }
   if (!binding.read.speaking) return;
   binding.read.speaking = false;
   binding.read.index += 1;
@@ -963,6 +975,7 @@ async function imtPauseRead(ctx: PluginContext, binding: ImtBinding): Promise<Re
     await imtSpeakCurrent(ctx, binding);
   } else {
     read.paused = true;
+    if (read.speaking) read.ignoreEndCount += 1;
     read.speaking = false;
     try {
       await ctx.call('voice.stop', {});
@@ -978,6 +991,7 @@ async function imtPauseRead(ctx: PluginContext, binding: ImtBinding): Promise<Re
 async function imtStepRead(ctx: PluginContext, binding: ImtBinding, delta: number): Promise<Record<string, unknown>> {
   const read = binding.read;
   if (!read) return imtStateOf(binding);
+  if (read.speaking) read.ignoreEndCount += 1;
   read.speaking = false;
   try {
     await ctx.call('voice.stop', {});
